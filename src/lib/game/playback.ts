@@ -230,6 +230,13 @@ export function batterRunner(tl: PlayTimeline): RunnerAnim | null {
 
 /** 연출용 야수 이동 속도 (m/s). 판정에 쓰이는 값이 아니라 보기 좋은 근사치다. */
 const FIELDER_SPEED = 7.4;
+/**
+ * 타구를 보고 첫 발을 떼기까지 (s).
+ * 야수는 공이 떨어지기를 기다렸다가 뛰는 게 아니라, 타구를 판단하자마자
+ * 낙구 지점으로 출발해 미리 가서 기다린다. fielding.reactionTime과 같은 뜻이지만
+ * 이쪽은 연출용이라 포지션별 편차 없이 하나로 둔다.
+ */
+const BREAK_DELAY = 0.24;
 /** 중계 플레이에서 받아 다시 던지기까지 */
 const RELAY_PAUSE = 0.24;
 /** 실책일 때 공을 더듬는 시간의 상한 (초) */
@@ -306,11 +313,15 @@ function buildFieldAnim(result: PitchResult): FieldAnim | null {
   // 실책이면 공에는 먼저 닿고, 확보만 늦어진다 (더듬는 연출)
   const secure = Math.max(0.1, play.secureTime);
   const reach = play.error ? Math.max(bb.hangTime, secure - FUMBLE_MAX) : secure;
-  const start = clamp(reach - runUp / FIELDER_SPEED, 0, reach);
+  // 타구를 보자마자 낙구 지점으로 출발한다. 도착이 포구 시각보다 이르면
+  // 그 자리에서 공을 기다린다(뜬공을 미리 가서 잡는 모습). 늦게 출발시켜
+  // 도착 시각을 맞추면 야수가 공이 떨어질 때까지 멀뚱히 서 있게 된다.
+  const start = Math.min(BREAK_DELAY, reach);
+  const arrive = Math.min(reach, start + runUp / FIELDER_SPEED);
 
   const chase: FielderChase = {
     pos: play.primary,
-    legs: [{ from: home, to: ball, start, end: reach }],
+    legs: [{ from: home, to: ball, start, end: arrive }],
     reach,
     secure,
     caught: play.caught,
@@ -351,9 +362,16 @@ function buildFieldAnim(result: PitchResult): FieldAnim | null {
     throws.push({ from: origin, to: bag, start: begin, end });
     if (cover !== play.primary && !covers.some((c) => c.pos === cover)) {
       const spot = DEFENSE_SPOTS[cover];
+      // 베이스 커버도 타구와 동시에 출발해 미리 가서 송구를 기다린다
+      const coverStart = Math.min(BREAK_DELAY, end);
       covers.push({
         pos: cover,
-        leg: { from: spot, to: bag, start: Math.max(0, end - dist2d(spot, bag) / FIELDER_SPEED), end },
+        leg: {
+          from: spot,
+          to: bag,
+          start: coverStart,
+          end: Math.min(end, coverStart + dist2d(spot, bag) / FIELDER_SPEED),
+        },
         look: origin,
       });
     }
@@ -394,6 +412,9 @@ function legPos(leg: MoveLeg, t: number): { pos: Vec3; moving: boolean; travelle
 function facing(from: Vec3, to: Vec3): number {
   return Math.atan2(to.x - from.x, to.z - from.z);
 }
+
+/** 타구가 날아오는 쪽 (홈플레이트) */
+const HOME: Vec3 = { x: 0, y: 0, z: 0 };
 
 /**
  * 시각 t에서 이 포지션의 야수 상태. 움직이지 않는 야수는 null.
@@ -441,10 +462,12 @@ export function sampleFielder(
   const s = legPos(first, t);
   // 도달 직전/직후에는 포구 자세
   const atBall = t >= first.end - 0.18;
+  const waiting = !s.moving || atBall;
   return {
     pos: s.pos,
-    yaw: facing(first.from, first.to),
-    pose: s.moving && !atBall ? 'RUNNING' : c.caught ? 'CATCHING' : 'FIELDING',
+    // 자리를 잡은 뒤에는 달려온 방향이 아니라 공이 오는 쪽(홈)을 본다
+    yaw: waiting ? facing(s.pos, HOME) : facing(first.from, first.to),
+    pose: waiting ? (c.caught ? 'CATCHING' : 'FIELDING') : 'RUNNING',
     cycle: (s.travelled / 2.2) % 1,
     intensity: 1,
   };

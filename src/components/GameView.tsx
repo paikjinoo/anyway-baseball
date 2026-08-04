@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { GameScene, type CameraMode } from './three/GameScene';
 import { CountDisplay, Scoreboard } from './hud/Scoreboard';
+import { PitchClock } from './hud/PitchClock';
 import { PitchPanel } from './hud/PitchPanel';
 import { BatPanel } from './hud/BatPanel';
 import {
@@ -91,6 +92,7 @@ export function GameView({
             <Scoreboard state={state} />
           </div>
           <CountDisplay state={state} />
+          <PitchClock />
           <div className="flex-1" />
           <div className="flex gap-1.5">
             <button
@@ -195,8 +197,15 @@ export function GameView({
         <div className="result-banner pointer-events-none absolute left-1/2 top-24 z-20 -translate-x-1/2">
           <div className="panel pop-in px-5 py-2.5 text-center">
             <div className="text-xs text-slate-400">
-              {PITCH_DEFS[lastResult.trajectory.type].ko} {Math.round(lastResult.trajectory.velocity)}
-              km/h
+              {lastResult.trajectory ? (
+                <>
+                  {PITCH_DEFS[lastResult.trajectory.type].ko}{' '}
+                  {Math.round(lastResult.trajectory.velocity)}km/h
+                </>
+              ) : (
+                // 던지지 않은 공 (피치 클락 위반)
+                <span className="font-bold text-rose-300">피치 클락 위반</span>
+              )}
             </div>
             <div className="text-base font-bold">{lastResult.description}</div>
             {lastResult.battedBall && lastResult.contact && (

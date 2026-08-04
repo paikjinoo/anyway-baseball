@@ -85,6 +85,26 @@ export function worldToZone(x: number, y: number): { zx: number; zy: number } {
 }
 
 // ---------------------------------------------------------------------------
+// 피치 클락
+// ---------------------------------------------------------------------------
+
+/**
+ * 투구 제한 시간 (초). SETUP 단계에서 이 시간을 넘기면 위반이다.
+ * - 수비(투수)가 넘기면 자동 볼
+ * - 공격(타자)이 넘기면 자동 스트라이크
+ */
+export const PITCH_CLOCK_SEC = 20;
+export const PITCH_CLOCK_MS = PITCH_CLOCK_SEC * 1000;
+/** 남은 시간이 이 값 이하면 경고 표시 (초) */
+export const PITCH_CLOCK_WARN_SEC = 5;
+/**
+ * 온라인에서 호스트가 위반을 선언하기 전에 더 기다려 주는 시간 (ms).
+ * 게스트의 시계는 자기 화면이 SETUP이 된 시각부터 흐르므로 호스트보다 조금 늦다.
+ * 이 여유가 없으면 "내 화면엔 아직 시간이 남았는데 볼을 먹었다"가 나온다.
+ */
+export const PITCH_CLOCK_NET_GRACE_MS = 600;
+
+// ---------------------------------------------------------------------------
 // 구종 정의
 // ---------------------------------------------------------------------------
 
@@ -96,10 +116,20 @@ export interface PitchDef {
   baseVelo: number;
   /** velocity 100일 때 추가 구속 */
   veloRange: number;
-  /** 수평 무브먼트 계수 (m). 투수 손 기준. 양수 = 던지는 팔 쪽으로 휘어짐. */
+  /**
+   * 수평 무브먼트 (m). 투수 손 기준, 양수 = 던지는 팔 쪽.
+   * 무회전 공 대비 홈플레이트에서의 좌우 편차 = 실측 horizontal break.
+   */
   hBreak: number;
-  /** 수직 무브먼트 계수 (m). 양수 = 덜 떨어짐(라이징), 음수 = 더 떨어짐. */
+  /**
+   * 수직 무브먼트 (m). 무회전 공(중력만 받는 공) 대비 홈플레이트에서 덜 떨어지는 양
+   * = 실측 induced vertical break. 백스핀이 있는 공은 전부 양수이고, 직구가 가장 크다.
+   * "가라앉는 공"은 음수가 아니라 **직구보다 값이 작은** 공이다. 여기에 음수를 넣으면
+   * 중력보다 더 떨어져 공이 손에서 위로 솟았다가 처박히는 로브 궤적이 된다.
+   */
   vBreak: number;
+  /** 유인구로 낮게 떨어뜨려 쓰는 구종인지 (AI 배합용) */
+  chaseLow: boolean;
   /** 습득 난이도. 훈련 비용 배수. */
   difficulty: number;
   /** 기본 제공 여부 */
@@ -115,8 +145,9 @@ export const PITCH_DEFS: Record<PitchType, PitchDef> = {
     short: '직',
     baseVelo: 132,
     veloRange: 28,
-    hBreak: 0.05,
-    vBreak: 0.14,
+    hBreak: 0.2,
+    vBreak: 0.42,
+    chaseLow: false,
     difficulty: 0,
     innate: true,
     color: '#ef4444',
@@ -128,8 +159,9 @@ export const PITCH_DEFS: Record<PitchType, PitchDef> = {
     short: '투',
     baseVelo: 129,
     veloRange: 26,
-    hBreak: 0.22,
-    vBreak: -0.06,
+    hBreak: 0.38,
+    vBreak: 0.28,
+    chaseLow: false,
     difficulty: 1,
     innate: false,
     color: '#f97316',
@@ -141,8 +173,9 @@ export const PITCH_DEFS: Record<PitchType, PitchDef> = {
     short: '싱',
     baseVelo: 127,
     veloRange: 24,
-    hBreak: 0.26,
-    vBreak: -0.2,
+    hBreak: 0.42,
+    vBreak: 0.17,
+    chaseLow: false,
     difficulty: 1.3,
     innate: false,
     color: '#eab308',
@@ -154,8 +187,9 @@ export const PITCH_DEFS: Record<PitchType, PitchDef> = {
     short: '커',
     baseVelo: 128,
     veloRange: 25,
-    hBreak: -0.2,
-    vBreak: 0.02,
+    hBreak: -0.06,
+    vBreak: 0.2,
+    chaseLow: false,
     difficulty: 1.4,
     innate: false,
     color: '#84cc16',
@@ -167,8 +201,10 @@ export const PITCH_DEFS: Record<PitchType, PitchDef> = {
     short: '슬',
     baseVelo: 120,
     veloRange: 22,
-    hBreak: -0.42,
-    vBreak: -0.16,
+    hBreak: -0.28,
+    vBreak: 0.05,
+    // 슬라이더는 낮게가 아니라 바깥쪽으로 뺀다
+    chaseLow: false,
     difficulty: 1.6,
     innate: false,
     color: '#22c55e',
@@ -180,8 +216,9 @@ export const PITCH_DEFS: Record<PitchType, PitchDef> = {
     short: '커',
     baseVelo: 108,
     veloRange: 20,
-    hBreak: -0.3,
-    vBreak: -0.55,
+    hBreak: -0.22,
+    vBreak: -0.2,
+    chaseLow: true,
     difficulty: 1.8,
     innate: false,
     color: '#06b6d4',
@@ -193,8 +230,9 @@ export const PITCH_DEFS: Record<PitchType, PitchDef> = {
     short: '체',
     baseVelo: 116,
     veloRange: 22,
-    hBreak: 0.24,
-    vBreak: -0.3,
+    hBreak: 0.36,
+    vBreak: 0.2,
+    chaseLow: true,
     difficulty: 1.5,
     innate: false,
     color: '#3b82f6',
@@ -206,8 +244,9 @@ export const PITCH_DEFS: Record<PitchType, PitchDef> = {
     short: '포',
     baseVelo: 118,
     veloRange: 21,
-    hBreak: 0.02,
-    vBreak: -0.62,
+    hBreak: 0.14,
+    vBreak: 0.06,
+    chaseLow: true,
     difficulty: 2.0,
     innate: false,
     color: '#8b5cf6',
@@ -220,7 +259,8 @@ export const PITCH_DEFS: Record<PitchType, PitchDef> = {
     baseVelo: 100,
     veloRange: 14,
     hBreak: 0.0,
-    vBreak: -0.3,
+    vBreak: 0.05,
+    chaseLow: true,
     difficulty: 2.6,
     innate: false,
     color: '#ec4899',

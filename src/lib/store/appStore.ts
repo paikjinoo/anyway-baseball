@@ -88,8 +88,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       const settings = { ...s.settings, ...patch };
       saveSettings(settings);
       configureAudio({
-        enabled: settings.soundEnabled,
+        sfxEnabled: settings.sfxEnabled,
+        crowdEnabled: settings.crowdEnabled,
+        bgmEnabled: settings.bgmEnabled,
         sfxVolume: settings.sfxVolume,
+        crowdVolume: settings.crowdVolume,
         bgmVolume: settings.bgmVolume,
       });
       return { settings };
@@ -98,8 +101,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   hydrateSettings: () => {
     const settings = loadSettings();
     configureAudio({
-      enabled: settings.soundEnabled,
+      sfxEnabled: settings.sfxEnabled,
+      crowdEnabled: settings.crowdEnabled,
+      bgmEnabled: settings.bgmEnabled,
       sfxVolume: settings.sfxVolume,
+      crowdVolume: settings.crowdVolume,
       bgmVolume: settings.bgmVolume,
     });
     set({ settings });

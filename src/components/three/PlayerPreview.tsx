@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { PlayerModel, type PoseKind, type UniformSpec } from './PlayerModel';
+import * as THREE from 'three';
+import { PlayerModel, type Headwear, type PoseKind, type UniformSpec } from './PlayerModel';
 import type { GloveType, Player } from '@/lib/game/types';
 
 export type PreviewMode = 'BAT' | 'PITCH' | 'FIELD';
@@ -51,9 +52,9 @@ function fieldMotion(ms: number, glove: GloveType): Motion {
  */
 function baseYaw(player: Player, mode: PreviewMode): number {
   if (mode === 'BAT') {
-    // 배트를 세워 든 뒤쪽 어깨가 보이도록 등 뒤 3/4 각도에서 본다
+    // 배트를 세워 든 뒤쪽 어깨(우타자 기준 로컬 -X)가 보이도록 3/4 각도에서 본다
     const s = player.bats === 'L' ? -1 : 1;
-    return s * (Math.PI - 0.78);
+    return -s * (Math.PI - 0.78);
   }
   const s = player.throws === 'L' ? -1 : 1;
   if (mode === 'PITCH') return s * (Math.PI / 2 - 0.55);
@@ -62,18 +63,26 @@ function baseYaw(player: Player, mode: PreviewMode): number {
 
 /**
  * 동작 중 이동하는 만큼 미리 밀어 화면 가운데에 유지한다.
- * PlayerModel의 root 이동은 회전과 무관한 월드 좌표라, 투구 스트라이드는
- * 각도와 상관없이 +Z(카메라 쪽)로 나온다.
+ * 투구 스트라이드는 모델 로컬 +Z로 약 0.8m 나아가므로, 보는 각도만큼 돌려서
+ * 그 절반을 반대로 당겨 둔다.
  */
-function baseOffset(mode: PreviewMode): [number, number, number] {
-  if (mode === 'PITCH') return [0, 0, -0.45];
-  return [0, 0, 0];
+function baseOffset(player: Player, mode: PreviewMode): [number, number, number] {
+  if (mode !== 'PITCH') return [0, 0, 0];
+  const y = baseYaw(player, mode);
+  return [-Math.sin(y) * 0.4, 0, -Math.cos(y) * 0.4];
+}
+
+/** 미리보기 모드에 맞는 머리 장비 */
+function headwearFor(mode: PreviewMode, glove: GloveType): Headwear {
+  if (mode === 'BAT') return 'HELMET';
+  if (mode === 'FIELD' && glove === 'CATCHER') return 'MASK';
+  return 'CAP';
 }
 
 const CAMERA: Record<PreviewMode, { pos: [number, number, number]; look: number }> = {
-  BAT: { pos: [0, 1.5, 4.7], look: 0.95 },
-  PITCH: { pos: [0, 1.55, 5.4], look: 1.0 },
-  FIELD: { pos: [0, 1.2, 3.9], look: 0.8 },
+  BAT: { pos: [0, 1.26, 4.0], look: 0.8 },
+  PITCH: { pos: [0, 1.3, 4.6], look: 0.82 },
+  FIELD: { pos: [0, 1.02, 3.3], look: 0.66 },
 };
 
 function Rig({ mode }: { mode: PreviewMode }) {
@@ -122,8 +131,9 @@ function Actor({
       player={player}
       uniform={uniform}
       pose={m.pose}
+      headwear={headwearFor(mode, player.gear.glove)}
       animT={m.t}
-      position={baseOffset(mode)}
+      position={baseOffset(player, mode)}
       rotationY={baseYaw(player, mode) + yaw.current}
     />
   );
@@ -182,11 +192,15 @@ export function PlayerPreview({ player, uniform, mode, height = 340 }: Props) {
             dpr={[1, 1.75]}
             camera={{ fov: 32, near: 0.1, far: 60, position: CAMERA[mode].pos }}
             gl={{ antialias: true, alpha: true }}
+            onCreated={({ gl }) => {
+              gl.toneMapping = THREE.ACESFilmicToneMapping;
+              gl.toneMappingExposure = 1.05;
+            }}
           >
-            <hemisphereLight args={['#d8ecff', '#1d2e1b', 0.9]} />
+            <hemisphereLight args={['#d8ecff', '#26361f', 0.66]} />
             <directionalLight
               position={[2.6, 5.4, 3.4]}
-              intensity={1.45}
+              intensity={1.15}
               castShadow
               shadow-mapSize-width={1024}
               shadow-mapSize-height={1024}
@@ -196,7 +210,7 @@ export function PlayerPreview({ player, uniform, mode, height = 340 }: Props) {
               shadow-camera-bottom={-0.4}
               shadow-camera-far={14}
             />
-            <directionalLight position={[-3.4, 2.2, -2.6]} intensity={0.4} />
+            <directionalLight position={[-3.4, 2.2, -2.6]} intensity={0.38} color="#bcd8ff" />
 
             {/* 바닥 */}
             <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>

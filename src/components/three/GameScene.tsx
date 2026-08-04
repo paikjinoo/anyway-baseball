@@ -23,14 +23,18 @@ import {
   sampleRunner,
 } from '@/lib/game/playback';
 import { clamp } from '@/lib/game/rng';
-import { cpuBatterTick, isPlayerBatting, useMatchStore, WINDUP_MS } from '@/lib/store/matchStore';
+import {
+  cpuBatterTick,
+  isPlayerBatting,
+  swingMotionMs,
+  useMatchStore,
+  WINDUP_MS,
+} from '@/lib/store/matchStore';
 import { currentBatter, currentPitcher, defenseTeam, offense } from '@/lib/game/engine';
 import type { GameState, Player, Position, Vec3 } from '@/lib/game/types';
 
 export type CameraMode = 'PITCHER' | 'BATTER' | 'FIELD' | 'DRAMATIC';
 
-/** 스윙 모션 길이 (ms). 임팩트는 모션의 45% 지점. */
-const SWING_MS = 340;
 /** 와인드업 시작부터 팔로스루 끝까지 (ms) */
 const DELIVERY_MS = WINDUP_MS / RELEASE_AT;
 
@@ -116,6 +120,7 @@ function Fielders({ state }: { state: GameState }) {
             player={player}
             uniform={uni}
             pose={motion ? motion.pose : pos === 'C' ? 'CATCHING' : 'FIELDING'}
+            headwear={pos === 'C' ? 'MASK' : 'CAP'}
             animT={motion ? motion.cycle : 0}
             intensity={motion ? motion.intensity : 1}
             position={[p.x, 0, p.z]}
@@ -173,6 +178,7 @@ function Runners() {
           player={p}
           uniform={uni}
           pose={pose}
+          headwear="HELMET"
           animT={smp.state === 'SLIDING' ? smp.slideT : smp.cycle}
           intensity={smp.intensity}
           position={[smp.pos.x, 0, smp.pos.z]}
@@ -195,6 +201,7 @@ function Runners() {
         player={p}
         uniform={uni}
         pose="IDLE"
+        headwear="HELMET"
         position={[st.x, 0, st.z]}
         rotationY={baseFacing(i)}
       />,
@@ -232,7 +239,8 @@ function Batter() {
 
   const now = performance.now();
   const swinging = s.swungAt > 0 && (s.phase === 'FLIGHT' || s.phase === 'RESULT');
-  const swingT = swinging ? clamp((now - s.swungAt) / SWING_MS, 0, 1) : 0;
+  const bunting = swinging && s.swungType === 'BUNT';
+  const swingT = swinging ? clamp((now - s.swungAt) / swingMotionMs(s.swungType), 0, 1) : 0;
   // 투수의 딜리버리에 맞춰 타이밍을 잡는 준비 동작
   const load =
     s.phase === 'FLIGHT' ? clamp((now - s.deliveryStartAt) / WINDUP_MS, 0, 1) : 0;
@@ -241,7 +249,8 @@ function Batter() {
     <PlayerModel
       player={batter}
       uniform={uni}
-      pose={swinging ? 'BATTING_SWING' : 'BATTING'}
+      pose={swinging ? (bunting ? 'BATTING_BUNT' : 'BATTING_SWING') : 'BATTING'}
+      headwear="HELMET"
       animT={swinging ? swingT : load}
       position={[x, 0, 0.15]}
       rotationY={lefty ? Math.PI / 2 : -Math.PI / 2}
@@ -284,7 +293,8 @@ function Pitcher() {
     );
   }
 
-  const throwing = s.phase === 'FLIGHT' || s.phase === 'RESULT';
+  // 궤적이 없는 결과(피치 클락 위반)는 던진 공이 아니므로 팔로스루도 없다
+  const throwing = (s.phase === 'FLIGHT' || s.phase === 'RESULT') && !!s.trajectory;
   const dt = throwing ? clamp((performance.now() - s.deliveryStartAt) / DELIVERY_MS, 0, 1) : 0;
 
   return (
@@ -479,9 +489,11 @@ function CameraRig({ mode }: { mode: CameraMode }) {
       camPos = new THREE.Vector3(0, 26, -26);
       look = new THREE.Vector3(0, 0, 34);
     } else if (batting || mode === 'BATTER') {
-      // 타자 시점: 포수 뒤에서 투수를 바라본다
-      camPos = new THREE.Vector3(0, 2.05, -4.6);
-      look = new THREE.Vector3(0, 1.35, 14);
+      // 타자 시점: 포수 뒤에서 투수를 바라본다.
+      // SD 비율이라 포수 머리가 커서, 낮게 잡으면 홈플레이트와 존을 가린다.
+      // 조금 더 높이·뒤로 물러나 포수 머리 위로 넘겨다본다.
+      camPos = new THREE.Vector3(0, 2.55, -5.5);
+      look = new THREE.Vector3(0, 1.25, 14);
     } else {
       // 투수 시점: 마운드 뒤 약간 높은 곳
       camPos = new THREE.Vector3(0, 3.1, MOUND_DISTANCE + 7.2);
@@ -535,24 +547,34 @@ export function GameScene({ cameraMode = 'DRAMATIC' }: { cameraMode?: CameraMode
       // preserveDrawingBuffer: 캔버스를 이미지로 캡처할 수 있게 한다.
       // (끄면 toDataURL / 자동화 스크린샷이 검은 화면으로 나온다)
       gl={{ antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: true }}
+      onCreated={({ gl }) => {
+        // 톤매핑이 없으면 툰 셰이딩의 가장 밝은 밴드가 흰색으로 날아간다
+        gl.toneMapping = THREE.ACESFilmicToneMapping;
+        gl.toneMappingExposure = 1.06;
+      }}
     >
-      <color attach="background" args={['#0b1220']} />
-      <fog attach="fog" args={['#0b1220', 170, 420]} />
+      <color attach="background" args={['#12233b']} />
+      <fog attach="fog" args={['#16304d', 180, 430]} />
 
-      <hemisphereLight args={['#cfe8ff', '#2a3d1f', 0.75]} />
+      {/* 조명: 키(야간 조명탑) + 하늘/잔디 반사 + 반대편 림라이트.
+          합이 1을 크게 넘으면 얼굴이 하얗게 날아가므로 총량을 눌러 잡는다. */}
+      <hemisphereLight args={['#cfe4ff', '#31491f', 0.62]} />
       <directionalLight
         position={[45, 70, 20]}
-        intensity={1.15}
+        intensity={1.05}
         castShadow
-        shadow-mapSize-width={1024}
-        shadow-mapSize-height={1024}
+        shadow-mapSize-width={2048}
+        shadow-mapSize-height={2048}
+        shadow-bias={-0.0006}
+        shadow-normalBias={0.02}
         shadow-camera-left={-70}
         shadow-camera-right={70}
         shadow-camera-top={70}
         shadow-camera-bottom={-70}
         shadow-camera-far={220}
       />
-      <directionalLight position={[-40, 45, 90]} intensity={0.35} />
+      <directionalLight position={[-40, 45, 90]} intensity={0.34} color="#bcd8ff" />
+      <directionalLight position={[10, 20, -60]} intensity={0.22} color="#ffe6bd" />
 
       <Stadium />
       <SceneActors />

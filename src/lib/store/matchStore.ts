@@ -13,13 +13,16 @@ import {
   offense,
   preparePitch,
   resolvePitch,
+  resolvePitchClockViolation,
 } from '../game/engine';
 import { decidePitch, decideSteal, decideSwing, shouldChangePitcher, type Difficulty } from '../game/ai';
+import { PITCH_CLOCK_MS, PITCH_CLOCK_NET_GRACE_MS } from '../game/constants';
 import { arsenalOf } from '../game/pitching';
 import { buildTimeline, type PlayTimeline } from '../game/playback';
 import type {
   GameSettings,
   GameState,
+  PitchClockViolation,
   PitchCommand,
   PitchResult,
   PitchTrajectory,
@@ -31,9 +34,12 @@ import type {
 import type { OwnerMap } from '../net/protocol';
 import {
   playBatCrack,
-  playCall,
   playCheer,
+  playHitCheer,
+  playHomeRunCelebration,
   playMitt,
+  playPitchRelease,
+  playUmpireCall,
   playWeakContact,
   playWhiff,
   startCrowd,
@@ -88,6 +94,12 @@ interface MatchStore {
   /** uid -> 표시 이름 (관전 안내에 쓴다) */
   seatNames: Record<string, string>;
 
+  /**
+   * 피치 클락 만료 시각 (performance.now() 기준). 0이면 시계가 멈춰 있다.
+   * SETUP에 들어갈 때마다 다시 감긴다.
+   */
+  pitchClockEndsAt: number;
+
   trajectory: PitchTrajectory | null;
   pitchCmd: PitchCommand | null;
   /**
@@ -103,6 +115,11 @@ interface MatchStore {
   swung: boolean;
   /** 스윙 모션 시작 시각 */
   swungAt: number;
+  /**
+   * 재생 중인 스윙 모션의 종류. 화면에 그릴 동작만 고르는 값이라
+   * swungAt이 0이면 의미가 없다(= 방망이를 내지 않은 공).
+   */
+  swungType: SwingType;
 
   lastResult: PitchResult | null;
   /** 투구가 해석되기 직전의 상태. 결과 연출은 이 상태를 기준으로 그린다. */
@@ -165,7 +182,10 @@ interface MatchStore {
   swing: (type?: SwingType) => void;
   /** 사람이 타석에 있을 때, 준비가 끝나 상대(CPU) 투구를 요청 */
   requestPitch: () => void;
-  /** 애니메이션 프레임에서 호출. 공이 미트를 지나면 자동으로 견제 없이 판정 */
+  /**
+   * 애니메이션 프레임에서 호출.
+   * SETUP이면 피치 클락을, FLIGHT면 미트를 지난 공을 자동으로 처리한다.
+   */
   tick: (now: number) => void;
   /** 결과 연출이 끝나고 다음 투구로 */
   advance: () => void;
@@ -183,8 +203,20 @@ let aiRng = new Rng(1);
  * 이 리드타임이 있어야 와인드업 -> 스트라이드 -> 릴리스가 순서대로 보인다.
  */
 export const WINDUP_MS = 520;
-/** CPU 타자가 공 도달 전에 스윙을 시작하는 시간 (ms). 임팩트를 모션 중간에 맞춘다. */
-const CPU_SWING_LEAD = 150;
+/** 스윙 모션 길이 (ms). 임팩트는 모션의 45% 지점. */
+export const SWING_MS = 340;
+/**
+ * 번트 모션 길이 (ms). 스퀘어(30%)가 끝난 직후가 임팩트라
+ * SWING_LEAD_MS / BUNT_MS ≈ 0.34에 공이 닿는다.
+ */
+export const BUNT_MS = 440;
+/** 타자가 공 도달 전에 스윙을 시작하는 시간 (ms). 임팩트를 모션 중간에 맞춘다. */
+const SWING_LEAD_MS = 150;
+
+/** 스윙 종류에 맞는 모션 길이 */
+export function swingMotionMs(type: SwingType): number {
+  return type === 'BUNT' ? BUNT_MS : SWING_MS;
+}
 /**
  * 원격 공격측의 스윙 입력을 기다려 주는 여유 시간 (ms).
  * 이 시간이 지나도 오지 않으면 호스트가 "지켜본 공"으로 처리해 경기를 진행시킨다.
@@ -237,6 +269,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
   myUid: '',
   owners: {},
   seatNames: {},
+  pitchClockEndsAt: 0,
   trajectory: null,
   pitchCmd: null,
   pitchStartAt: 0,
@@ -244,6 +277,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
   displayFlightMs: 800,
   swung: false,
   swungAt: 0,
+  swungType: 'NORMAL',
   lastResult: null,
   prePitchState: null,
   timeline: null,
@@ -277,6 +311,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       owners: {},
       seatNames: {},
       phase: 'SETUP',
+      pitchClockEndsAt: performance.now() + PITCH_CLOCK_MS,
       trajectory: null,
       pitchCmd: null,
       lastResult: null,
@@ -309,6 +344,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       seatNames: {},
       sendFn,
       phase: 'SETUP',
+      pitchClockEndsAt: performance.now() + PITCH_CLOCK_MS,
       trajectory: null,
       pitchCmd: null,
       lastResult: null,
@@ -341,6 +377,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       seatNames,
       sendFn,
       phase: 'SETUP',
+      pitchClockEndsAt: performance.now() + PITCH_CLOCK_MS,
       trajectory: null,
       pitchCmd: null,
       lastResult: null,
@@ -382,6 +419,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     const { state } = get();
     if (!state) return;
     const traj = preparePitch(state, cmd);
+    playPitchRelease(WINDUP_MS / 1000);
     set({
       pitchCmd: cmd,
       trajectory: traj,
@@ -438,7 +476,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     const timingMs = (elapsed - displayFlightMs) * scale;
 
     const cmd = { swing: true, type: t, aimX: aim.x, aimY: aim.y, timingMs };
-    set({ swung: true, swungAt: performance.now() });
+    set({ swung: true, swungAt: performance.now(), swungType: t });
 
     if (isRemoteMode(mode)) {
       // 도루 지시는 투구와 동시에 판정되므로 스윙과 함께 보낸다
@@ -451,6 +489,10 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
 
   tick: (now) => {
     const st = get();
+    if (st.phase === 'SETUP') {
+      tickPitchClock(set, get, now);
+      return;
+    }
     if (st.phase !== 'FLIGHT' || !st.state || !st.trajectory) return;
     const elapsed = now - st.pitchStartAt;
     const noSwing = { swing: false, type: st.swingType, aimX: st.aim.x, aimY: st.aim.y, timingMs: 0 };
@@ -498,6 +540,8 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     }
     set({
       phase: 'SETUP',
+      // 다음 타자/투구를 준비하는 순간부터 피치 클락이 다시 흐른다
+      pitchClockEndsAt: performance.now() + PITCH_CLOCK_MS,
       trajectory: null,
       lastResult: null,
       prePitchState: null,
@@ -515,7 +559,8 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     // (팀원이 던지는 중이어도 자기 불펜을 올리면 조작권이 넘어온다)
     if (isPartyMode(mode) && owners[pitcherId] !== myUid) return;
     const next = changePitcher(structuredClone(state), playerSide, pitcherId);
-    set({ state: next });
+    // 투수를 바꾸면 피치 클락은 새로 감긴다 (교체하다 볼을 먹지 않도록)
+    set({ state: next, pitchClockEndsAt: performance.now() + PITCH_CLOCK_MS });
     const p = next[playerSide].roster[pitcherId];
     if (p) get().pushLog(`투수 교체: ${p.name}`, 'info');
     if (mode !== 'CPU') sendFn?.({ t: 'SUB_PITCHER', side: playerSide, pitcherId });
@@ -526,6 +571,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     set({
       state: null,
       phase: 'IDLE',
+      pitchClockEndsAt: 0,
       trajectory: null,
       pitchCmd: null,
       lastResult: null,
@@ -599,6 +645,51 @@ export function isSameSide(s: ControlSlice, uid: string): boolean {
   return s.state[s.playerSide].lineup.some((id) => s.owners[id] === uid);
 }
 
+// --- 피치 클락 ---------------------------------------------------------------
+
+/**
+ * 지금 피치 클락이 재고 있는 쪽. null이면 시계가 돌지 않는다.
+ *
+ * SETUP에서 "사람이 눌러야 경기가 진행되는" 자리를 잰다.
+ * - CPU전에서 사람이 타자면 대상은 공격이다. CPU 투수는 시간을 끌지 않고,
+ *   대신 사람이 타석에 들어서야 투구가 시작되기 때문이다.
+ * - 그 밖에는 항상 마운드(수비)가 대상이다. 온라인에서 타자는 SETUP 동안
+ *   할 일이 없고 상대의 투구만 기다린다.
+ */
+export function pitchClockSubject(
+  s: Pick<MatchStore, 'state' | 'playerSide' | 'mode' | 'phase'>,
+): PitchClockViolation | null {
+  if (!s.state || s.phase !== 'SETUP' || s.state.phase === 'GAME_OVER') return null;
+  if (s.mode === 'CPU' && isPlayerBatting(s)) return 'OFFENSE';
+  return 'DEFENSE';
+}
+
+/** 남은 시간 (ms). 시계가 돌고 있지 않으면 null. */
+export function pitchClockRemaining(s: MatchStore, now: number): number | null {
+  if (!s.pitchClockEndsAt || !pitchClockSubject(s)) return null;
+  // 게스트가 투구 명령을 보낸 뒤로는 더 이상 그가 끄는 시간이 아니다
+  if (s.waitingRemote) return null;
+  return Math.max(0, s.pitchClockEndsAt - now);
+}
+
+/**
+ * SETUP이 제한 시간을 넘겼는지 보고, 넘겼으면 위반을 선언한다.
+ * 판정은 호스트(CPU 모드 포함)만 한다. 게스트 화면의 시계는 표시 전용이다.
+ */
+function tickPitchClock(set: SetFn, get: GetFn, now: number) {
+  const st = get();
+  const subject = pitchClockSubject(st);
+  if (!subject || !st.state || !st.pitchClockEndsAt) return;
+  if (!isHostMode(st.mode) || st.waitingRemote) return;
+  // 온라인에서는 게스트 시계가 조금 늦게 출발하므로 그만큼 더 기다려 준다
+  const grace = st.mode === 'CPU' ? 0 : PITCH_CLOCK_NET_GRACE_MS;
+  if (now < st.pitchClockEndsAt + grace) return;
+
+  const result = resolvePitchClockViolation(st.state, subject);
+  if (st.mode !== 'CPU') st.sendFn?.({ t: 'RESULT', result });
+  applyResult(set, get, result);
+}
+
 /**
  * 사람이 공격 중이면 CPU(또는 상대)가 투구해야 한다.
  * CPU 모드에서는 여기서 바로 CPU 투구를 시작한다.
@@ -623,6 +714,7 @@ function maybeAutoPitch(set: SetFn, get: GetFn) {
   const cur = get().state!;
   const cmd = decidePitch(cur, aiRng, st.difficulty);
   const traj = preparePitch(cur, cmd);
+  playPitchRelease(WINDUP_MS / 1000);
   set({
     pitchCmd: cmd,
     trajectory: traj,
@@ -644,6 +736,7 @@ function startPitch(set: SetFn, get: GetFn, cmd: PitchCommand) {
 
   const traj = preparePitch(state, cmd);
   if (st.mode !== 'CPU') st.sendFn?.({ t: 'PITCH_GO', cmd, serverTime: Date.now() });
+  playPitchRelease(WINDUP_MS / 1000);
   set({
     pitchCmd: cmd,
     trajectory: traj,
@@ -693,23 +786,52 @@ function applyResult(set: SetFn, get: GetFn, result: PitchResult) {
   const timeline = buildTimeline(result, offense(prev ?? next).roster);
   const plan = playbackPlan(result, timeline);
   // 연출 시계는 공이 홈플레이트에 닿는 순간부터 흐른다
-  const resultStartAt = Math.max(performance.now(), st.pitchStartAt + st.displayFlightMs);
+  const now = performance.now();
+  const resultStartAt = Math.max(now, st.pitchStartAt + st.displayFlightMs);
+
+  // 스윙 모션은 판정에 쓰인 스윙 명령만 따라간다.
+  // 원격 타자의 스윙은 결과가 도착해야 알 수 있으므로 여기서 시각을 찍고,
+  // 지켜본 공이면 남아 있는 모션 시각을 지워 헛스윙처럼 보이지 않게 한다.
+  const motionMs = swingMotionMs(result.swing.type);
+  const swungAt = !result.swing.swing
+    ? 0
+    : st.swungAt > 0
+      ? st.swungAt
+      : clamp(st.pitchStartAt + st.displayFlightMs - SWING_LEAD_MS, now - motionMs * 0.4, now);
+  const soundDelay = Math.max(0, (resultStartAt - now) / 1000);
 
   // --- 사운드 ---
-  if (result.contact && result.battedBall) {
+  if (!result.trajectory) {
+    // 던지지 않은 공(피치 클락 위반). 미트 소리 없이 심판 콜만 울린다.
+    playUmpireCall(result.pitchClockViolation === 'OFFENSE' ? 'strike' : 'ball');
+  } else if (result.contact && result.battedBall) {
     const bb = result.battedBall;
-    if (bb.kind === 'BUNT' || bb.exitVelocity < 90) playWeakContact();
-    else playBatCrack(clamp((bb.exitVelocity - 90) / 100, 0, 1));
-    if (result.kind === 'HOME_RUN') playCheer(1, 3);
+    if (bb.kind === 'BUNT' || bb.exitVelocity < 90) playWeakContact(soundDelay);
+    else playBatCrack(clamp((bb.exitVelocity - 90) / 100, 0, 1), soundDelay);
+    if (result.kind === 'FOUL') playUmpireCall('foul', soundDelay + 0.1);
   } else if (result.swing.swing) {
-    playWhiff();
-    playMitt(result.trajectory.velocity);
+    playWhiff(soundDelay);
+    playMitt(result.trajectory.velocity, soundDelay);
   } else {
-    playMitt(result.trajectory.velocity);
-    if (result.kind === 'STRIKE_LOOKING') playCall('strike');
+    playMitt(result.trajectory.velocity, soundDelay);
   }
-  if (result.kind === 'STRIKEOUT') playCall('out');
-  if (result.runsScored > 0 && result.kind !== 'HOME_RUN') playCheer(0.8, 2);
+  if (result.kind === 'BALL') playUmpireCall('ball', soundDelay + 0.1);
+  if (
+    result.kind === 'STRIKE_LOOKING' ||
+    result.kind === 'STRIKE_SWINGING' ||
+    result.kind === 'STRIKEOUT'
+  ) {
+    playUmpireCall('strike', soundDelay + 0.1);
+  }
+
+  if (result.kind === 'HOME_RUN') {
+    playHomeRunCelebration(soundDelay + 0.08);
+  } else if (result.kind === 'SINGLE' || result.kind === 'DOUBLE' || result.kind === 'TRIPLE') {
+    const extraBases = result.kind === 'SINGLE' ? 0 : result.kind === 'DOUBLE' ? 1 : 2;
+    playHitCheer(extraBases, soundDelay + 0.08);
+  } else if (result.runsScored > 0) {
+    playCheer(0.78, 2, soundDelay + 0.08);
+  }
 
   set({
     state: next,
@@ -717,6 +839,10 @@ function applyResult(set: SetFn, get: GetFn, result: PitchResult) {
     lastResult: result,
     timeline,
     resultStartAt,
+    swung: true,
+    swungAt,
+    // 원격 타자의 스윙 종류는 결과가 도착해야 알 수 있다
+    swungType: result.swing.type,
     playRate: plan.rate,
     resultMs: plan.ms,
     phase: 'RESULT',
@@ -761,10 +887,16 @@ export function cpuBatterTick(now: number) {
   const elapsed = now - store.pitchStartAt;
   // 임팩트가 스윙 모션 중간에 오도록 공이 닿기 조금 전에 스윙을 시작한다.
   // decideSwing은 실제 시각을 쓰지 않으므로 판정 결과는 달라지지 않는다.
-  if (elapsed < store.displayFlightMs - CPU_SWING_LEAD) return;
+  if (elapsed < store.displayFlightMs - SWING_LEAD_MS) return;
 
-  useMatchStore.setState({ swung: true, swungAt: now });
   const swing = cpuSwingFor(store.state, store.trajectory, store.difficulty);
+  // 모션은 실제로 방망이를 낸 공에만 붙인다. 지켜본 공까지 휘두르면
+  // 화면은 헛스윙인데 판정은 볼/루킹 스트라이크로 나온다.
+  useMatchStore.setState({
+    swung: true,
+    swungAt: swing.swing ? now : 0,
+    swungType: swing.type,
+  });
   // CPU가 타석에 있으므로 도루도 AI가 결정한다
   const steal = decideSteal(store.state, aiRng, store.difficulty);
   finalize(

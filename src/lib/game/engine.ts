@@ -9,6 +9,7 @@ import type {
   GameSettings,
   GameState,
   OffenseCommand,
+  PitchClockViolation,
   PitchCommand,
   PitchResult,
   PlayResultKind,
@@ -204,6 +205,56 @@ export function preparePitch(state: GameState, pitchCmd: PitchCommand) {
     ? pitchCmd
     : { ...pitchCmd, type: 'FOURSEAM' };
   return computePitch(rng, pitcher, cmd, def.pitcherPitches);
+}
+
+/**
+ * 피치 클락 위반을 해석한다.
+ *
+ * 공을 던지지 않았으므로 궤적도 없고 RNG도 소비하지 않는다.
+ * (rngState가 그대로여야 다음 투구가 온라인 양쪽에서 같은 결과로 재현된다.
+ *  투구 수·스태미나도 늘지 않는다 — 던진 공이 아니기 때문이다.)
+ */
+export function resolvePitchClockViolation(
+  prev: GameState,
+  by: PitchClockViolation,
+): PitchResult {
+  const s = structuredClone(prev) as GameState;
+  const rng = new Rng(s.rngState);
+  const batter = currentBatter(s);
+  const pitcher = currentPitcher(s);
+
+  const result: PitchResult = {
+    pitchNumber: s.pitchCount,
+    pitchClockViolation: by,
+    swing: { swing: false, type: 'NORMAL', aimX: 0, aimY: 0, timingMs: 0 },
+    contact: false,
+    kind: by === 'DEFENSE' ? 'BALL' : 'STRIKE_LOOKING',
+    stealResults: [],
+    runnerMoves: [],
+    fielders: [],
+    outsRecorded: 0,
+    runsScored: 0,
+    scoringPlayerIds: [],
+    rbi: 0,
+    description: '',
+    state: s,
+    atBatEnded: false,
+  };
+
+  const notice =
+    by === 'DEFENSE'
+      ? `피치 클락 위반! ${pitcher.name}에게 자동 볼이 선언됩니다.`
+      : `피치 클락 위반! ${batter.name}에게 자동 스트라이크가 선언됩니다.`;
+
+  if (by === 'DEFENSE') s.balls += 1;
+  else s.strikes += 1;
+
+  // 볼넷·삼진이 되면 resolveCount가 실황을 덮어쓰므로 위반 사실을 앞에 붙인다
+  resolveCount(s, batter, pitcher, result, rng);
+  result.description = result.description ? `${notice} ${result.description}` : notice;
+
+  endPitch(s, rng, result);
+  return result;
 }
 
 export function resolvePitch(

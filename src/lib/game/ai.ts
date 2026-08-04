@@ -100,7 +100,7 @@ export function decidePitch(state: GameState, rng: Rng, difficulty: Difficulty):
     if (chaseAttempt) {
       const def2 = PITCH_DEFS[chosen.type];
       // 떨어지는 구종은 아래로, 횡변화 구종은 바깥쪽으로
-      if (def2.vBreak < -0.25) {
+      if (def2.chaseLow) {
         targetX = rng.range(-0.5, 0.5);
         targetY = rng.range(-1.35, -0.85);
       } else {

@@ -150,8 +150,14 @@ export interface Team {
 // ---------------------------------------------------------------------------
 
 export interface GameSettings {
-  soundEnabled: boolean;
+  /** 투구/포구/타격/UI/심판 선언 효과음 */
+  sfxEnabled: boolean;
+  /** 경기 중 평상 응원과 안타/홈런 환호 */
+  crowdEnabled: boolean;
+  /** 경기 외 화면의 메뉴 배경음 */
+  bgmEnabled: boolean;
   sfxVolume: number;
+  crowdVolume: number;
   bgmVolume: number;
   /** 정규 이닝 수. 7 또는 9. */
   regulationInnings: 7 | 9;
@@ -169,8 +175,11 @@ export interface GameSettings {
 }
 
 export const DEFAULT_SETTINGS: GameSettings = {
-  soundEnabled: true,
+  sfxEnabled: true,
+  crowdEnabled: true,
+  bgmEnabled: true,
   sfxVolume: 0.7,
+  crowdVolume: 0.45,
   bgmVolume: 0.3,
   regulationInnings: 9,
   mercyRule: true,
@@ -426,10 +435,16 @@ export interface RunnerMove {
   tagUp?: boolean;
 }
 
+/** 피치 클락을 넘긴 쪽. 수비=자동 볼, 공격=자동 스트라이크. */
+export type PitchClockViolation = 'DEFENSE' | 'OFFENSE';
+
 /** 한 투구의 완전한 해석 결과. 이 객체 하나가 네트워크로 오간다. */
 export interface PitchResult {
   pitchNumber: number;
-  trajectory: PitchTrajectory;
+  /** 실제로 던진 공의 궤적. 피치 클락 위반처럼 공을 던지지 않은 플레이에는 없다. */
+  trajectory?: PitchTrajectory;
+  /** 피치 클락 위반으로 만들어진 결과인가 */
+  pitchClockViolation?: PitchClockViolation;
   swing: SwingCommand;
   /** 배트에 맞았는지 */
   contact: boolean;

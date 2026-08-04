@@ -172,7 +172,19 @@ export async function deleteLeague(id: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export function loadSettings(): GameSettings {
-  return { ...DEFAULT_SETTINGS, ...lsRead<Partial<GameSettings>>(LS_SETTINGS, {}) };
+  // soundEnabled 하나만 있던 이전 저장값은 세 채널 스위치로 마이그레이션한다.
+  // 당시 bgmVolume은 실제로 관중 볼륨에 쓰였으므로 crowdVolume의 초기값으로도 보존한다.
+  const saved = lsRead<Partial<GameSettings> & { soundEnabled?: boolean }>(LS_SETTINGS, {});
+  const { soundEnabled: legacyEnabled, ...current } = saved;
+  const enabled = legacyEnabled ?? true;
+  return {
+    ...DEFAULT_SETTINGS,
+    ...current,
+    sfxEnabled: saved.sfxEnabled ?? enabled,
+    crowdEnabled: saved.crowdEnabled ?? enabled,
+    bgmEnabled: saved.bgmEnabled ?? enabled,
+    crowdVolume: saved.crowdVolume ?? saved.bgmVolume ?? DEFAULT_SETTINGS.crowdVolume,
+  };
 }
 
 export function saveSettings(s: GameSettings) {

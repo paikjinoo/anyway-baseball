@@ -11,17 +11,26 @@ import {
 } from './constants';
 import type { PitchCommand, PitchTrajectory, Player, Vec3 } from './types';
 
-/** 릴리스 포인트. 폼(사이드암/언더핸드 등)과 좌우 투수에 따라 달라진다. */
+/**
+ * 릴리스 포인트. 폼(사이드암/언더핸드 등)과 좌우 투수에 따라 달라진다.
+ *
+ * 값은 실제 투수(릴리스 1.9m 안팎)가 아니라 **화면에 그려지는 SD 모델이
+ * RELEASE_AT 시점에 손을 두는 위치**를 잰 것이다. 실제 스케일을 쓰면 공이
+ * 모델 머리 위 40cm 지점에서 튀어나와 손과 따로 논다. 스트라이크존(0.45~1.06m)도
+ * 같은 이유로 모델 스케일에 맞춰져 있다.
+ */
 export function releasePoint(pitcher: Player): Vec3 {
   const side = pitcher.throws === 'L' ? -1 : 1;
   // form: 0 오버스로 / 1 스리쿼터 / 2 사이드암 / 3 언더핸드 / 4 토네이도
-  const heights = [1.95, 1.78, 1.42, 1.05, 1.86];
-  const offsets = [0.28, 0.52, 0.92, 1.05, 0.42];
+  const heights = [1.38, 1.39, 1.31, 1.14, 1.39];
+  const offsets = [0.37, 0.42, 0.48, 0.46, 0.38];
+  // 스트라이드로 마운드보다 앞에서 놓는 거리 (익스텐션)
+  const extension = [0.58, 0.51, 0.4, 0.32, 0.57];
   const f = clamp(pitcher.form, 0, 4);
   return {
     x: side * offsets[f],
     y: heights[f] + MOUND_HEIGHT,
-    z: MOUND_DISTANCE - 1.5, // 익스텐션만큼 앞에서 놓는다
+    z: MOUND_DISTANCE - extension[f],
   };
 }
 
@@ -114,12 +123,17 @@ const BREAK_GAIN = 1.25;
 /**
  * 투구 궤적상의 위치. t는 0(릴리스)~1(홈플레이트).
  *
- * 양 끝점이 고정된 포물선이다. 즉 공은 **반드시 plate(판정에 쓰인 지점)에 도착**하고,
- * 릴리스 직후의 겉보기 직선에서 u^2에 비례해 벌어지는 편차가 "휘어짐"으로 보인다.
- * (직선 + break*u^2 로 그리면 공이 판정 지점이 아닌 곳으로 지나가 버린다)
+ * 실제 투구와 같은 모델이다. 공은 릴리스에서 어떤 방향으로 던져진 뒤 일정한 가속도
+ * (중력 + 매그너스)를 받으므로, 그 변위는 시간의 제곱에 비례해 쌓인다.
+ * 도착점(plate)은 판정에 쓰인 지점으로 고정돼 있으므로 던지는 방향을 역산하면
  *
- * 세로 편차는 중력 g·T²/2 에서 구종의 vBreak를 뺀 값이다. 느린 공일수록 T가 커져
- * 자동으로 낙차가 커지므로, 커브와 직구의 궤적이 눈에 띄게 달라진다.
+ *   pos(u) = release + (plate - release)·u - D·(u - u²),   D = 총 변위(무회전 직선 대비)
+ *
+ * 가 되고, 현(릴리스→플레이트) 대비 편차는 u=0.5에서 D/4로 최대가 된다.
+ *
+ * 세로 변위 D_y는 아래로 g·T²/2 만큼인데, 백스핀 양력(vBreak)이 그만큼 상쇄한다.
+ * 직구는 vBreak가 커서 중력 낙하의 절반 이상이 지워져 거의 직선으로 보이고,
+ * 느린 커브는 T가 커진 데다 vBreak가 음수라 낙차가 크게 남는다.
  */
 export function pitchPositionAt(traj: PitchTrajectory, t: number): Vec3 {
   const u = clamp(t, 0, 1);

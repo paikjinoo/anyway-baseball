@@ -17,16 +17,16 @@ function useGrassTexture() {
     c.width = c.height = size;
     const g = c.getContext('2d');
     if (!g) return null;
-    g.fillStyle = '#2f6b34';
+    g.fillStyle = '#3a7d3c';
     g.fillRect(0, 0, size, size);
     // 잔디 스트라이프
     for (let i = 0; i < 8; i++) {
-      g.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.055)' : 'rgba(0,0,0,0.045)';
+      g.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.075)' : 'rgba(0,0,0,0.05)';
       g.fillRect(0, (i * size) / 8, size, size / 8);
     }
     // 미세한 얼룩
     for (let i = 0; i < 2600; i++) {
-      g.fillStyle = `rgba(${20 + Math.random() * 40},${70 + Math.random() * 60},${25 + Math.random() * 35},0.16)`;
+      g.fillStyle = `rgba(${30 + Math.random() * 45},${85 + Math.random() * 65},${35 + Math.random() * 40},0.16)`;
       g.fillRect(Math.random() * size, Math.random() * size, 2, 2);
     }
     const tex = new THREE.CanvasTexture(c);
@@ -45,7 +45,7 @@ function useDirtTexture() {
     c.width = c.height = size;
     const g = c.getContext('2d');
     if (!g) return null;
-    g.fillStyle = '#a9713f';
+    g.fillStyle = '#b87a45';
     g.fillRect(0, 0, size, size);
     for (let i = 0; i < 3000; i++) {
       const v = Math.random();
@@ -114,6 +114,26 @@ export function Stadium() {
     return pts;
   }, []);
 
+  // 담장 앞 경고 트랙: 펜스 곡선을 안쪽으로 4m 오프셋한 띠
+  const trackGeo = useMemo(() => {
+    const shape = new THREE.Shape();
+    const steps = 48;
+    const pts: [number, number][] = [];
+    for (let i = 0; i <= steps; i++) {
+      const t = -Math.PI / 4 + (Math.PI / 2) * (i / steps);
+      const r = fenceDistance(t);
+      pts.push([Math.sin(t) * r, fwd(Math.cos(t) * r)]);
+    }
+    shape.moveTo(pts[0][0], pts[0][1]);
+    for (const [x, y] of pts) shape.lineTo(x, y);
+    for (let i = steps; i >= 0; i--) {
+      const t = -Math.PI / 4 + (Math.PI / 2) * (i / steps);
+      const r = fenceDistance(t) - 4;
+      shape.lineTo(Math.sin(t) * r, fwd(Math.cos(t) * r));
+    }
+    return new THREE.ShapeGeometry(shape, 48);
+  }, []);
+
   const fenceGeo = useMemo(() => {
     // 담장을 띠(strip)로 만든다
     const positions: number[] = [];
@@ -134,10 +154,12 @@ export function Stadium() {
 
   return (
     <group>
+      <Sky />
+
       {/* 파울 지역까지 덮는 바닥 */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.06, 40]} receiveShadow>
         <circleGeometry args={[190, 64]} />
-        <meshStandardMaterial color="#20502a" roughness={1} />
+        <meshStandardMaterial color="#2a5f31" roughness={1} />
       </mesh>
 
       {/* 페어 지역 잔디 */}
@@ -222,9 +244,18 @@ export function Stadium() {
         );
       })}
 
+      {/* 경고 트랙 (담장 앞 흙 띠) */}
+      <mesh geometry={trackGeo} rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.004, 0]} receiveShadow>
+        {dirt ? (
+          <meshStandardMaterial map={dirt} roughness={1} />
+        ) : (
+          <meshStandardMaterial color="#b87a45" roughness={1} />
+        )}
+      </mesh>
+
       {/* 담장 */}
       <mesh geometry={fenceGeo} castShadow receiveShadow>
-        <meshStandardMaterial color="#14532d" side={THREE.DoubleSide} roughness={0.85} />
+        <meshStandardMaterial color="#1d6b3c" side={THREE.DoubleSide} roughness={0.85} />
       </mesh>
       {/* 담장 상단 노란 라인 */}
       {fenceCurve.map((p, i) =>
@@ -236,10 +267,10 @@ export function Stadium() {
         ) : null,
       )}
 
-      {/* 관중석: 필드를 둘러싸는 링 */}
-      <mesh position={[0, 3.2, STAND_CENTER_Z]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[124, 172, 72]} />
-        <meshStandardMaterial color="#1f2937" side={THREE.DoubleSide} />
+      {/* 관중석 바닥 링 (계단 아래를 막아 필드 밖이 뚫려 보이지 않게 한다) */}
+      <mesh position={[0, 1.4, STAND_CENTER_Z]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[124, 180, 72]} />
+        <meshStandardMaterial color="#3a4759" side={THREE.DoubleSide} roughness={1} />
       </mesh>
       <Stands />
 
@@ -268,22 +299,66 @@ export function Stadium() {
 /** 관중석 링의 중심 (필드 전체를 감싸도록 외야 쪽으로 밀어둔다) */
 const STAND_CENTER_Z = 48;
 
-/** 관중을 점군으로 간단히 표현 */
+/**
+ * 하늘. 위에서 아래로 어두운 남색 -> 지평선 근처의 옅은 청록으로 떨어지는
+ * 그라데이션 돔. 배경색만 깔면 지평선이 칼로 자른 듯 보인다.
+ */
+function Sky() {
+  const tex = useMemo(() => {
+    if (typeof document === 'undefined') return null;
+    const c = document.createElement('canvas');
+    c.width = 4;
+    c.height = 128;
+    const g = c.getContext('2d');
+    if (!g) return null;
+    const grad = g.createLinearGradient(0, 0, 0, 128);
+    grad.addColorStop(0, '#07101f');
+    grad.addColorStop(0.55, '#132a49');
+    grad.addColorStop(0.82, '#27496f');
+    grad.addColorStop(1, '#3d6389');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 4, 128);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  }, []);
+
+  if (!tex) return null;
+  return (
+    <mesh position={[0, 0, STAND_CENTER_Z]} scale={[1, 0.55, 1]}>
+      <sphereGeometry args={[420, 24, 16]} />
+      <meshBasicMaterial map={tex} side={THREE.BackSide} depthWrite={false} fog={false} />
+    </mesh>
+  );
+}
+
+/**
+ * 관중석. 점군만 뿌리면 허공에 색종이가 떠 있는 것처럼 보이므로
+ * 계단식 콘크리트 단 + 그 위의 관중 점군 + 상단 지붕띠로 구성한다.
+ */
 function Stands() {
+  const tiers = useMemo(
+    () =>
+      Array.from({ length: 9 }, (_, row) => ({
+        r: 126 + row * 4.6,
+        y: 1.6 + row * 1.5,
+      })),
+    [],
+  );
+
   const { positions, colors } = useMemo(() => {
     const pos: number[] = [];
     const col: number[] = [];
-    const palette = ['#e11d48', '#2563eb', '#f59e0b', '#f8fafc', '#111827', '#16a34a', '#7c3aed'];
-    const rows = 9;
-    for (let row = 0; row < rows; row++) {
+    const palette = ['#e11d48', '#2563eb', '#f59e0b', '#f8fafc', '#1f2937', '#16a34a', '#7c3aed'];
+    for (let row = 0; row < 9; row++) {
       const r = 128 + row * 4.6;
-      const y = 2.6 + row * 1.5;
-      const count = 190 + row * 10;
+      const y = 2.9 + row * 1.5;
+      const count = 240 + row * 14;
       for (let i = 0; i < count; i++) {
         const t = Math.random() * Math.PI * 2;
-        const x = Math.cos(t) * r;
-        const z = Math.sin(t) * r + STAND_CENTER_Z;
-        pos.push(x, y, z);
+        const x = Math.cos(t) * (r + (Math.random() - 0.5) * 2);
+        const z = Math.sin(t) * (r + (Math.random() - 0.5) * 2) + STAND_CENTER_Z;
+        pos.push(x, y + Math.random() * 0.4, z);
         const c = new THREE.Color(palette[Math.floor(Math.random() * palette.length)]);
         col.push(c.r, c.g, c.b);
       }
@@ -299,8 +374,30 @@ function Stands() {
   }, [positions, colors]);
 
   return (
-    <points geometry={geo}>
-      <pointsMaterial size={1.5} vertexColors sizeAttenuation />
-    </points>
+    <group>
+      {/* 계단식 단 */}
+      {tiers.map((t, i) => (
+        <mesh key={i} position={[0, t.y, STAND_CENTER_Z]}>
+          <cylinderGeometry args={[t.r + 2.4, t.r + 2.4, 1.5, 64, 1, true]} />
+          <meshStandardMaterial
+            color={i % 2 === 0 ? '#333f52' : '#2b3646'}
+            side={THREE.DoubleSide}
+            roughness={0.95}
+          />
+        </mesh>
+      ))}
+      <points geometry={geo}>
+        <pointsMaterial size={1.7} vertexColors sizeAttenuation />
+      </points>
+      {/* 지붕띠 */}
+      <mesh position={[0, 17.4, STAND_CENTER_Z]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[124, 176, 64]} />
+        <meshStandardMaterial color="#1b2431" side={THREE.DoubleSide} roughness={1} />
+      </mesh>
+      <mesh position={[0, 17.6, STAND_CENTER_Z]}>
+        <cylinderGeometry args={[176, 176, 6, 64, 1, true]} />
+        <meshStandardMaterial color="#151d28" side={THREE.DoubleSide} roughness={1} />
+      </mesh>
+    </group>
   );
 }

@@ -1,7 +1,12 @@
 'use client';
 
 import { useAppStore } from '@/lib/store/appStore';
-import { playCheer, playClick, unlockAudio } from '@/lib/audio/sfx';
+import {
+  playBatCrack,
+  playHomeRunCelebration,
+  playUmpireCall,
+  unlockAudio,
+} from '@/lib/audio/sfx';
 
 export default function SettingsPage() {
   const settings = useAppStore((s) => s.settings);
@@ -14,54 +19,42 @@ export default function SettingsPage() {
       <section className="panel p-5">
         <h2 className="mb-4 font-bold">사운드</h2>
 
-        <label className="mb-4 flex items-center justify-between">
-          <span className="text-sm font-semibold">사운드 사용</span>
-          <input
-            type="checkbox"
-            checked={settings.soundEnabled}
-            onChange={(e) => {
-              unlockAudio();
-              update({ soundEnabled: e.target.checked });
+        <div className="space-y-3">
+          <SoundChannel
+            title="효과음"
+            description="투구 · 포구 · 타격 · 번트 · 헛스윙 · 심판 선언 · UI"
+            enabled={settings.sfxEnabled}
+            volume={settings.sfxVolume}
+            onEnabled={(sfxEnabled) => update({ sfxEnabled })}
+            onVolume={(sfxVolume) => update({ sfxVolume })}
+            onTest={() => {
+              playBatCrack(0.75);
+              playUmpireCall('strike', 0.22);
             }}
-            className="h-5 w-5 accent-lime-500"
           />
-        </label>
 
-        <div className={settings.soundEnabled ? '' : 'pointer-events-none opacity-40'}>
-          <div className="mb-4">
-            <label className="field-label">
-              효과음 볼륨 {Math.round(settings.sfxVolume * 100)}%
-            </label>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              value={Math.round(settings.sfxVolume * 100)}
-              onChange={(e) => update({ sfxVolume: Number(e.target.value) / 100 })}
-              onPointerUp={() => playClick()}
-            />
-          </div>
-          <div className="mb-4">
-            <label className="field-label">
-              관중 소리 볼륨 {Math.round(settings.bgmVolume * 100)}%
-            </label>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              value={Math.round(settings.bgmVolume * 100)}
-              onChange={(e) => update({ bgmVolume: Number(e.target.value) / 100 })}
-            />
-          </div>
-          <button
-            className="btn !py-1.5 !text-xs"
-            onClick={() => {
-              unlockAudio();
-              playCheer(0.9, 1.6);
-            }}
-          >
-            테스트 재생
-          </button>
+          <SoundChannel
+            title="관중석"
+            description="평상시 응원 · 안타 환호 · 홈런 축하"
+            enabled={settings.crowdEnabled}
+            volume={settings.crowdVolume}
+            onEnabled={(crowdEnabled) => update({ crowdEnabled })}
+            onVolume={(crowdVolume) => update({ crowdVolume })}
+            onTest={() => playHomeRunCelebration()}
+          />
+
+          <SoundChannel
+            title="배경음"
+            description="메인 · 팀 · 선수 · 리그 · 설정 화면"
+            enabled={settings.bgmEnabled}
+            volume={settings.bgmVolume}
+            onEnabled={(bgmEnabled) => update({ bgmEnabled })}
+            onVolume={(bgmVolume) => update({ bgmVolume })}
+          />
+
+          <p className="rounded-lg border border-white/10 bg-black/15 px-3 py-2 text-[11px] leading-relaxed text-slate-500">
+            배경음 파일 위치: <code className="text-slate-300">public/audio/bgm/menu.mp3</code>
+          </p>
         </div>
       </section>
 
@@ -176,6 +169,69 @@ export default function SettingsPage() {
       <p className="text-center text-xs text-slate-600">
         설정은 이 브라우저에 저장되며 새 경기부터 적용됩니다.
       </p>
+    </div>
+  );
+}
+
+function SoundChannel({
+  title,
+  description,
+  enabled,
+  volume,
+  onEnabled,
+  onVolume,
+  onTest,
+}: {
+  title: string;
+  description: string;
+  enabled: boolean;
+  volume: number;
+  onEnabled: (enabled: boolean) => void;
+  onVolume: (volume: number) => void;
+  onTest?: () => void;
+}) {
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/[0.025] p-3">
+      <label className="flex items-center justify-between gap-3">
+        <span>
+          <span className="block text-sm font-semibold">{title}</span>
+          <span className="block text-[11px] text-slate-500">{description}</span>
+        </span>
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => {
+            unlockAudio();
+            onEnabled(e.target.checked);
+          }}
+          className="h-5 w-5 shrink-0 accent-lime-500"
+        />
+      </label>
+
+      <div className={enabled ? 'mt-3 flex items-end gap-3' : 'pointer-events-none mt-3 flex items-end gap-3 opacity-35'}>
+        <label className="min-w-0 flex-1">
+          <span className="field-label">볼륨 {Math.round(volume * 100)}%</span>
+          <input
+            className="w-full"
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(volume * 100)}
+            onChange={(e) => onVolume(Number(e.target.value) / 100)}
+          />
+        </label>
+        {onTest && (
+          <button
+            className="btn !min-h-8 !px-3 !py-1 !text-[11px]"
+            onClick={() => {
+              unlockAudio();
+              onTest();
+            }}
+          >
+            테스트
+          </button>
+        )}
+      </div>
     </div>
   );
 }

@@ -7,7 +7,8 @@ import { useAppStore } from '@/lib/store/appStore';
 import { watchAuth, signInWithGoogle, signOut, getOrCreateGuest } from '@/lib/firebase/auth';
 import { firebaseConfigured } from '@/lib/firebase/client';
 import { listLeagues, listTeams } from '@/lib/firebase/store';
-import { unlockAudio } from '@/lib/audio/sfx';
+import { startMenuBgm, stopMenuBgm, unlockAudio } from '@/lib/audio/sfx';
+import { useMatchStore } from '@/lib/store/matchStore';
 
 const NAV = [
   { href: '/', label: '홈', mark: '⌂' },
@@ -27,6 +28,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const setTeams = useAppStore((s) => s.setTeams);
   const setLeagues = useAppStore((s) => s.setLeagues);
   const hydrateSettings = useAppStore((s) => s.hydrateSettings);
+  const matchActive = useMatchStore((s) => s.phase !== 'IDLE');
 
   const inGame = pathname?.startsWith('/play/');
 
@@ -64,6 +66,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       window.removeEventListener('keydown', h);
     };
   }, []);
+
+  // 경기 중에는 관중석 소리만, 그 밖의 화면에서는 사용자가 넣은 메뉴 BGM만 재생한다.
+  useEffect(() => {
+    if (matchActive) stopMenuBgm();
+    else startMenuBgm();
+    return () => stopMenuBgm();
+  }, [matchActive]);
 
   if (inGame) return <>{children}</>;
 
