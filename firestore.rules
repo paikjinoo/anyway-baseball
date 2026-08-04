@@ -1,0 +1,81 @@
+rules_version = '2';
+
+// Anyway Baseball — Firestore 보안 규칙
+//
+// 설계 원칙
+//  - 팀/리그는 소유자만 쓸 수 있다.
+//  - 방(rooms)은 로그인한 사용자면 읽을 수 있고, 방장만 만들 수 있다.
+//    입장하는 게스트는 answer/status만 갱신할 수 있다.
+//  - 경기 데이터는 Firestore를 거치지 않고 WebRTC DataChannel로만 오간다.
+//    따라서 여기에는 게임 상태를 저장하는 컬렉션이 없다.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // ---- 팀 -----------------------------------------------------------
+    match /teams/{teamId} {
+      // 온라인 대전에서 상대 팀 정보를 봐야 하므로 읽기는 열어 둔다.
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.ownerUid == request.auth.uid;
+      allow update, delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
+    }
+
+    // ---- 리그 ---------------------------------------------------------
+    match /leagues/{leagueId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.ownerUid == request.auth.uid;
+      allow update, delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
+    }
+
+    // ---- 방 (WebRTC 시그널링 전용) ---------------------------------------
+    match /rooms/{roomId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.hostUid == request.auth.uid;
+
+      // 방장은 무엇이든 수정/삭제할 수 있다.
+      // 게스트는 answer와 status만 쓸 수 있다 (offer/hostUid 변조 방지).
+      allow update: if signedIn() && (
+        resource.data.hostUid == request.auth.uid ||
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['answer', 'status'])
+      );
+      allow delete: if signedIn() && resource.data.hostUid == request.auth.uid;
+
+      // ICE 후보. 연결이 끝나면 클라이언트가 정리한다.
+      match /hostCandidates/{doc} {
+        allow read, create, delete: if signedIn();
+      }
+      match /guestCandidates/{doc} {
+        allow read, create, delete: if signedIn();
+      }
+
+      // ---- 2대2 시그널링 -------------------------------------------------
+      // 게스트가 3명이라 방 문서의 offer/answer 한 쌍으로는 부족하다.
+      // 게스트마다 문서를 하나씩 만들고, 게스트가 offer를 / 방장이 answer를 쓴다.
+      function isRoomHost(roomId) {
+        return get(/databases/$(database)/documents/rooms/$(roomId)).data.hostUid == request.auth.uid;
+      }
+
+      match /peers/{peerUid} {
+        allow read: if signedIn();
+        // 자기 자리는 자기가 만든다
+        allow create: if signedIn() && peerUid == request.auth.uid;
+        // 게스트는 자기 문서를, 방장은 answer를 쓴다.
+        // 방을 닫을 때 방장이 남은 자리를 정리하므로 삭제도 방장에게 열어 둔다.
+        allow update, delete: if signedIn() && (
+          peerUid == request.auth.uid || isRoomHost(roomId)
+        );
+
+        match /hostCandidates/{doc} {
+          allow read, create, delete: if signedIn();
+        }
+        match /guestCandidates/{doc} {
+          allow read, create, delete: if signedIn();
+        }
+      }
+    }
+  }
+}

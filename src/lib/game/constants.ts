@@ -1,0 +1,344 @@
+import type {
+  AccessoryType,
+  BatType,
+  GloveType,
+  PitchType,
+  Position,
+  UniformType,
+  Vec3,
+} from './types';
+
+// ---------------------------------------------------------------------------
+// 필드 규격 (미터). 홈플레이트가 원점, +Z가 중견수 방향, +X가 3루(좌익) 방향.
+//
+// +X를 3루로 두는 이유: three.js는 오른손 좌표계라 홈 뒤에서 +Z(중견수)를
+// 바라보는 카메라의 화면 오른쪽은 월드 -X가 된다. 1루를 +X로 두면 화면이
+// 통째로 좌우 반전되어 타자가 1루로 뛰는데 화면상 3루 쪽으로 달리게 된다.
+// ---------------------------------------------------------------------------
+
+export const BASE_DISTANCE = 27.432; // 90 ft
+export const MOUND_DISTANCE = 18.44; // 60 ft 6 in
+export const MOUND_HEIGHT = 0.254; // 10 in
+export const PLATE_WIDTH = 0.4318; // 17 in
+
+/** 베이스 좌표. 다이아몬드는 홈에서 45도씩 벌어진다. */
+const D = BASE_DISTANCE / Math.SQRT2;
+export const BASE_COORDS: Vec3[] = [
+  { x: -D, y: 0, z: D }, // 1루
+  { x: 0, y: 0, z: BASE_DISTANCE * Math.SQRT2 }, // 2루
+  { x: D, y: 0, z: D }, // 3루
+  { x: 0, y: 0, z: 0 }, // 홈
+];
+
+/** 외야 펜스까지 거리. theta는 중견수 방향 기준 라디안(-45도 ~ +45도). */
+export function fenceDistance(thetaRad: number): number {
+  const t = Math.max(-Math.PI / 4, Math.min(Math.PI / 4, thetaRad));
+  // 라인 100m, 중앙 122m 로 부드럽게 보간
+  return 100 + 22 * Math.cos(2 * t);
+}
+
+export const FENCE_HEIGHT = 2.9;
+
+/** 수비 기본 위치 */
+export const DEFENSE_SPOTS: Record<Position, Vec3> = {
+  P: { x: 0, y: 0, z: MOUND_DISTANCE },
+  C: { x: 0, y: 0, z: -1.6 },
+  '1B': { x: -17.5, y: 0, z: 26 },
+  '2B': { x: -10.5, y: 0, z: 41 },
+  '3B': { x: 17.5, y: 0, z: 26 },
+  SS: { x: 10.5, y: 0, z: 41 },
+  LF: { x: 42, y: 0, z: 76 },
+  CF: { x: 0, y: 0, z: 88 },
+  RF: { x: -42, y: 0, z: 76 },
+  DH: { x: 0, y: 0, z: 0 },
+};
+
+// ---------------------------------------------------------------------------
+// 스트라이크존
+// ---------------------------------------------------------------------------
+
+/** 존 반폭 (m). 공 반지름을 감안해 실제 판정은 살짝 넓다. */
+export const ZONE_HALF_WIDTH = 0.2159; // 홈플레이트 폭의 절반
+export const ZONE_BOTTOM = 0.45;
+export const ZONE_TOP = 1.06;
+export const ZONE_HALF_HEIGHT = (ZONE_TOP - ZONE_BOTTOM) / 2;
+export const ZONE_CENTER_Y = (ZONE_TOP + ZONE_BOTTOM) / 2;
+export const BALL_RADIUS = 0.0366;
+
+/**
+ * 존 좌표(-1~1)를 실제 미터 좌표로 변환.
+ * 존 x는 포수/타자 시점의 화면 좌우(+1 = 오른쪽 = 1루 쪽 = 우타자 바깥쪽)이고,
+ * 월드 +X는 3루 방향이므로 부호가 뒤집힌다.
+ */
+export function zoneToWorld(zx: number, zy: number): { x: number; y: number } {
+  return {
+    x: -zx * ZONE_HALF_WIDTH,
+    y: ZONE_CENTER_Y + zy * ZONE_HALF_HEIGHT,
+  };
+}
+
+export function worldToZone(x: number, y: number): { zx: number; zy: number } {
+  return {
+    zx: -x / ZONE_HALF_WIDTH,
+    zy: (y - ZONE_CENTER_Y) / ZONE_HALF_HEIGHT,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 구종 정의
+// ---------------------------------------------------------------------------
+
+export interface PitchDef {
+  type: PitchType;
+  ko: string;
+  short: string;
+  /** 기본 구속 (km/h). 능력치 velocity가 여기에 가산된다. */
+  baseVelo: number;
+  /** velocity 100일 때 추가 구속 */
+  veloRange: number;
+  /** 수평 무브먼트 계수 (m). 투수 손 기준. 양수 = 던지는 팔 쪽으로 휘어짐. */
+  hBreak: number;
+  /** 수직 무브먼트 계수 (m). 양수 = 덜 떨어짐(라이징), 음수 = 더 떨어짐. */
+  vBreak: number;
+  /** 습득 난이도. 훈련 비용 배수. */
+  difficulty: number;
+  /** 기본 제공 여부 */
+  innate: boolean;
+  color: string;
+  desc: string;
+}
+
+export const PITCH_DEFS: Record<PitchType, PitchDef> = {
+  FOURSEAM: {
+    type: 'FOURSEAM',
+    ko: '직구',
+    short: '직',
+    baseVelo: 132,
+    veloRange: 28,
+    hBreak: 0.05,
+    vBreak: 0.14,
+    difficulty: 0,
+    innate: true,
+    color: '#ef4444',
+    desc: '기본 구종. 가장 빠르고 제구가 쉽다.',
+  },
+  TWOSEAM: {
+    type: 'TWOSEAM',
+    ko: '투심',
+    short: '투',
+    baseVelo: 129,
+    veloRange: 26,
+    hBreak: 0.22,
+    vBreak: -0.06,
+    difficulty: 1,
+    innate: false,
+    color: '#f97316',
+    desc: '직구와 비슷하나 던지는 팔 쪽으로 가라앉는다.',
+  },
+  SINKER: {
+    type: 'SINKER',
+    ko: '싱커',
+    short: '싱',
+    baseVelo: 127,
+    veloRange: 24,
+    hBreak: 0.26,
+    vBreak: -0.2,
+    difficulty: 1.3,
+    innate: false,
+    color: '#eab308',
+    desc: '강하게 가라앉는다. 땅볼 유도에 최적.',
+  },
+  CUTTER: {
+    type: 'CUTTER',
+    ko: '커터',
+    short: '커',
+    baseVelo: 128,
+    veloRange: 25,
+    hBreak: -0.2,
+    vBreak: 0.02,
+    difficulty: 1.4,
+    innate: false,
+    color: '#84cc16',
+    desc: '직구 궤적에서 반대 방향으로 살짝 꺾인다.',
+  },
+  SLIDER: {
+    type: 'SLIDER',
+    ko: '슬라이더',
+    short: '슬',
+    baseVelo: 120,
+    veloRange: 22,
+    hBreak: -0.42,
+    vBreak: -0.16,
+    difficulty: 1.6,
+    innate: false,
+    color: '#22c55e',
+    desc: '옆으로 크게 휘며 떨어진다.',
+  },
+  CURVE: {
+    type: 'CURVE',
+    ko: '커브',
+    short: '커',
+    baseVelo: 108,
+    veloRange: 20,
+    hBreak: -0.3,
+    vBreak: -0.55,
+    difficulty: 1.8,
+    innate: false,
+    color: '#06b6d4',
+    desc: '느리고 낙차가 크다. 타이밍을 뺏는다.',
+  },
+  CHANGEUP: {
+    type: 'CHANGEUP',
+    ko: '체인지업',
+    short: '체',
+    baseVelo: 116,
+    veloRange: 22,
+    hBreak: 0.24,
+    vBreak: -0.3,
+    difficulty: 1.5,
+    innate: false,
+    color: '#3b82f6',
+    desc: '직구와 같은 폼에서 느리게. 타이밍 교란.',
+  },
+  FORKBALL: {
+    type: 'FORKBALL',
+    ko: '포크볼',
+    short: '포',
+    baseVelo: 118,
+    veloRange: 21,
+    hBreak: 0.02,
+    vBreak: -0.62,
+    difficulty: 2.0,
+    innate: false,
+    color: '#8b5cf6',
+    desc: '홈플레이트 앞에서 뚝 떨어진다.',
+  },
+  KNUCKLE: {
+    type: 'KNUCKLE',
+    ko: '너클볼',
+    short: '너',
+    baseVelo: 100,
+    veloRange: 14,
+    hBreak: 0.0,
+    vBreak: -0.3,
+    difficulty: 2.6,
+    innate: false,
+    color: '#ec4899',
+    desc: '궤적이 무작위로 흔들린다. 제구가 매우 어렵다.',
+  },
+};
+
+export const ALL_PITCH_TYPES = Object.keys(PITCH_DEFS) as PitchType[];
+/** 훈련으로 습득 가능한 변화구 */
+export const LEARNABLE_PITCHES = ALL_PITCH_TYPES.filter((t) => !PITCH_DEFS[t].innate);
+
+// ---------------------------------------------------------------------------
+// 타격
+// ---------------------------------------------------------------------------
+
+export interface SwingDef {
+  ko: string;
+  /** 컨택 판정 반경 배수 (존 좌표계 단위) */
+  contactRadius: number;
+  /** 타이밍 허용 오차 (ms) */
+  timingWindow: number;
+  /** 타구 속도 배수 */
+  powerMult: number;
+  /** 헛스윙 페널티 */
+  whiffBias: number;
+}
+
+export const SWING_DEFS: Record<'NORMAL' | 'POWER' | 'BUNT', SwingDef> = {
+  NORMAL: { ko: '일반타격', contactRadius: 0.8, timingWindow: 100, powerMult: 1.0, whiffBias: 0 },
+  POWER: { ko: '강한타격', contactRadius: 0.48, timingWindow: 68, powerMult: 1.14, whiffBias: 0.1 },
+  BUNT: { ko: '번트', contactRadius: 1.3, timingWindow: 185, powerMult: 0.18, whiffBias: -0.2 },
+};
+
+// ---------------------------------------------------------------------------
+// 커스터마이징 카탈로그
+// ---------------------------------------------------------------------------
+
+export const UNIFORM_DEFS: { id: UniformType; ko: string; desc: string }[] = [
+  { id: 'CLASSIC', ko: '클래식', desc: '단색 기본형' },
+  { id: 'PINSTRIPE', ko: '핀스트라이프', desc: '세로 줄무늬' },
+  { id: 'RAGLAN', ko: '라글란', desc: '소매 배색' },
+  { id: 'VEST', ko: '베스트', desc: '민소매 + 언더셔츠' },
+  { id: 'GRADIENT', ko: '그라데이션', desc: '상하 색상 변화' },
+  { id: 'SASH', ko: '새시', desc: '대각선 띠' },
+];
+
+export const BAT_DEFS: { id: BatType; ko: string; contactMod: number; powerMod: number }[] = [
+  { id: 'CLASSIC', ko: '클래식', contactMod: 0, powerMod: 0 },
+  { id: 'FLARE', ko: '플레어', contactMod: 2, powerMod: -1 },
+  { id: 'TAPERED', ko: '테이퍼드', contactMod: -1, powerMod: 2 },
+  { id: 'AXE', ko: '액스', contactMod: 1, powerMod: 1 },
+  { id: 'THICK', ko: '두꺼운 배럴', contactMod: -2, powerMod: 3 },
+];
+
+export const GLOVE_DEFS: { id: GloveType; ko: string; fieldMod: number }[] = [
+  { id: 'INFIELD', ko: '내야용', fieldMod: 1 },
+  { id: 'OUTFIELD', ko: '외야용', fieldMod: 1 },
+  { id: 'PITCHER', ko: '투수용', fieldMod: 0 },
+  { id: 'CATCHER', ko: '포수 미트', fieldMod: 1 },
+  { id: 'FIRSTBASE', ko: '1루 미트', fieldMod: 1 },
+];
+
+export const ACCESSORY_DEFS: { id: AccessoryType; ko: string; desc: string }[] = [
+  { id: 'NONE', ko: '없음', desc: '기본' },
+  { id: 'WRISTBAND', ko: '손목 밴드', desc: '양 손목에 포인트 컬러' },
+  { id: 'ARM_SLEEVE', ko: '암슬리브', desc: '전완을 덮는 검은 슬리브' },
+  { id: 'NECKLACE', ko: '목걸이', desc: '가슴에 걸리는 체인' },
+  { id: 'EYE_BLACK', ko: '아이블랙', desc: '눈 밑 검은 띠' },
+];
+
+export const STANCE_NAMES = ['스탠다드', '오픈', '클로즈드', '크라우칭', '레그킥', '노스텝'];
+export const FORM_NAMES = ['오버스로', '스리쿼터', '사이드암', '언더핸드', '토네이도'];
+
+/** 타격 자세별 특징 설명 (커스터마이징 화면용) */
+export const STANCE_DESCS = [
+  '균형 잡힌 기본 자세',
+  '앞발을 열어 시야가 넓다',
+  '앞발을 닫아 몸통 회전이 크다',
+  '무릎을 낮춰 존이 작아진다',
+  '앞다리를 크게 들어 체중을 싣는다',
+  '스트라이드 없이 간결하게',
+];
+
+/** 피칭 자세별 릴리스 특징 */
+export const FORM_DESCS = [
+  '팔을 머리 위로. 가장 높은 릴리스',
+  '어깨 높이에서 비스듬히',
+  '옆구리에서 던져 횡 무브먼트가 크다',
+  '가장 낮은 릴리스. 타자가 보기 어렵다',
+  '등을 크게 보였다가 던진다',
+];
+
+export const POSITION_KO: Record<Position, string> = {
+  P: '투수',
+  C: '포수',
+  '1B': '1루수',
+  '2B': '2루수',
+  '3B': '3루수',
+  SS: '유격수',
+  LF: '좌익수',
+  CF: '중견수',
+  RF: '우익수',
+  DH: '지명타자',
+};
+
+// ---------------------------------------------------------------------------
+// 물리
+// ---------------------------------------------------------------------------
+
+export const GRAVITY = 9.80665;
+/**
+ * 야구공 항력 계수. 가속도 = DRAG_K * v^2 (m/s^2).
+ *   0.5 * rho(1.225) * Cd(0.33) * A(0.00426) / m(0.145) = 0.00594
+ * 이 값이 작으면 타구가 비현실적으로 멀리 날아가 홈런이 폭증한다.
+ */
+export const DRAG_K = 0.0064;
+/**
+ * 백스핀 양력(매그너스) 계수. 실제로는 속도에 수직으로 작용하지만
+ * 여기서는 수직 성분만 근사한다.
+ */
+export const LIFT_K = 0.0019;

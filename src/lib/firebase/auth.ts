@@ -1,0 +1,69 @@
+'use client';
+
+import {
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut as fbSignOut,
+  type User,
+} from 'firebase/auth';
+import { getFirebaseAuth, firebaseConfigured } from './client';
+
+export interface AppUser {
+  uid: string;
+  displayName: string;
+  photoURL: string | null;
+  isGuest: boolean;
+}
+
+const GUEST_KEY = 'ab:guestUid';
+
+/** Firebase 미설정 환경에서 쓰는 로컬 게스트 계정 */
+export function getOrCreateGuest(): AppUser {
+  let uid = typeof window !== 'undefined' ? localStorage.getItem(GUEST_KEY) : null;
+  if (!uid) {
+    uid = 'guest_' + Math.random().toString(36).slice(2, 12);
+    if (typeof window !== 'undefined') localStorage.setItem(GUEST_KEY, uid);
+  }
+  return { uid, displayName: '게스트 감독', photoURL: null, isGuest: true };
+}
+
+export function toAppUser(u: User): AppUser {
+  return {
+    uid: u.uid,
+    displayName: u.displayName ?? '감독',
+    photoURL: u.photoURL,
+    isGuest: false,
+  };
+}
+
+export async function signInWithGoogle(): Promise<AppUser> {
+  const auth = getFirebaseAuth();
+  if (!auth) throw new Error('Firebase가 설정되지 않았습니다. .env.local을 확인하세요.');
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+  const cred = await signInWithPopup(auth, provider);
+  return toAppUser(cred.user);
+}
+
+export async function signOut(): Promise<void> {
+  const auth = getFirebaseAuth();
+  if (auth) await fbSignOut(auth);
+}
+
+/**
+ * 로그인 상태 구독.
+ * Firebase가 설정되지 않았으면 즉시 로컬 게스트를 돌려준다.
+ */
+export function watchAuth(cb: (user: AppUser | null) => void): () => void {
+  if (!firebaseConfigured) {
+    cb(getOrCreateGuest());
+    return () => {};
+  }
+  const auth = getFirebaseAuth();
+  if (!auth) {
+    cb(null);
+    return () => {};
+  }
+  return onAuthStateChanged(auth, (u) => cb(u ? toAppUser(u) : null));
+}
