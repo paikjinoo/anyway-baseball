@@ -345,6 +345,12 @@ export interface BattedBall {
   hangTime: number;
   /** 착지 지점 (m) */
   landing: Vec3;
+  /**
+   * 착지(담장을 맞았으면 충돌) 순간의 속도 (m/s).
+   * 판정에는 쓰지 않고, 낙구 후 바운드/구르기 연출의 초기 조건으로만 쓴다.
+   * 구버전 저장 데이터에는 없을 수 있다.
+   */
+  landingVel?: Vec3;
   /** 비거리 (m) */
   distance: number;
   kind: 'GROUNDER' | 'LINE_DRIVE' | 'FLY' | 'POPUP' | 'BUNT';

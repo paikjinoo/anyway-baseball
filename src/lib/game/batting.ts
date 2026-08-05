@@ -175,6 +175,7 @@ export function makeBattedBall(
     sprayAngle: Math.round(spray * 10) / 10,
     hangTime: flight.hangTime,
     landing: flight.landing,
+    landingVel: flight.landingVel,
     distance: flight.distance,
     kind,
     path: flight.path,
@@ -190,6 +191,8 @@ export function makeBattedBall(
 export interface FlightResult {
   hangTime: number;
   landing: Vec3;
+  /** 착지(또는 담장 충돌) 순간의 속도. 바운드 연출의 초기 조건. */
+  landingVel: Vec3;
   distance: number;
   path: Vec3[];
   /** 펜스를 넘겼는지 */
@@ -219,6 +222,7 @@ export function simulateFlight(speedMps: number, launchDeg: number, sprayDeg: nu
   let hitFence = false;
   // 담장에 맞은 경우의 위치/시각. 이후 수비는 이 지점을 기준으로 한다.
   let fencePoint: Vec3 | null = null;
+  let fenceVel: Vec3 | null = null;
   let fenceTime = 0;
 
   while (t < 12) {
@@ -248,6 +252,7 @@ export function simulateFlight(speedMps: number, launchDeg: number, sprayDeg: nu
         } else {
           hitFence = true;
           fencePoint = { x, y, z };
+          fenceVel = { x: vx, y: vy, z: vz };
           fenceTime = t;
         }
       }
@@ -267,6 +272,7 @@ export function simulateFlight(speedMps: number, launchDeg: number, sprayDeg: nu
   return {
     hangTime: fencePoint ? fenceTime : t,
     landing,
+    landingVel: fenceVel ?? { x: vx, y: vy, z: vz },
     distance: Math.hypot(landing.x, landing.z),
     path,
     overFence,

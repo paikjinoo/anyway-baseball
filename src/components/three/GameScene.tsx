@@ -19,8 +19,8 @@ import {
   baseFacing,
   baseStation,
   batterRunner,
+  sampleBallInPlay,
   sampleFielder,
-  sampleFieldedBall,
   sampleRunner,
 } from '@/lib/game/playback';
 import { clamp } from '@/lib/game/rng';
@@ -314,9 +314,13 @@ function Pitcher() {
 // 공
 // ---------------------------------------------------------------------------
 
+/** 이 높이 아래로 내려오면 비행 잔상을 지운다 (땅에서 튀고 구르는 구간) */
+const TRAIL_MIN_HEIGHT = 1.1;
+
 function Ball() {
   const ref = useRef<THREE.Mesh>(null);
   const trailRef = useRef<THREE.Points>(null);
+  const trailMat = useRef<THREE.PointsMaterial>(null);
   const trailPositions = useRef(new Float32Array(60 * 3));
   const trailCount = useRef(0);
 
@@ -341,7 +345,16 @@ function Ball() {
     arr[0] = pos.x;
     arr[1] = pos.y;
     arr[2] = pos.z;
-    trailCount.current = Math.min(60, trailCount.current + 1);
+    // 지면을 구르는 공에 잔상이 붙으면 잔디에 노란 얼룩처럼 보인다.
+    // 낮게 깔리면 꼬리를 접고, 다시 떠오르면(송구 등) 새로 그린다.
+    const airborne = pos.y > TRAIL_MIN_HEIGHT;
+    trailCount.current = airborne
+      ? Math.min(60, trailCount.current + 1)
+      : Math.max(2, trailCount.current - 4);
+    if (trailMat.current) {
+      const target = airborne ? 0.55 : 0;
+      trailMat.current.opacity += (target - trailMat.current.opacity) * 0.2;
+    }
     if (trailRef.current) {
       trailRef.current.visible = true;
       const g = trailRef.current.geometry as THREE.BufferGeometry;
@@ -363,7 +376,14 @@ function Ball() {
         <meshStandardMaterial color="#ffffff" emissive="#ffffff" emissiveIntensity={0.18} roughness={0.5} />
       </mesh>
       <points ref={trailRef} geometry={trailGeo}>
-        <pointsMaterial size={0.09} color="#fef08a" transparent opacity={0.55} sizeAttenuation />
+        <pointsMaterial
+          ref={trailMat}
+          size={0.09}
+          color="#fef08a"
+          transparent
+          opacity={0.55}
+          sizeAttenuation
+        />
       </points>
     </>
   );
@@ -388,9 +408,9 @@ function ballPosition(s: Store): Vec3 | null {
     }
     // 주자 연출과 같은 시계를 쓴다
     const t = (elapsed / 1000) * s.playRate;
-    // 야수가 잡은 뒤에는 글러브/송구를 따라간다
-    const fielded = sampleFieldedBall(s.timeline?.field ?? null, t);
-    if (fielded) return fielded;
+    // 땅에 닿은 뒤에는 바운드/구르기 → 글러브 → 송구로 이어진다
+    const inPlay = sampleBallInPlay(s.timeline, t);
+    if (inPlay) return inPlay;
     return sampleBattedPath(r.battedBall.path, r.battedBall.hangTime, t);
   }
   return null;

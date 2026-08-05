@@ -8,11 +8,11 @@
  * 시간 단위는 전부 엔진 시간(초)이고 기준점 t=0 은 타격(또는 포구) 순간이다.
  */
 
-import { BASE_COORDS, BASE_DISTANCE, DEFENSE_SPOTS } from './constants';
+import { BASE_COORDS, BASE_DISTANCE, DEFENSE_SPOTS, GRAVITY, fenceDistance } from './constants';
 import { baseToBase, homeToFirst, tagUpTime } from './baserunning';
 import { throwArrivalTime } from './fielding';
 import { clamp } from './rng';
-import type { PitchResult, Player, Position, Vec3 } from './types';
+import type { BattedBall, PitchResult, Player, Position, Vec3 } from './types';
 
 /** 타구 판단 후 스타트를 끊기까지 */
 const REACTION = 0.22;
@@ -115,12 +115,20 @@ export interface PlayTimeline {
   runners: RunnerAnim[];
   /** 수비 연출 (야수 이동 + 송구). 타구가 없으면 null */
   field: FieldAnim | null;
+  /** 낙구 후 공의 바운드/구르기. 땅에 닿지 않는 타구(포구·홈런 전)는 null */
+  ground: GroundBall | null;
   /** 모든 움직임이 정리되는 시각 (s) */
   duration: number;
   homeRun: boolean;
 }
 
-const EMPTY: PlayTimeline = { runners: [], field: null, duration: 0, homeRun: false };
+const EMPTY: PlayTimeline = {
+  runners: [],
+  field: null,
+  ground: null,
+  duration: 0,
+  homeRun: false,
+};
 
 /**
  * PitchResult 하나를 주루 타임라인으로 변환한다.
@@ -130,12 +138,12 @@ export function buildTimeline(
   result: PitchResult,
   roster: Record<string, Player>,
 ): PlayTimeline {
-  const field = buildFieldAnim(result);
+  const { field, ground } = buildFieldAnim(result);
 
   if (!result.runnerMoves.length) {
     // 주루가 없어도 타구는 날아가고 야수는 움직인다
     const hang = result.battedBall ? result.battedBall.hangTime + 0.5 : 0;
-    return { ...EMPTY, field, duration: Math.max(hang, fieldEnd(field)) };
+    return { ...EMPTY, field, ground, duration: Math.max(hang, fieldEnd(field)) };
   }
 
   const homeRun = result.kind === 'HOME_RUN';
@@ -214,6 +222,7 @@ export function buildTimeline(
   return {
     runners,
     field,
+    ground,
     duration: Math.max(duration + 0.45, homeRun ? 0 : fieldEnd(field)),
     homeRun,
   };
@@ -279,13 +288,337 @@ export interface FieldAnim {
   throws: BallThrow[];
   /** 베이스를 커버하러 가는 야수들. look은 송구가 날아오는 쪽. */
   covers: { pos: Position; leg: MoveLeg; look: Vec3 }[];
-  /** 타구가 땅에 닿는 지점/시각. 이후 야수에게 닿을 때까지 굴러간다. */
-  land: Vec3;
-  landTime: number;
 }
 
 function dist2d(a: Vec3, b: Vec3): number {
   return Math.hypot(a.x - b.x, a.z - b.z);
+}
+
+// ---------------------------------------------------------------------------
+// 낙구 후의 공 (바운드 → 구르기)
+// ---------------------------------------------------------------------------
+
+/** 공 반지름. 지면에 놓인 공의 중심 높이. */
+const BALL_RADIUS = 0.06;
+/** 잔디 / 내야 흙의 수직 반발 계수. 흙이 더 잘 튄다. */
+const GRASS_BOUNCE = 0.42;
+const DIRT_BOUNCE = 0.52;
+/** 바운드 1회마다 남는 수평 속도 */
+const GRASS_SKID = 0.72;
+const DIRT_SKID = 0.82;
+/** 담장에 맞고 되튀어 나올 때 남는 법선 속도 */
+const FENCE_REBOUND = 0.42;
+/** 구르는 공의 감속 (m/s^2). 엔진의 땅볼 모델과 같은 값을 쓴다. */
+const ROLL_FRICTION = 4.4;
+/** 이보다 약하게 튀면 더 튀기지 않고 굴린다 */
+const MIN_BOUNCE_VY = 0.9;
+/** 바운드 구간 최대 개수 */
+const MAX_HOPS = 5;
+/** 내야 흙 반경 (Stadium의 내야 흙 부채꼴과 맞춘다) */
+const DIRT_RADIUS = 29;
+/** 수비가 붙지 않는 타구(파울/홈런)가 굴러가는 최대 거리 (m) */
+const FREE_ROLL_MAX = 26;
+
+/** 포물선 한 구간. 시작 높이 y0, 시작 수직속도 vy로 지면까지 간다. */
+export interface BallHop {
+  /** 착지 시각 기준 상대 시각 (s) */
+  t0: number;
+  /** 구간 길이 (s) */
+  dur: number;
+  y0: number;
+  vy: number;
+  /** 이 구간의 수평 속도 (m/s) */
+  vh: number;
+  /** 구간 시작까지 나아간 수평 거리 (m) */
+  s0: number;
+}
+
+/**
+ * 땅에 닿은 뒤의 공.
+ *
+ * 수직 운동(바운드)은 중력과 반발계수로 실제로 계산하고, 수평 운동은
+ * from -> to 구간의 진행도(0~1)로 압축한다. 도달 지점과 시각은 판정이 정한
+ * 값이므로, 두 축을 분리해야 판정과 어긋나지 않으면서 튀는 리듬이 살아난다.
+ */
+export interface GroundBall {
+  /** 지면(담장을 맞았으면 담장)에 처음 닿은 지점 */
+  from: Vec3;
+  /** 공이 멈추거나 야수에게 잡히는 지점 */
+  to: Vec3;
+  /** from을 떠나는 시각 (s) */
+  start: number;
+  /** to에 도달하는 시각 (s) */
+  end: number;
+  hops: BallHop[];
+  /** 마지막 바운드 이후 구르기 시작 속도 (m/s) / 그때까지의 거리 (m) */
+  rollV: number;
+  rollS0: number;
+  /**
+   * 수평 진행도 정규화 계수 (m) = end까지 물리적으로 나아가는 거리.
+   * 0이면 물리 모델과 판정 결과의 차이가 너무 커서 신뢰할 수 없다는 뜻이고,
+   * 이때는 등감속(굴러가다 멈추는 모양)으로 대체한다.
+   */
+  norm: number;
+}
+
+/** 착지 지점의 노면 */
+function surfaceAt(p: Vec3) {
+  const dirt = Math.hypot(p.x, p.z) < DIRT_RADIUS;
+  return dirt
+    ? { bounce: DIRT_BOUNCE, skid: DIRT_SKID }
+    : { bounce: GRASS_BOUNCE, skid: GRASS_SKID };
+}
+
+/** 높이 y0에서 수직속도 vy로 출발한 공이 지면에 닿기까지 (s) */
+function fallTime(y0: number, vy: number): number {
+  const h = Math.max(0, y0 - BALL_RADIUS);
+  return (vy + Math.sqrt(Math.max(0, vy * vy + 2 * GRAVITY * h))) / GRAVITY;
+}
+
+/**
+ * 착지 순간의 속도.
+ * 구버전 저장 데이터에는 landingVel이 없으므로 궤적 끝에서 근사한다.
+ */
+function impactVelocity(bb: BattedBall): Vec3 {
+  const v = bb.landingVel;
+  if (v && Math.hypot(v.x, v.z) > 0.5) return v;
+  const p = bb.path;
+  if (p.length >= 2) {
+    const a = p[p.length - 2];
+    const b = p[p.length - 1];
+    const dt = 1 / 40; // simulateFlight의 궤적 샘플 간격
+    const est = { x: (b.x - a.x) / dt, y: (b.y - a.y) / dt, z: (b.z - a.z) / dt };
+    if (Math.hypot(est.x, est.z) > 2) return est;
+  }
+  // 최후 수단: 타구 조건에서 추정한다 (방향만 맞으면 연출은 성립한다)
+  const sa = (bb.sprayAngle * Math.PI) / 180;
+  const speed = (bb.exitVelocity / 3.6) * 0.5;
+  return { x: -speed * Math.sin(sa), y: -6, z: speed * Math.cos(sa) };
+}
+
+/** 담장에 맞은 공은 안쪽으로 튕겨 나온다 */
+function fenceRebound(point: Vec3, vel: Vec3): Vec3 {
+  const r = Math.hypot(point.x, point.z) || 1;
+  const nx = point.x / r;
+  const nz = point.z / r;
+  const vn = vel.x * nx + vel.z * nz; // 담장 바깥 방향 성분
+  const rn = -FENCE_REBOUND * vn;
+  return {
+    x: (vel.x - vn * nx) * 0.7 + rn * nx,
+    y: vel.y,
+    z: (vel.z - vn * nz) * 0.7 + rn * nz,
+  };
+}
+
+/**
+ * 반발 계수는 충돌 속도가 빠를수록 떨어진다 (공이 그만큼 더 찌그러진다).
+ * 이 감쇠가 없으면 높이 뜬 타구가 사람 키의 몇 배로 튀어오른다.
+ */
+function restitution(base: number, impact: number): number {
+  return base * (1 - 0.45 * clamp(impact / 40, 0, 1));
+}
+
+/**
+ * 착지 속도로부터 바운드 구간을 만든다.
+ * 수직(튀는 높이)과 수평(깎이는 속도)을 한 번에 계산해 두고, 이후에는
+ * 이 구간들을 시간으로 훑기만 한다.
+ */
+function buildHops(from: Vec3, vel: Vec3): { hops: BallHop[]; rollV: number; rollS0: number } {
+  const surf = surfaceAt(from);
+  const hops: BallHop[] = [];
+  // 담장을 맞은 공은 아직 공중에 있다. 첫 구간은 남은 낙하가 된다.
+  const airborne = from.y > BALL_RADIUS + 0.05;
+  let y = Math.max(BALL_RADIUS, from.y);
+  let vy = airborne
+    ? vel.y
+    : Math.abs(vel.y) * restitution(surf.bounce, Math.abs(vel.y));
+  let vh = Math.hypot(vel.x, vel.z);
+  if (!airborne) vh *= surf.skid;
+  let t = 0;
+  let s = 0;
+
+  for (let i = 0; i < MAX_HOPS; i++) {
+    const dur = fallTime(y, vy);
+    if (dur < 0.03) break;
+    hops.push({ t0: t, dur, y0: y, vy, vh, s0: s });
+    t += dur;
+    s += vh * dur;
+    // 지면에 닿는 순간의 하강 속도에서 반발분만 되튄다
+    const impact = Math.abs(vy - GRAVITY * dur);
+    vy = impact * restitution(surf.bounce, impact);
+    vh *= surf.skid; // 바운드마다 노면에 깎인다
+    y = BALL_RADIUS;
+    if (vy < MIN_BOUNCE_VY) break;
+  }
+  return { hops, rollV: vh, rollS0: s };
+}
+
+/** rel(착지 후 경과 s) 시점까지 나아간 수평 거리 */
+function travelledAt(g: Pick<GroundBall, 'hops' | 'rollV' | 'rollS0'>, rel: number): number {
+  if (rel <= 0) return 0;
+  for (const h of g.hops) {
+    if (rel <= h.t0 + h.dur) return h.s0 + h.vh * (rel - h.t0);
+  }
+  const last = g.hops[g.hops.length - 1];
+  const after = rel - (last ? last.t0 + last.dur : 0);
+  const d = clamp(after, 0, g.rollV / ROLL_FRICTION);
+  return g.rollS0 + g.rollV * d - 0.5 * ROLL_FRICTION * d * d;
+}
+
+/** 공이 완전히 멈추는 시각(착지 후 경과 s)과 그때까지의 거리 */
+function restingAt(g: Pick<GroundBall, 'hops' | 'rollV' | 'rollS0'>) {
+  const last = g.hops[g.hops.length - 1];
+  const t = (last ? last.t0 + last.dur : 0) + g.rollV / ROLL_FRICTION;
+  return { time: t, dist: g.rollS0 + (g.rollV * g.rollV) / (2 * ROLL_FRICTION) };
+}
+
+/** 페어 지역에서 담장 밖으로 굴러 나가지 않게 잡아 준다 */
+function clampInsideFence(from: Vec3, p: Vec3): Vec3 {
+  const theta = Math.atan2(p.x, p.z);
+  if (Math.abs(theta) > Math.PI / 4) return p; // 파울 지역에는 담장이 없다
+  const fromTheta = Math.atan2(from.x, from.z);
+  // 이미 담장 밖에서 시작한 공(홈런)은 그대로 굴러가게 둔다
+  if (
+    Math.abs(fromTheta) <= Math.PI / 4 &&
+    Math.hypot(from.x, from.z) > fenceDistance(fromTheta) - 0.5
+  ) {
+    return p;
+  }
+  const r = Math.hypot(p.x, p.z);
+  const max = fenceDistance(theta) - 0.4;
+  if (r <= max || r < 0.01) return p;
+  return { x: (p.x / r) * max, y: p.y, z: (p.z / r) * max };
+}
+
+/**
+ * 야수가 공의 진행 방향으로 따라갈 수 있는 최대 거리.
+ * 정위치에서 reach까지 달릴 수 있는 반경과 공의 진행선이 만나는 지점.
+ */
+function reachableAlong(
+  spot: Vec3,
+  from: Vec3,
+  dir: { x: number; z: number },
+  radius: number,
+): number {
+  const wx = from.x - spot.x;
+  const wz = from.z - spot.z;
+  const b = wx * dir.x + wz * dir.z;
+  const c = wx * wx + wz * wz - radius * radius;
+  const disc = b * b - c;
+  if (disc < 0) return 0;
+  return Math.max(0, -b + Math.sqrt(disc));
+}
+
+/**
+ * 낙구 후 공의 거동을 만든다.
+ *
+ * target(엔진이 정한 처리 지점)이 공의 진행 방향 앞쪽이면 그대로 쓴다 —
+ * 굴러가는 타구를 야수가 앞에서 막아서는 그림이다.
+ * 뜬공·직선타처럼 "떨어진 자리에서 처리"로 계산된 타구는 그대로 두면 공이
+ * 제자리에서만 튀므로, 실제로 굴러갈 거리만큼 앞으로 내보내고 야수가
+ * 거기까지 쫓아가게 한다. 단 야수가 제시간에 닿을 수 있는 범위까지만이다.
+ */
+function buildGroundBall(
+  bb: BattedBall,
+  target: Vec3,
+  end: number,
+  spot: Vec3 | null,
+): GroundBall {
+  const from = bb.landing;
+  const start = bb.hangTime;
+  const raw = impactVelocity(bb);
+  const vel = bb.hitFence ? fenceRebound(from, raw) : raw;
+  const motion = buildHops(from, vel);
+
+  const vh = Math.hypot(vel.x, vel.z);
+  const r0 = Math.hypot(from.x, from.z) || 1;
+  // 굴러가는 방향. 속도가 없으면 타구가 뻗어 나온 방향으로 둔다.
+  const dir =
+    vh > 0.5
+      ? { x: vel.x / vh, z: vel.z / vh }
+      : { x: from.x / r0, z: from.z / r0 };
+  const ahead = (d: number): Vec3 =>
+    clampInsideFence(from, { x: from.x + dir.x * d, y: 0, z: from.z + dir.z * d });
+
+  // ---- 수비가 붙지 않는 타구(파울/홈런): 스스로 멈출 때까지 굴러간다 ------
+  if (!spot) {
+    const rest = restingAt(motion);
+    const dist = Math.min(rest.dist, FREE_ROLL_MAX);
+    const to = ahead(dist);
+    const real = dist2d(from, to); // 담장에 막혔으면 더 짧아진다
+    const time = rest.dist > 0.1 ? rest.time * (real / rest.dist) : 0;
+    return {
+      from,
+      to,
+      start,
+      end: start + Math.max(0.4, time),
+      ...motion,
+      norm: travelledAt(motion, Math.max(0.4, time)),
+    };
+  }
+
+  // ---- 야수가 처리하는 타구 ---------------------------------------------
+  const span = Math.max(0.05, end - start);
+  const within = travelledAt(motion, span);
+  const along = (target.x - from.x) * dir.x + (target.z - from.z) * dir.z;
+
+  // 판정 지점이 공의 진행 방향 앞쪽이면 그대로 쓴다 (앞에서 막아서는 그림).
+  //
+  // 뒤쪽이면 그대로 쓸 수 없다. 굴러가던 공이 거꾸로 되돌아가는 그림이 되기 때문이다.
+  // (엔진의 땅볼 모델은 공이 홈에서부터 구른다고 보므로, 체공이 긴 낮은 타구에서는
+  //  공이 이미 넘어간 지점을 처리 지점으로 내놓는다.) 이때는 공을 진행 방향으로만
+  // 내보내고 — 야수가 시간 안에 닿을 수 있는 데까지 — 야수가 거기로 오게 한다.
+  let to = clampInsideFence(from, target);
+  if (along < 1) {
+    const radius = FIELDER_SPEED * Math.max(0.2, end - BREAK_DELAY);
+    to = ahead(Math.max(0, Math.min(within, reachableAlong(spot, from, dir, radius))));
+  } else if ((to.x - from.x) * dir.x + (to.z - from.z) * dir.z < 0) {
+    // 담장에 걸려 뒤로 당겨졌다면 착지 지점에 세운다
+    to = from;
+  }
+
+  // 물리적으로 굴러갈 거리와 실제 도달 거리가 크게 다르면 (엔진의 땅볼 모델은
+  // 홈에서부터 굴린다) 물리 프로파일이 의미를 잃는다. 그때는 등감속으로 만다.
+  const need = dist2d(from, to);
+  const trust = need < 0.3 || (within > need * 0.35 && within < need * 3);
+  return {
+    from,
+    to,
+    start,
+    end: Math.max(start + 0.05, end),
+    ...motion,
+    norm: trust ? within : 0,
+  };
+}
+
+/** 시각 t에서 지면 위 공의 위치 */
+export function sampleGroundBall(g: GroundBall, t: number): Vec3 {
+  const rel = t - g.start;
+  const span = Math.max(0.01, g.end - g.start);
+  // 수평 진행도. 물리 프로파일을 믿을 수 있으면 그대로, 아니면 등감속.
+  let u: number;
+  if (g.norm > 0.05) {
+    u = clamp(travelledAt(g, rel) / g.norm, 0, 1);
+  } else {
+    const x = clamp(rel / span, 0, 1);
+    u = 1 - (1 - x) * (1 - x);
+  }
+
+  let y = BALL_RADIUS;
+  for (const h of g.hops) {
+    if (rel < h.t0) break;
+    if (rel <= h.t0 + h.dur) {
+      const dt = rel - h.t0;
+      y = Math.max(BALL_RADIUS, h.y0 + h.vy * dt - 0.5 * GRAVITY * dt * dt);
+      break;
+    }
+  }
+
+  return {
+    x: g.from.x + (g.to.x - g.from.x) * u,
+    y,
+    z: g.from.z + (g.to.z - g.from.z) * u,
+  };
 }
 
 function fieldEnd(f: FieldAnim | null): number {
@@ -299,16 +632,33 @@ function fieldEnd(f: FieldAnim | null): number {
  *
  * 판정에 쓰인 FieldPlay(누가·언제·어디서)를 그대로 재생하므로,
  * 화면에서 야수가 공을 잡는 순간과 엔진이 아웃/안타를 가른 순간이 일치한다.
+ * 낙구 후 공이 튀고 굴러가는 구간(ground)도 함께 만든다.
  */
-function buildFieldAnim(result: PitchResult): FieldAnim | null {
+function buildFieldAnim(result: PitchResult): { field: FieldAnim | null; ground: GroundBall | null } {
   const play = result.fieldPlay;
   const bb = result.battedBall;
-  // 홈런은 쫓아갈 공이 없다 (담장 밖)
-  if (!play || !bb || play.homeRun) return null;
-  if (play.foul && !play.foulCaught) return null;
+  // 홈런/파울은 쫓아갈 공이 없다. 공만 굴러간다.
+  if (!bb) return { field: null, ground: null };
+  if (!play || play.homeRun || (play.foul && !play.foulCaught)) {
+    return { field: null, ground: buildGroundBall(bb, bb.landing, bb.hangTime, null) };
+  }
+  // 노바운드로 잡힌 타구는 땅에 닿지 않는다
+  if (play.caught) return { field: buildChase(result, play, bb, bb.landing), ground: null };
 
+  const secure = Math.max(0.1, play.secureTime);
+  const reach = play.error ? Math.max(bb.hangTime, secure - FUMBLE_MAX) : secure;
+  const ground = buildGroundBall(bb, play.securePoint, reach, DEFENSE_SPOTS[play.primary]);
+  return { field: buildChase(result, play, bb, ground.to), ground };
+}
+
+/** ball = 야수가 공을 만나는 지점 (구르는 타구는 실제로 굴러간 끝) */
+function buildChase(
+  result: PitchResult,
+  play: NonNullable<PitchResult['fieldPlay']>,
+  bb: NonNullable<PitchResult['battedBall']>,
+  ball: Vec3,
+): FieldAnim {
   const home = DEFENSE_SPOTS[play.primary];
-  const ball = play.securePoint;
   const runUp = dist2d(home, ball);
   // 실책이면 공에는 먼저 닿고, 확보만 늦어진다 (더듬는 연출)
   const secure = Math.max(0.1, play.secureTime);
@@ -379,7 +729,7 @@ function buildFieldAnim(result: PitchResult): FieldAnim | null {
     originTime = end;
   }
 
-  return { chase, throws, covers, land: bb.landing, landTime: bb.hangTime };
+  return { chase, throws, covers };
 }
 
 // ---------------------------------------------------------------------------
@@ -474,24 +824,21 @@ export function sampleFielder(
 }
 
 /**
- * 시각 t에서 공의 위치. 타구 → (구르기) → 글러브 → 송구 순서로 이어진다.
+ * 시각 t에서 공의 위치. 타구 → 바운드/구르기 → 글러브 → 송구 순서로 이어진다.
  * 아직 타격 직후 비행 중이면 null (호출측이 타구 궤적을 그린다).
  */
-export function sampleFieldedBall(field: FieldAnim | null, t: number): Vec3 | null {
-  if (!field) return null;
+export function sampleBallInPlay(tl: PlayTimeline | null, t: number): Vec3 | null {
+  if (!tl) return null;
+  const field = tl.field;
+  const ground = tl.ground;
+
+  // 수비가 붙지 않는 타구(파울/홈런)는 굴러가다 멈추는 것으로 끝난다
+  if (!field) return ground && t >= ground.start ? sampleGroundBall(ground, t) : null;
+
   const c = field.chase;
   if (t < c.reach) {
-    if (t < field.landTime) return null; // 아직 공중
-    // 땅에 닿은 뒤 야수에게 닿을 때까지 굴러간다 (마찰로 감속)
-    const span = Math.max(0.01, c.reach - field.landTime);
-    const u = clamp((t - field.landTime) / span, 0, 1);
-    const e = 1 - (1 - u) * (1 - u);
-    const to = c.legs[0].to;
-    return {
-      x: field.land.x + (to.x - field.land.x) * e,
-      y: 0.07,
-      z: field.land.z + (to.z - field.land.z) * e,
-    };
+    if (!ground || t < ground.start) return null; // 아직 공중
+    return sampleGroundBall(ground, t);
   }
 
   for (let i = 0; i < field.throws.length; i++) {
@@ -520,7 +867,7 @@ export function sampleFieldedBall(field: FieldAnim | null, t: number): Vec3 | nu
   const held = sampleFielder(field, c.pos, t);
   const at = held?.pos ?? c.legs[0].to;
   // 확보 전(실책으로 더듬는 중)에는 땅에 굴러다닌다
-  const y = t < c.secure && !c.caught ? 0.07 : 1.1;
+  const y = t < c.secure && !c.caught ? BALL_RADIUS : 1.1;
   return { x: at.x, y, z: at.z };
 }
 
