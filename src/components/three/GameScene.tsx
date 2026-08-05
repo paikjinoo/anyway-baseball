@@ -26,6 +26,7 @@ import {
 import { clamp } from '@/lib/game/rng';
 import {
   cpuBatterTick,
+  INNING_BREAK_MS,
   isPlayerBatting,
   swingMotionMs,
   useMatchStore,
@@ -489,20 +490,51 @@ function StrikeZone({ showAim }: { showAim: boolean }) {
 // 카메라
 // ---------------------------------------------------------------------------
 
+/**
+ * 스카이뷰가 바라보는 지점의 z. 홈플레이트(0)와 가장 깊은 펜스(122m) 사이를 잡아
+ * 내야와 외야 담장이 한 화면에 들어오게 한다.
+ */
+const SKY_CENTER_Z = 42;
+/** Canvas가 잡아 둔 기본 화각. 스카이뷰에서만 벌렸다가 여기로 되돌린다. */
+const BASE_FOV = 42;
+/** 이 가로세로비에서 구장 전체가 딱 들어오도록 스카이뷰를 맞춰 두었다 */
+const SKY_REF_ASPECT = 1.6;
+
 function CameraRig({ mode }: { mode: CameraMode }) {
   const { camera } = useThree();
   const target = useRef(new THREE.Vector3(0, 1, 18));
   const desired = useRef(new THREE.Vector3(0, 2.2, -6));
   const prevShot = useRef('');
 
-  useFrame((_, delta) => {
+  useFrame((rs, delta) => {
     const s = useMatchStore.getState();
     const batting = isPlayerBatting(s);
 
     let camPos: THREE.Vector3;
     let look: THREE.Vector3;
+    // 화각(fov)은 세로 기준이라, 화면이 좁아지면 좌우가 그만큼 잘린다.
+    // 스카이뷰에서만 부족한 만큼 넓히고 다른 샷에서는 기본값으로 되돌린다.
+    let fov = BASE_FOV;
 
-    if (s.phase === 'RESULT' && s.lastResult?.contact && s.lastResult.battedBall) {
+    if (s.phase === 'INNING_BREAK') {
+      // 공수 교대: 구장 전체가 들어오는 스카이뷰.
+      // 완전히 멈춘 그림은 화면이 굳은 것처럼 보이므로, 안내가 떠 있는 동안
+      // 3루 쪽에서 1루 쪽으로 아주 천천히 돌며 조금씩 내려온다.
+      const t = clamp(1 - (s.inningBreakEndsAt - performance.now()) / INNING_BREAK_MS, 0, 1);
+      const angle = -0.16 + 0.32 * t;
+      // 좁은 화면에서는 조금 물러나고, 그래도 모자라면 화각을 벌려 채운다.
+      // (거리로만 맞추면 선수가 점처럼 작아진다)
+      const fit = clamp(SKY_REF_ASPECT / Math.max(0.3, rs.size.width / rs.size.height), 1, 1.9);
+      const pull = Math.min(fit, 1.3);
+      fov = Math.min(72, BASE_FOV * (fit / pull));
+      const radius = (96 - 8 * t) * pull;
+      camPos = new THREE.Vector3(
+        Math.sin(angle) * radius,
+        (88 - 10 * t) * pull,
+        SKY_CENTER_Z - Math.cos(angle) * radius,
+      );
+      look = new THREE.Vector3(0, 2, SKY_CENTER_Z);
+    } else if (s.phase === 'RESULT' && s.lastResult?.contact && s.lastResult.battedBall) {
       // 타구 추적 카메라
       const bb = s.lastResult.battedBall;
       const land = bb.landing;
@@ -534,7 +566,13 @@ function CameraRig({ mode }: { mode: CameraMode }) {
 
     // 샷이 바뀌는 순간(타구 추적 시작 등)에는 컷 전환하고, 그 외에는 부드럽게 따라간다.
     const shotKey =
-      s.phase === 'RESULT' && s.lastResult?.contact ? 'follow' : batting ? 'bat' : mode;
+      s.phase === 'INNING_BREAK'
+        ? 'sky'
+        : s.phase === 'RESULT' && s.lastResult?.contact
+          ? 'follow'
+          : batting
+            ? 'bat'
+            : mode;
     if (shotKey !== prevShot.current) {
       prevShot.current = shotKey;
       desired.current.copy(camPos);
@@ -545,6 +583,12 @@ function CameraRig({ mode }: { mode: CameraMode }) {
     }
     camera.position.copy(desired.current);
     camera.lookAt(target.current);
+
+    const cam = camera as THREE.PerspectiveCamera;
+    if (cam.isPerspectiveCamera && Math.abs(cam.fov - fov) > 0.01) {
+      cam.fov = fov;
+      cam.updateProjectionMatrix();
+    }
   });
 
   return null;
@@ -568,6 +612,9 @@ function Driver() {
 export function GameScene({ cameraMode = 'DRAMATIC' }: { cameraMode?: CameraMode }) {
   const state = useMatchStore((s) => s.state);
   const playerBatting = useMatchStore((s) => isPlayerBatting(s));
+  // 공수 교대 중에는 존을 그리지 않는다. 스카이뷰에서는 홈플레이트 위에 뜬
+  // 노란 사각형이 그라운드를 가로지르는 선처럼 보인다.
+  const inningBreak = useMatchStore((s) => s.phase === 'INNING_BREAK');
 
   if (!state) return null;
 
@@ -611,7 +658,7 @@ export function GameScene({ cameraMode = 'DRAMATIC' }: { cameraMode?: CameraMode
       <Stadium />
       <SceneActors />
       <Ball />
-      <StrikeZone showAim={playerBatting} />
+      {!inningBreak && <StrikeZone showAim={playerBatting} />}
 
       <CameraRig mode={cameraMode} />
       <Driver />

@@ -70,6 +70,8 @@ export type MatchPhase =
   | 'FLIGHT'
   /** 타구/판정 연출 중 */
   | 'RESULT'
+  /** 공수 교대. 스카이뷰로 그라운드를 비추며 회차를 알린다 */
+  | 'INNING_BREAK'
   | 'GAME_OVER';
 
 export interface LogEntry {
@@ -99,6 +101,12 @@ interface MatchStore {
    * SETUP에 들어갈 때마다 다시 감긴다.
    */
   pitchClockEndsAt: number;
+
+  /**
+   * 공수 교대 안내가 끝나는 시각 (performance.now() 기준). 0이면 교대 중이 아니다.
+   * 카메라(스카이뷰)와 안내 문구가 이 시각까지 유지된다.
+   */
+  inningBreakEndsAt: number;
 
   trajectory: PitchTrajectory | null;
   pitchCmd: PitchCommand | null;
@@ -132,6 +140,14 @@ interface MatchStore {
   playRate: number;
   /** 결과 연출 총 길이 (ms) */
   resultMs: number;
+  /**
+   * 결과가 화면에 공개되었는가.
+   * 판정은 배트에 맞는 순간 이미 끝나 있지만, 화면(배너·로그·카운트·환호)은
+   * 눈으로 승부가 끝날 때까지 기다린다. false인 동안은 투구 직전 상태를 그린다.
+   */
+  revealed: boolean;
+  /** 결과가 공개되는 시각 (performance.now()) */
+  revealAt: number;
   log: LogEntry[];
   stealOrders: number[];
   /** 타격 조준 커서 */
@@ -213,6 +229,13 @@ export const BUNT_MS = 440;
 /** 타자가 공 도달 전에 스윙을 시작하는 시간 (ms). 임팩트를 모션 중간에 맞춘다. */
 const SWING_LEAD_MS = 150;
 
+/**
+ * 공수 교대 안내를 띄워 두는 시간 (ms).
+ * 3아웃이 나온 직후 곧바로 다음 이닝이 시작되면 공격/수비가 뜬금없이 뒤바뀐 것처럼
+ * 보이므로, 그 사이에 스카이뷰로 그라운드를 비추며 회차를 알린다.
+ */
+export const INNING_BREAK_MS = 5000;
+
 /** 스윙 종류에 맞는 모션 길이 */
 export function swingMotionMs(type: SwingType): number {
   return type === 'BUNT' ? BUNT_MS : SWING_MS;
@@ -242,11 +265,25 @@ function pitchTiming(traj: PitchTrajectory, settings: GameSettings) {
 }
 
 /**
+ * 결과가 공개된 뒤 최소한 이만큼은 배너를 띄워 둔다 (ms).
+ * 승부가 끝나는 순간에 맞춰 공개하므로, 이 여유가 없으면 결과를 읽기도 전에
+ * 다음 타석으로 넘어간다.
+ */
+const REVEAL_HOLD_MS = 1300;
+
+/**
  * 결과 연출의 배속과 길이를 정한다.
  * 주루가 길어질수록(2·3루타, 주자 다수) 조금 빠르게 돌리되,
  * 짧은 플레이는 실제 속도에 가깝게 둔다.
  */
 function playbackPlan(result: PitchResult, tl: PlayTimeline): { rate: number; ms: number } {
+  const plan = basePlan(result, tl);
+  // 공개 시점 + 읽을 시간보다 일찍 끝나면 안 된다
+  const revealMs = (tl.revealAt / plan.rate) * 1000;
+  return { rate: plan.rate, ms: Math.max(plan.ms, revealMs + REVEAL_HOLD_MS) };
+}
+
+function basePlan(result: PitchResult, tl: PlayTimeline): { rate: number; ms: number } {
   if (result.kind === 'HOME_RUN') {
     const rate = 1.15;
     return { rate, ms: (tl.duration / rate) * 1000 + 1800 };
@@ -260,6 +297,41 @@ function playbackPlan(result: PitchResult, tl: PlayTimeline): { rate: number; ms
   return { rate, ms: (tl.duration / rate) * 1000 + hold };
 }
 
+// --- 결과 공개 타이머 ---------------------------------------------------------
+// 판정이 끝난 뒤에도 화면은 기다린다. 그 대기를 관리하는 유일한 타이머.
+
+let revealTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingReveal: (() => void) | null = null;
+
+function scheduleReveal(fn: () => void, delayMs: number) {
+  cancelReveal();
+  pendingReveal = fn;
+  if (delayMs <= 0) {
+    flushReveal();
+    return;
+  }
+  revealTimer = setTimeout(flushReveal, delayMs);
+}
+
+/** 아직 공개하지 않았다면 지금 공개한다. 연출이 잘려도 로그는 남아야 한다. */
+function flushReveal() {
+  if (revealTimer) {
+    clearTimeout(revealTimer);
+    revealTimer = null;
+  }
+  const fn = pendingReveal;
+  pendingReveal = null;
+  fn?.();
+}
+
+function cancelReveal() {
+  if (revealTimer) {
+    clearTimeout(revealTimer);
+    revealTimer = null;
+  }
+  pendingReveal = null;
+}
+
 export const useMatchStore = create<MatchStore>((set, get) => ({
   mode: 'CPU',
   difficulty: 'NORMAL',
@@ -270,6 +342,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
   owners: {},
   seatNames: {},
   pitchClockEndsAt: 0,
+  inningBreakEndsAt: 0,
   trajectory: null,
   pitchCmd: null,
   pitchStartAt: 0,
@@ -284,6 +357,8 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
   resultStartAt: 0,
   playRate: 1,
   resultMs: 950,
+  revealed: true,
+  revealAt: 0,
   log: [],
   stealOrders: [],
   aim: { x: 0, y: 0 },
@@ -301,6 +376,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     const state = createGame(away, home, settings, seedSource);
     aiRng = new Rng(seedFromString(seedSource + ':ai'));
     logId = 0;
+    cancelReveal();
     startCrowd();
     set({
       mode: 'CPU',
@@ -312,11 +388,14 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       seatNames: {},
       phase: 'SETUP',
       pitchClockEndsAt: performance.now() + PITCH_CLOCK_MS,
+      inningBreakEndsAt: 0,
       trajectory: null,
       pitchCmd: null,
       lastResult: null,
       prePitchState: null,
       timeline: null,
+      revealed: true,
+      revealAt: 0,
       swung: false,
       swungAt: 0,
       stealOrders: [],
@@ -334,6 +413,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
   initOnlineGame: ({ state, mode, playerSide, sendFn }) => {
     aiRng = new Rng(seedFromString(state.id + ':ai'));
     logId = 0;
+    cancelReveal();
     startCrowd();
     set({
       mode,
@@ -345,11 +425,14 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       sendFn,
       phase: 'SETUP',
       pitchClockEndsAt: performance.now() + PITCH_CLOCK_MS,
+      inningBreakEndsAt: 0,
       trajectory: null,
       pitchCmd: null,
       lastResult: null,
       prePitchState: null,
       timeline: null,
+      revealed: true,
+      revealAt: 0,
       swung: false,
       swungAt: 0,
       stealOrders: [],
@@ -367,6 +450,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
   initPartyGame: ({ state, mode, playerSide, myUid, owners, seatNames, sendFn }) => {
     aiRng = new Rng(seedFromString(state.id + ':ai'));
     logId = 0;
+    cancelReveal();
     startCrowd();
     set({
       mode,
@@ -378,11 +462,14 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       sendFn,
       phase: 'SETUP',
       pitchClockEndsAt: performance.now() + PITCH_CLOCK_MS,
+      inningBreakEndsAt: 0,
       trajectory: null,
       pitchCmd: null,
       lastResult: null,
       prePitchState: null,
       timeline: null,
+      revealed: true,
+      revealAt: 0,
       swung: false,
       swungAt: 0,
       stealOrders: [],
@@ -529,11 +616,35 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
   },
 
   advance: () => {
+    // 연출이 잘렸더라도(빠른 진행·나가기 등) 실황 로그는 남기고 넘어간다
+    flushReveal();
     const { state } = get();
     if (!state) return;
     if (state.phase === 'GAME_OVER') {
       stopCrowd();
       set({ phase: 'GAME_OVER' });
+      return;
+    }
+    // 공수 교대. 곧바로 다음 이닝을 시작하면 공격/수비가 뜬금없이 뒤바뀌므로,
+    // 스카이뷰로 그라운드를 비추며 회차를 알리는 시간을 먼저 둔다.
+    // 안내가 끝나면 UI가 advance()를 한 번 더 불러 아래 분기로 들어온다.
+    if (state.phase === 'INNING_BREAK' && get().phase !== 'INNING_BREAK') {
+      playCheer(0.45, 2.4);
+      set({
+        phase: 'INNING_BREAK',
+        inningBreakEndsAt: performance.now() + INNING_BREAK_MS,
+        // 안내가 끝나고 SETUP에 들어갈 때 다시 감는다 (교대 시간은 재지 않는다)
+        pitchClockEndsAt: 0,
+        trajectory: null,
+        lastResult: null,
+        prePitchState: null,
+        timeline: null,
+        revealed: true,
+        revealAt: 0,
+        swung: false,
+        swungAt: 0,
+        stealOrders: [],
+      });
       return;
     }
     if (state.phase === 'INNING_BREAK') {
@@ -548,10 +659,13 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       phase: 'SETUP',
       // 다음 타자/투구를 준비하는 순간부터 피치 클락이 다시 흐른다
       pitchClockEndsAt: performance.now() + PITCH_CLOCK_MS,
+      inningBreakEndsAt: 0,
       trajectory: null,
       lastResult: null,
       prePitchState: null,
       timeline: null,
+      revealed: true,
+      revealAt: 0,
       swung: false,
       swungAt: 0,
       stealOrders: [],
@@ -574,16 +688,20 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
   },
 
   reset: () => {
+    cancelReveal();
     stopCrowd();
     set({
       state: null,
       phase: 'IDLE',
       pitchClockEndsAt: 0,
+      inningBreakEndsAt: 0,
       trajectory: null,
       pitchCmd: null,
       lastResult: null,
       prePitchState: null,
       timeline: null,
+      revealed: true,
+      revealAt: 0,
       log: [],
       stealOrders: [],
       swung: false,
@@ -806,8 +924,13 @@ function applyResult(set: SetFn, get: GetFn, result: PitchResult) {
       ? st.swungAt
       : clamp(st.pitchStartAt + st.displayFlightMs - SWING_LEAD_MS, now - motionMs * 0.4, now);
   const soundDelay = Math.max(0, (resultStartAt - now) / 1000);
+  // 결과가 공개되는 시각. 승부가 눈으로 끝나는 순간이다.
+  const revealAt = resultStartAt + (timeline.revealAt / plan.rate) * 1000;
+  const revealDelay = Math.max(0, (revealAt - now) / 1000);
 
   // --- 사운드 ---
+  // 투구·타격음은 실제로 그 일이 일어나는 순간(soundDelay)에, 결과를 알려 주는
+  // 소리(환호·파울 콜)는 결과가 공개되는 순간(revealDelay)에 울린다.
   if (!result.trajectory) {
     // 던지지 않은 공(피치 클락 위반). 미트 소리 없이 심판 콜만 울린다.
     playUmpireCall(result.pitchClockViolation === 'OFFENSE' ? 'strike' : 'ball');
@@ -815,7 +938,8 @@ function applyResult(set: SetFn, get: GetFn, result: PitchResult) {
     const bb = result.battedBall;
     if (bb.kind === 'BUNT' || bb.exitVelocity < 90) playWeakContact(soundDelay);
     else playBatCrack(clamp((bb.exitVelocity - 90) / 100, 0, 1), soundDelay);
-    if (result.kind === 'FOUL') playUmpireCall('foul', soundDelay + 0.1);
+    // 파울 콜은 공이 파울 지역에 떨어진 뒤에 나온다
+    if (result.kind === 'FOUL') playUmpireCall('foul', revealDelay + 0.1);
   } else if (result.swing.swing) {
     playWhiff(soundDelay);
     playMitt(result.trajectory.velocity, soundDelay);
@@ -831,13 +955,15 @@ function applyResult(set: SetFn, get: GetFn, result: PitchResult) {
     playUmpireCall('strike', soundDelay + 0.1);
   }
 
+  // 환호는 결과가 드러난 뒤에 터진다. 배트에 맞는 순간 홈런 팡파르가 울리면
+  // 공을 끝까지 볼 이유가 없어진다.
   if (result.kind === 'HOME_RUN') {
-    playHomeRunCelebration(soundDelay + 0.08);
+    playHomeRunCelebration(revealDelay + 0.08);
   } else if (result.kind === 'SINGLE' || result.kind === 'DOUBLE' || result.kind === 'TRIPLE') {
     const extraBases = result.kind === 'SINGLE' ? 0 : result.kind === 'DOUBLE' ? 1 : 2;
-    playHitCheer(extraBases, soundDelay + 0.08);
+    playHitCheer(extraBases, revealDelay + 0.08);
   } else if (result.runsScored > 0) {
-    playCheer(0.78, 2, soundDelay + 0.08);
+    playCheer(0.78, 2, revealDelay + 0.08);
   }
 
   set({
@@ -846,6 +972,8 @@ function applyResult(set: SetFn, get: GetFn, result: PitchResult) {
     lastResult: result,
     timeline,
     resultStartAt,
+    revealAt,
+    revealed: false,
     swung: true,
     swungAt,
     // 원격 타자의 스윙 종류는 결과가 도착해야 알 수 있다
@@ -856,7 +984,20 @@ function applyResult(set: SetFn, get: GetFn, result: PitchResult) {
     waitingRemote: false,
   });
 
-  // --- 로그 ---
+  // 실황 로그도 결과의 일부다. 미리 찍히면 배너를 감춘 의미가 없다.
+  scheduleReveal(() => {
+    set({ revealed: true });
+    pushResultLog(get, result, prev, next);
+  }, revealAt - performance.now());
+}
+
+/** 결과가 공개되는 순간에 남기는 실황 로그 */
+function pushResultLog(
+  get: GetFn,
+  result: PitchResult,
+  prev: GameState | null,
+  next: GameState,
+) {
   const push = get().pushLog;
   for (const sr of result.stealResults) {
     const name = prev ? offense(prev).roster[sr.playerId]?.name : '';
@@ -940,6 +1081,18 @@ export function hostResolveWithSwing(
 }
 
 // 편의 셀렉터 -----------------------------------------------------------------
+
+/**
+ * HUD(스코어보드·카운트·타자 정보)가 그릴 상태.
+ *
+ * 결과가 공개되기 전에는 투구 직전 상태를 쓴다. 아웃 카운트나 점수가 먼저
+ * 올라가면 타구를 보기도 전에 답을 알려 주는 셈이기 때문이다.
+ * 3D 화면(sceneState)이 연출 내내 투구 직전 상태를 쓰는 것과 같은 이유다.
+ */
+export function selectHudState(s: MatchStore): GameState | null {
+  if (s.phase === 'RESULT' && !s.revealed) return s.prePitchState ?? s.state;
+  return s.state;
+}
 
 export function selectBatter(s: MatchStore): Player | null {
   return s.state ? currentBatter(s.state) : null;

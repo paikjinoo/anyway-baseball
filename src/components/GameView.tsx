@@ -11,9 +11,11 @@ import {
   controlsBatter,
   controlsPitcher,
   currentControllerUid,
+  INNING_BREAK_MS,
   isPartyMode,
   isPlayerBatting,
   isSameSide,
+  selectHudState,
   useMatchStore,
 } from '@/lib/store/matchStore';
 import { bullpenCandidates, currentBatter, currentPitcher } from '@/lib/game/engine';
@@ -28,8 +30,11 @@ export function GameView({
   exitHref?: string;
 }) {
   const state = useMatchStore((s) => s.state);
+  // 결과가 공개되기 전까지 HUD는 투구 직전 상태를 그린다 (카운트·아웃·점수 감춤)
+  const hud = useMatchStore(selectHudState);
   const phase = useMatchStore((s) => s.phase);
   const lastResult = useMatchStore((s) => s.lastResult);
+  const revealed = useMatchStore((s) => s.revealed);
   const log = useMatchStore((s) => s.log);
   const advance = useMatchStore((s) => s.advance);
   const playerSide = useMatchStore((s) => s.playerSide);
@@ -39,6 +44,10 @@ export function GameView({
   const canBat = useMatchStore(controlsBatter);
   const canPitch = useMatchStore(controlsPitcher);
   const party = useMatchStore((s) => isPartyMode(s.mode));
+  // 공수 교대를 건너뛰는 건 혼자 하는 경기에서만. 온라인에서 한 명만 먼저 넘어가면
+  // 그 사람의 투구 명령을 아직 교대 중인 호스트가 버리거나(무한 대기 -> 피치 클락 위반),
+  // 반대로 호스트가 먼저 넘어가면 남은 사람의 연출이 잘리고 시계만 깎인다.
+  const canSkipBreak = useMatchStore((s) => s.mode === 'CPU');
   const controllerUid = useMatchStore(currentControllerUid);
   const controllerName = useMatchStore((s) =>
     controllerUid ? (s.seatNames[controllerUid] ?? '상대') : '',
@@ -51,6 +60,7 @@ export function GameView({
   const [showLog, setShowLog] = useState(true);
   const logRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const breakTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 결과 연출 후 자동 진행.
   // 연출 길이는 주루 타임라인에서 계산된다 (주자가 다 뛴 뒤에 다음 타석으로 넘어간다).
@@ -64,19 +74,34 @@ export function GameView({
     };
   }, [phase, lastResult, advance]);
 
+  // 공수 교대 안내가 끝나면 다음 이닝을 시작한다.
+  // (advance()를 한 번 더 부르면 엔진 상태가 INNING_BREAK -> SETUP으로 넘어간다)
+  useEffect(() => {
+    if (phase !== 'INNING_BREAK') return;
+    const ms = Math.max(0, useMatchStore.getState().inningBreakEndsAt - performance.now());
+    breakTimerRef.current = setTimeout(() => advance(), ms);
+    return () => {
+      if (breakTimerRef.current) clearTimeout(breakTimerRef.current);
+    };
+  }, [phase, advance]);
+
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: 'smooth' });
   }, [log.length]);
 
-  if (!state) {
+  if (!state || !hud) {
     return (
       <div className="grid min-h-dvh place-items-center text-slate-500">경기를 준비하는 중…</div>
     );
   }
 
-  const batter = currentBatter(state);
-  const pitcher = currentPitcher(state);
-  const over = state.phase === 'GAME_OVER';
+  const batter = currentBatter(hud);
+  const pitcher = currentPitcher(hud);
+  // 끝내기 상황에서 종료 화면이 먼저 뜨면 마지막 플레이를 볼 수 없다.
+  // 연출이 끝나고 advance()가 돌아야 띄운다.
+  const over = state.phase === 'GAME_OVER' && phase !== 'RESULT';
+  // 공수 교대 중에는 조작 패널을 접어 스카이뷰를 가리지 않는다
+  const inningBreak = phase === 'INNING_BREAK';
 
   return (
     <div className="game-shell relative h-dvh w-full overflow-hidden bg-black">
@@ -89,9 +114,9 @@ export function GameView({
       <div className="game-topbar pointer-events-none absolute inset-x-0 top-0 z-20 p-3">
         <div className="pointer-events-auto mx-auto flex w-full max-w-5xl flex-wrap items-start gap-2">
           <div className="w-full max-w-xs">
-            <Scoreboard state={state} />
+            <Scoreboard state={hud} />
           </div>
-          <CountDisplay state={state} />
+          <CountDisplay state={hud} />
           <PitchClock />
           <div className="flex-1" />
           <div className="flex gap-1.5">
@@ -145,7 +170,7 @@ export function GameView({
       )}
 
       {/* 관전 안내 (2대2) */}
-      {!over && spectating && (
+      {!over && !inningBreak && spectating && (
         <div className="pointer-events-none absolute inset-x-0 top-20 z-20 flex justify-center">
           <div
             className={`panel px-4 py-2 text-center text-xs ${
@@ -162,10 +187,10 @@ export function GameView({
       )}
 
       {/* 조작 패널 */}
-      {!over && (
+      {!over && !inningBreak && (
         <div className="game-control-panel absolute bottom-3 right-3 z-20 w-[300px] max-w-[calc(100vw-24px)]">
           {canBat ? (
-            <BatPanel state={state} batter={batter} />
+            <BatPanel state={hud} batter={batter} />
           ) : canPitch && phase === 'SETUP' ? (
             <PitchPanel state={state} pitcher={pitcher} playerSide={playerSide as Side} />
           ) : (
@@ -207,16 +232,34 @@ export function GameView({
                 <span className="font-bold text-rose-300">피치 클락 위반</span>
               )}
             </div>
-            <div className="text-base font-bold">{lastResult.description}</div>
-            {lastResult.battedBall && lastResult.contact && (
-              <div className="mt-0.5 text-[11px] text-slate-400">
-                타구속도 {Math.round(lastResult.battedBall.exitVelocity)}km/h · 발사각{' '}
-                {Math.round(lastResult.battedBall.launchAngle)}° · 비거리{' '}
-                {Math.round(lastResult.battedBall.distance)}m
+            {revealed ? (
+              <div className="pop-in">
+                <div className="text-base font-bold">{lastResult.description}</div>
+                {lastResult.battedBall && lastResult.contact && (
+                  <div className="mt-0.5 text-[11px] text-slate-400">
+                    타구속도 {Math.round(lastResult.battedBall.exitVelocity)}km/h · 발사각{' '}
+                    {Math.round(lastResult.battedBall.launchAngle)}° · 비거리{' '}
+                    {Math.round(lastResult.battedBall.distance)}m
+                  </div>
+                )}
               </div>
+            ) : lastResult.contact ? (
+              // 아직 승부가 끝나지 않았다. 타구 데이터도 답을 알려 주므로 함께 감춘다.
+              <div className="text-base font-bold text-amber-300 flash">타구!</div>
+            ) : lastResult.stealResults.length > 0 ? (
+              // 주자가 뛰는 건 어차피 화면에 보인다. 세이프/아웃만 감춘다.
+              <div className="text-base font-bold text-amber-300 flash">주자 스타트!</div>
+            ) : (
+              // 공이 미트에 닿기 직전 (CPU 타자는 판정이 먼저 확정된다)
+              <div className="text-base font-bold text-slate-500">…</div>
             )}
           </div>
         </div>
+      )}
+
+      {/* 공수 교대 안내 */}
+      {inningBreak && (
+        <InningBreakOverlay state={state} onSkip={canSkipBreak ? advance : null} />
       )}
 
       {/* 경기 종료 */}
@@ -262,6 +305,59 @@ export function GameView({
             </div>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 공수 교대 안내.
+ * 3아웃 직후 스카이뷰(카메라는 GameScene이 잡는다) 위에 몇 회 초/말인지를
+ * 띄워 두는 화면. INNING_BREAK_MS가 지나면 GameView가 다음 이닝을 시작한다.
+ *
+ * onSkip이 null이면 건너뛰기 버튼을 내린다. 여럿이 하는 경기에서는 한 명만
+ * 먼저 넘어가면 나머지와 단계가 어긋나므로 다 같이 기다린다.
+ */
+function InningBreakOverlay({
+  state,
+  onSkip,
+}: {
+  state: GameState;
+  onSkip: (() => void) | null;
+}) {
+  const top = state.half === 'TOP';
+  const offense = top ? state.away : state.home;
+  const defense = top ? state.home : state.away;
+
+  return (
+    <div className="inning-break pointer-events-none absolute inset-0 z-30 grid place-items-center">
+      <div className="inning-break-card text-center">
+        <div className="inning-break-kicker">공수 교대</div>
+        <div className="inning-break-title tabular">
+          {state.inning}회 {top ? '초' : '말'}
+        </div>
+        <div className="inning-break-sides">
+          <span>
+            <i style={{ background: offense.primaryColor }} />
+            {offense.name} 공격
+          </span>
+          <span className="inning-break-dot">·</span>
+          <span>
+            <i style={{ background: defense.primaryColor }} />
+            {defense.name} 수비
+          </span>
+        </div>
+        <div className="inning-break-score tabular">
+          {state.away.abbr} {state.away.runs} : {state.home.runs} {state.home.abbr}
+        </div>
+        <div className="inning-break-progress">
+          <i style={{ animationDuration: `${INNING_BREAK_MS}ms` }} />
+        </div>
+      </div>
+      {onSkip && (
+        <button className="inning-break-skip pointer-events-auto" onClick={onSkip}>
+          건너뛰기 ›
+        </button>
       )}
     </div>
   );

@@ -1032,6 +1032,157 @@ input[type='checkbox'] {
   background: rgba(5, 13, 9, 0.84);
 }
 
+/* 공수 교대 안내 (스카이뷰 위에 얹는다).
+   글자가 잔디 위에 바로 얹히면 읽기 어려우므로, 가운데를 어둡게 깔아
+   문구 뒤에만 그늘을 만들고 그라운드는 그대로 보이게 둔다. */
+.inning-break {
+  background:
+    radial-gradient(ellipse 42% 26% at 50% 47%, rgba(2, 8, 5, 0.72), rgba(2, 8, 5, 0) 72%),
+    linear-gradient(
+      180deg,
+      rgba(2, 8, 5, 0.5),
+      rgba(2, 8, 5, 0.06) 26%,
+      rgba(2, 8, 5, 0.06) 72%,
+      rgba(2, 8, 5, 0.5)
+    );
+  animation: inning-break-in 0.45s ease-out;
+}
+
+@keyframes inning-break-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.inning-break-card {
+  width: min(86vw, 460px);
+  padding: 0 12px;
+}
+
+.inning-break-kicker {
+  color: var(--accent);
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.36em;
+  text-indent: 0.36em;
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.7);
+}
+
+.inning-break-title {
+  margin-top: 0.35rem;
+  font-size: clamp(3rem, 12vw, 5.25rem);
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  text-shadow: 0 6px 30px rgba(0, 0, 0, 0.72);
+  animation: inning-break-title 0.55s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes inning-break-title {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+    letter-spacing: 0.2em;
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    letter-spacing: -0.03em;
+  }
+}
+
+.inning-break-sides {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-top: 0.7rem;
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 700;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.7);
+}
+
+.inning-break-sides span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+}
+
+.inning-break-sides i {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.16);
+}
+
+.inning-break-dot {
+  color: var(--muted-2);
+}
+
+.inning-break-score {
+  margin-top: 0.5rem;
+  color: #c4d2ca;
+  font-size: 0.86rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.7);
+}
+
+.inning-break-progress {
+  overflow: hidden;
+  width: min(230px, 60vw);
+  height: 3px;
+  margin: 1.1rem auto 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.inning-break-progress i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-strong));
+  transform-origin: left center;
+  animation-name: inning-break-progress;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
+@keyframes inning-break-progress {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+.inning-break-skip {
+  position: absolute;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.42rem 0.95rem;
+  background: rgba(5, 13, 9, 0.68);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 700;
+  backdrop-filter: blur(10px);
+  transition: color 160ms ease, border-color 160ms ease;
+}
+
+.inning-break-skip:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
 @keyframes pop-in {
   from {
     opacity: 0;

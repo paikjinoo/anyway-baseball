@@ -119,6 +119,11 @@ export interface PlayTimeline {
   ground: GroundBall | null;
   /** 모든 움직임이 정리되는 시각 (s) */
   duration: number;
+  /**
+   * 결과를 화면에 드러내도 되는 시각 (s).
+   * 이 시각까지는 판정을 알고 있어도 감춘다 (revealTime 참고).
+   */
+  revealAt: number;
   homeRun: boolean;
 }
 
@@ -127,6 +132,7 @@ const EMPTY: PlayTimeline = {
   field: null,
   ground: null,
   duration: 0,
+  revealAt: 0,
   homeRun: false,
 };
 
@@ -143,7 +149,14 @@ export function buildTimeline(
   if (!result.runnerMoves.length) {
     // 주루가 없어도 타구는 날아가고 야수는 움직인다
     const hang = result.battedBall ? result.battedBall.hangTime + 0.5 : 0;
-    return { ...EMPTY, field, ground, duration: Math.max(hang, fieldEnd(field)) };
+    const duration = Math.max(hang, fieldEnd(field));
+    return {
+      ...EMPTY,
+      field,
+      ground,
+      duration,
+      revealAt: clamp(revealTime(result, field, []), 0, duration),
+    };
   }
 
   const homeRun = result.kind === 'HOME_RUN';
@@ -219,13 +232,77 @@ export function buildTimeline(
     if (!homeRun) duration = Math.max(duration, cursor);
   }
 
+  const total = Math.max(duration + 0.45, homeRun ? 0 : fieldEnd(field));
   return {
     runners,
     field,
     ground,
-    duration: Math.max(duration + 0.45, homeRun ? 0 : fieldEnd(field)),
+    duration: total,
+    revealAt: clamp(revealTime(result, field, runners), 0, total),
     homeRun,
   };
+}
+
+// ---------------------------------------------------------------------------
+// 결과 공개 시점
+// ---------------------------------------------------------------------------
+
+/**
+ * 공이 담장 상공을 지나는 시각 (s).
+ * 홈런이 확정되는 건 관중석에 떨어질 때가 아니라 이 순간이다.
+ */
+function fenceCrossTime(bb: BattedBall): number {
+  const path = bb.path;
+  if (path.length < 2) return bb.hangTime;
+  for (let i = 0; i < path.length; i++) {
+    const p = path[i];
+    if (Math.hypot(p.x, p.z) >= fenceDistance(Math.atan2(p.x, p.z))) {
+      // path는 hangTime을 등간격으로 샘플링한 것이다 (sampleBattedPath와 같은 규약)
+      return (i / (path.length - 1)) * bb.hangTime;
+    }
+  }
+  return bb.hangTime;
+}
+
+/**
+ * 결과를 화면에 드러내도 되는 시각 (s, 타격 순간이 0).
+ *
+ * 엔진은 배트에 맞는 순간 이미 답을 알고 있다. 그대로 그리면 타구가 날아가기도
+ * 전에 "2루타"가 떠서 공을 지켜볼 이유가 없어진다. 그래서 판정 시각과 별개로
+ * "눈으로 승부가 끝나는 순간"을 잡아 두고, 화면은 그때까지 결과를 감춘다.
+ *
+ * 야수가 공을 잡고, 송구가 베이스에 닿고, 주자가 마지막 베이스를 밟을 때까지가
+ * 그 시각이다. 전부 판정에 쓰인 값에서 나오므로 화면과 결과가 어긋나지 않는다.
+ */
+function revealTime(
+  result: PitchResult,
+  field: FieldAnim | null,
+  runners: RunnerAnim[],
+): number {
+  const bb = result.battedBall;
+
+  // 타구가 없는 공은 심판이 곧바로 콜한다. 도루만 주자가 닿아야 안다.
+  if (!bb || !result.contact) {
+    if (!result.stealResults.length) return 0;
+    const ids = new Set(result.stealResults.map((s) => s.playerId));
+    return runners.reduce((t, r) => (ids.has(r.playerId) ? Math.max(t, r.finish) : t), 0);
+  }
+
+  if (result.kind === 'HOME_RUN') return fenceCrossTime(bb);
+  // 파울처럼 수비가 붙지 않는 타구는 공이 떨어지는 순간 판정된다
+  if (!field) return bb.hangTime;
+
+  let t = field.chase.secure;
+  // 송구 없이 직접 베이스를 밟으러 가는 구간 (1루수 땅볼 처리 등)
+  const carry = field.chase.legs[1];
+  if (carry) t = Math.max(t, carry.end);
+  const lastThrow = field.throws[field.throws.length - 1];
+  if (lastThrow) t = Math.max(t, lastThrow.end);
+  // 몇 루타인지, 세이프인지는 주자가 멈춰야 결정된다
+  for (const r of runners) {
+    if (r.out || r.scored || (r.legs[0]?.from ?? 0) < 0) t = Math.max(t, r.finish);
+  }
+  return t;
 }
 
 /** 타자주자(타석에서 출발한 주자)의 애니메이션 */
