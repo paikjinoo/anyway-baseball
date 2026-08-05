@@ -70,6 +70,7 @@ export interface PartyHostHandlers {
 
 interface PeerSlot {
   uid: string;
+  offerSdp?: string;
   pc: RTCPeerConnection;
   ch: RTCDataChannel | null;
   unsubs: (() => void)[];
@@ -129,11 +130,18 @@ export class PartyHost {
     this.unsubs.push(
       onSnapshot(collection(roomRef, 'peers'), (snap) => {
         snap.docChanges().forEach((c) => {
-          if (c.type !== 'added') return;
           const data = c.doc.data() as { uid?: string; offer?: RTCSessionDescriptionInit };
           const uid = data.uid ?? c.doc.id;
-          if (!data.offer || this.peers.has(uid)) return;
-          void this.accept(uid, data.offer as RTCSessionDescriptionInit).catch((e) =>
+          if (c.type === 'removed') {
+            this.releasePeer(uid, 'closed');
+            return;
+          }
+          if (!data.offer) return;
+          const existing = this.peers.get(uid);
+          // 새로고침한 게스트가 같은 문서에 새 offer를 쓰면 기존 슬롯을 교체한다.
+          if (existing && existing.offerSdp !== data.offer.sdp) this.releasePeer(uid, 'closed');
+          if (this.peers.has(uid)) return;
+          void this.accept(uid, data.offer).catch((e) =>
             this.handlers.onError?.(String((e as Error)?.message ?? e)),
           );
         });
@@ -159,7 +167,7 @@ export class PartyHost {
 
     const peerRef = doc(db, 'rooms', this.roomId, 'peers', uid);
     const pc = new RTCPeerConnection({ iceServers: iceServers(), iceCandidatePoolSize: 4 });
-    const slot: PeerSlot = { uid, pc, ch: null, unsubs: [] };
+    const slot: PeerSlot = { uid, offerSdp: offer.sdp, pc, ch: null, unsubs: [] };
     this.peers.set(uid, slot);
 
     const queue = new CandidateQueue(pc);
@@ -167,11 +175,8 @@ export class PartyHost {
     pc.onconnectionstatechange = () => {
       const s = pc.connectionState;
       if (s === 'connected') this.handlers.onPeer(uid, 'connected');
-      else if (s === 'failed') {
-        this.handlers.onPeer(uid, 'failed');
-      } else if (s === 'disconnected' || s === 'closed') {
-        this.handlers.onPeer(uid, 'closed');
-      }
+      else if (s === 'failed') this.releasePeer(uid, 'failed', slot);
+      else if (s === 'disconnected' || s === 'closed') this.releasePeer(uid, 'closed', slot);
     };
 
     pc.ondatachannel = (e) => {
@@ -179,7 +184,7 @@ export class PartyHost {
       const ch = e.channel;
       slot.ch = ch;
       ch.onopen = () => this.handlers.onPeer(uid, 'connected');
-      ch.onclose = () => this.handlers.onPeer(uid, 'closed');
+      ch.onclose = () => this.releasePeer(uid, 'closed', slot);
       ch.onmessage = (ev) => {
         const msg = decode(typeof ev.data === 'string' ? ev.data : '');
         if (msg) this.handlers.onMessage(msg, uid);
@@ -190,20 +195,42 @@ export class PartyHost {
       if (e.candidate) void addDoc(collection(peerRef, 'hostCandidates'), e.candidate.toJSON());
     };
 
-    await pc.setRemoteDescription(new RTCSessionDescription(offer));
-    queue.flush();
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    await updateDoc(peerRef, { answer: { type: answer.type, sdp: answer.sdp } });
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      queue.flush();
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      if (this.peers.get(uid) !== slot) return;
+      await updateDoc(peerRef, { answer: { type: answer.type, sdp: answer.sdp } });
 
-    slot.unsubs.push(
-      onSnapshot(collection(peerRef, 'guestCandidates'), (snap) => {
-        snap.docChanges().forEach((c) => {
-          if (c.type === 'added') queue.add(c.doc.data() as RTCIceCandidateInit);
-        });
-      }),
-    );
+      slot.unsubs.push(
+        onSnapshot(collection(peerRef, 'guestCandidates'), (snap) => {
+          snap.docChanges().forEach((c) => {
+            if (c.type === 'added') queue.add(c.doc.data() as RTCIceCandidateInit);
+          });
+        }),
+      );
+    } catch (error) {
+      this.releasePeer(uid, 'failed', slot);
+      throw error;
+    }
 
+    void this.syncPlayerCount();
+  }
+
+  /** 종료된 연결을 내부 목록에서도 제거해 같은 uid나 새 게스트가 들어올 자리를 만든다. */
+  private releasePeer(uid: string, state: 'closed' | 'failed', expected?: PeerSlot) {
+    const slot = this.peers.get(uid);
+    if (!slot || (expected && slot !== expected)) return;
+    this.peers.delete(uid);
+    for (const unsub of slot.unsubs) unsub();
+    try {
+      slot.ch?.close();
+      slot.pc.close();
+    } catch {
+      /* noop */
+    }
+    this.handlers.onPeer(uid, state);
     void this.syncPlayerCount();
   }
 
@@ -328,11 +355,13 @@ export class PartyGuest {
     const room = snap.data() as RoomInfo;
     if (room.mode !== '2v2') throw new Error('2대2 방이 아닙니다.');
     if (room.status !== 'waiting') throw new Error('이미 시작되었거나 종료된 방입니다.');
-    if ((room.playerCount ?? 1) >= 4 && room.hostUid !== me.uid) {
+
+    const peerRef = doc(roomRef, 'peers', me.uid);
+    const priorPeer = await getDoc(peerRef);
+    if ((room.playerCount ?? 1) >= 4 && !priorPeer.exists()) {
       throw new Error('방이 가득 찼습니다 (4명).');
     }
 
-    const peerRef = doc(roomRef, 'peers', me.uid);
     const pc = new RTCPeerConnection({ iceServers: iceServers(), iceCandidatePoolSize: 4 });
     this.pc = pc;
     const queue = new CandidateQueue(pc);

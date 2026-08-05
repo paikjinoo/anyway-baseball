@@ -7,6 +7,7 @@ import { PeerConnection, type ConnState } from '@/lib/net/webrtc';
 import type { NetMessage } from '@/lib/net/protocol';
 import { GameView } from '@/components/GameView';
 import { useMatchStore } from '@/lib/store/matchStore';
+import { changePitcher } from '@/lib/game/engine';
 import type { Team } from '@/lib/game/types';
 
 export default function GuestRoomPage() {
@@ -78,13 +79,8 @@ export default function GuestRoomPage() {
       case 'SUB_PITCHER': {
         const st = useMatchStore.getState();
         if (!st.state) break;
-        const next = structuredClone(st.state);
-        if (next[msg.side].roster[msg.pitcherId]) {
-          next[msg.side].pitcherId = msg.pitcherId;
-          next[msg.side].pitcherPitches = 0;
-          next[msg.side].defense.P = msg.pitcherId;
-          applyRemoteState(next);
-        }
+        const next = changePitcher(structuredClone(st.state), msg.side, msg.pitcherId);
+        if (next[msg.side].pitcherId !== st.state[msg.side].pitcherId) applyRemoteState(next);
         break;
       }
       case 'LEAVE':

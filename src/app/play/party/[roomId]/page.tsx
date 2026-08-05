@@ -7,6 +7,7 @@ import { PartyGuest } from '@/lib/net/party';
 import type { ConnState } from '@/lib/net/webrtc';
 import type { NetMessage, PartyPicks, PartySeat } from '@/lib/net/protocol';
 import { suggestPicks } from '@/lib/game/allstar';
+import { changePitcher } from '@/lib/game/engine';
 import { GameView } from '@/components/GameView';
 import { PartyRoomView } from '@/components/party/PartyRoomView';
 import { useMatchStore } from '@/lib/store/matchStore';
@@ -96,11 +97,9 @@ export default function PartyGuestPage() {
         break;
       case 'SUB_PITCHER': {
         if (!store.state) break;
-        const next = structuredClone(store.state);
-        if (next[msg.side].roster[msg.pitcherId]) {
-          next[msg.side].pitcherId = msg.pitcherId;
-          next[msg.side].pitcherPitches = 0;
-          next[msg.side].defense.P = msg.pitcherId;
+        const beforePitcherId = store.state[msg.side].pitcherId;
+        const next = changePitcher(structuredClone(store.state), msg.side, msg.pitcherId);
+        if (next[msg.side].pitcherId !== beforePitcherId) {
           store.applyRemoteState(next);
           store.pushLog(
             `${next[msg.side].name} 투수 교체: ${next[msg.side].roster[msg.pitcherId].name}`,

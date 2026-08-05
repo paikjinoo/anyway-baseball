@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useMatchStore } from '@/lib/store/matchStore';
-import { SWING_DEFS } from '@/lib/game/constants';
+import { SWING_DEFS, swingDisplayRadius } from '@/lib/game/constants';
 import { playClick } from '@/lib/audio/sfx';
 import type { GameState, Player, SwingType } from '@/lib/game/types';
 import { baseballRate } from '@/lib/format';
@@ -143,7 +143,7 @@ export function BatPanel({ state, batter }: { state: GameState; batter: Player }
             style={{
               left: `${((aim.x / 1.7 + 1) / 2) * 100}%`,
               top: `${((1 - aim.y / 1.7) / 2) * 100}%`,
-              width: `${(SWING_DEFS[swingType].contactRadius * (0.62 + (0.72 * batter.batting.contact) / 99) / 1.7) * 100}%`,
+              width: `${(swingDisplayRadius(swingType, batter.batting.contact) / 1.7) * 100}%`,
               aspectRatio: '1',
             }}
           />

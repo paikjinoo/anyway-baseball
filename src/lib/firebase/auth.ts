@@ -17,18 +17,21 @@ export interface AppUser {
 }
 
 const GUEST_KEY = 'ab:guestUid';
+const GUEST_ACTIVE_KEY = 'ab:guestActive';
 
-/** Firebase 미설정 환경에서 쓰는 로컬 게스트 계정 */
+/** 로컬 게스트 계정. Firebase 설정 여부와 무관하게 같은 uid를 유지한다. */
 export function getOrCreateGuest(): AppUser {
   let uid = typeof window !== 'undefined' ? localStorage.getItem(GUEST_KEY) : null;
   if (!uid) {
     uid = 'guest_' + Math.random().toString(36).slice(2, 12);
     if (typeof window !== 'undefined') localStorage.setItem(GUEST_KEY, uid);
   }
+  if (typeof window !== 'undefined') localStorage.setItem(GUEST_ACTIVE_KEY, '1');
   return { uid, displayName: '게스트 감독', photoURL: null, isGuest: true };
 }
 
 export function toAppUser(u: User): AppUser {
+  if (typeof window !== 'undefined') localStorage.removeItem(GUEST_ACTIVE_KEY);
   return {
     uid: u.uid,
     displayName: u.displayName ?? '감독',
@@ -62,8 +65,20 @@ export function watchAuth(cb: (user: AppUser | null) => void): () => void {
   }
   const auth = getFirebaseAuth();
   if (!auth) {
-    cb(null);
+    cb(
+      typeof window !== 'undefined' && localStorage.getItem(GUEST_ACTIVE_KEY) === '1'
+        ? getOrCreateGuest()
+        : null,
+    );
     return () => {};
   }
-  return onAuthStateChanged(auth, (u) => cb(u ? toAppUser(u) : null));
+  return onAuthStateChanged(auth, (u) => {
+    if (u) {
+      cb(toAppUser(u));
+      return;
+    }
+    const restoreGuest =
+      typeof window !== 'undefined' && localStorage.getItem(GUEST_ACTIVE_KEY) === '1';
+    cb(restoreGuest ? getOrCreateGuest() : null);
+  });
 }

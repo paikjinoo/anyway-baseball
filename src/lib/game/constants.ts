@@ -294,6 +294,11 @@ export const SWING_DEFS: Record<'NORMAL' | 'POWER' | 'BUNT', SwingDef> = {
   BUNT: { ko: '번트', contactRadius: 1.3, timingWindow: 185, powerMult: 0.18, whiffBias: -0.2 },
 };
 
+/** 조준 UI에 표시할 컨택 반경 (존 좌표계 단위). */
+export function swingDisplayRadius(type: keyof typeof SWING_DEFS, contact: number): number {
+  return SWING_DEFS[type].contactRadius * (0.62 + (0.72 * contact) / 99);
+}
+
 // ---------------------------------------------------------------------------
 // 커스터마이징 카탈로그
 // ---------------------------------------------------------------------------

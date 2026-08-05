@@ -10,6 +10,7 @@ import { configureAudio } from '../audio/sfx';
 interface AppState {
   user: AppUser | null;
   authReady: boolean;
+  dataReady: boolean;
   teams: Team[];
   activeTeamId: string | null;
   leagues: League[];
@@ -17,6 +18,7 @@ interface AppState {
 
   setUser: (u: AppUser | null) => void;
   setAuthReady: (v: boolean) => void;
+  setDataReady: (v: boolean) => void;
   setTeams: (t: Team[]) => void;
   upsertTeam: (t: Team) => void;
   removeTeam: (id: string) => void;
@@ -33,13 +35,15 @@ const ACTIVE_KEY = 'ab:activeTeam';
 export const useAppStore = create<AppState>((set, get) => ({
   user: null,
   authReady: false,
+  dataReady: false,
   teams: [],
   activeTeamId: typeof window !== 'undefined' ? localStorage.getItem(ACTIVE_KEY) : null,
   leagues: [],
   settings: DEFAULT_SETTINGS,
 
-  setUser: (user) => set({ user }),
+  setUser: (user) => set({ user, dataReady: false }),
   setAuthReady: (authReady) => set({ authReady }),
+  setDataReady: (dataReady) => set({ dataReady }),
   setTeams: (teams) => {
     const { activeTeamId } = get();
     const stillValid = activeTeamId && teams.some((t) => t.id === activeTeamId);

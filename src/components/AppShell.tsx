@@ -25,12 +25,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const authReady = useAppStore((s) => s.authReady);
   const setUser = useAppStore((s) => s.setUser);
   const setAuthReady = useAppStore((s) => s.setAuthReady);
+  const setDataReady = useAppStore((s) => s.setDataReady);
   const setTeams = useAppStore((s) => s.setTeams);
   const setLeagues = useAppStore((s) => s.setLeagues);
   const hydrateSettings = useAppStore((s) => s.hydrateSettings);
   const matchActive = useMatchStore((s) => s.phase !== 'IDLE');
-
-  const inGame = pathname?.startsWith('/play/');
 
   useEffect(() => {
     hydrateSettings();
@@ -43,18 +42,29 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   // 로그인되면 팀/리그를 불러온다
   useEffect(() => {
-    if (!user) return;
+    if (!authReady) return;
+    if (!user) {
+      setTeams([]);
+      setLeagues([]);
+      setDataReady(true);
+      return;
+    }
+    setDataReady(false);
     let alive = true;
     void (async () => {
-      const [teams, leagues] = await Promise.all([listTeams(user.uid), listLeagues(user.uid)]);
-      if (!alive) return;
-      setTeams(teams);
-      setLeagues(leagues);
+      try {
+        const [teams, leagues] = await Promise.all([listTeams(user.uid), listLeagues(user.uid)]);
+        if (!alive) return;
+        setTeams(teams);
+        setLeagues(leagues);
+      } finally {
+        if (alive) setDataReady(true);
+      }
     })();
     return () => {
       alive = false;
     };
-  }, [user, setTeams, setLeagues]);
+  }, [authReady, user, setTeams, setLeagues, setDataReady]);
 
   // 첫 상호작용에 오디오 컨텍스트 활성화
   useEffect(() => {
@@ -73,8 +83,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     else startMenuBgm();
     return () => stopMenuBgm();
   }, [matchActive]);
-
-  if (inGame) return <>{children}</>;
 
   const navLinks = (mobile = false) =>
     NAV.map((n) => {
@@ -96,10 +104,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     });
 
   return (
-    <div className="app-shell">
-      <div className="site-ambient" aria-hidden />
+    <div className={matchActive ? '' : 'app-shell'}>
+      <div className={matchActive ? 'hidden' : 'site-ambient'} aria-hidden />
 
-      <header className="topbar">
+      <header className={matchActive ? 'hidden' : 'topbar'}>
         <div className="topbar-inner">
           <Link href="/" className="brand" aria-label="Anyway Baseball 홈">
             <span className="brand-mark">A/B</span>
@@ -152,13 +160,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
       </header>
 
-      <main className="app-main">{children}</main>
+      {/* main과 children은 같은 트리 위치를 유지해 경기 시작 시 페이지 상태가 초기화되지 않게 한다. */}
+      <main className={matchActive ? '' : 'app-main'}>{children}</main>
 
-      <nav className="mobile-nav" aria-label="모바일 주요 메뉴">
+      <nav className={matchActive ? 'hidden' : 'mobile-nav'} aria-label="모바일 주요 메뉴">
         {navLinks(true)}
       </nav>
 
-      <footer className="site-footer">
+      <footer className={matchActive ? 'hidden' : 'site-footer'}>
         ANYWAY BASEBALL · 승부는 당신의 선택에서 시작됩니다
       </footer>
     </div>

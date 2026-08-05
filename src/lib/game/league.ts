@@ -71,6 +71,7 @@ export function createLeague(
   teams: LeagueTeamRef[],
   settings: GameSettings,
   roundsPerOpponent: number,
+  cpuTeams: Team[] = [],
 ): League {
   const id = `l_${Math.random().toString(36).slice(2, 10)}`;
   return {
@@ -78,6 +79,7 @@ export function createLeague(
     name,
     ownerUid,
     teams,
+    cpuTeams,
     schedule: buildSchedule(teams, roundsPerOpponent, seedFromString(id + name)),
     settings,
     roundsPerOpponent,
@@ -226,6 +228,22 @@ export function nextGameFor(league: League, teamId: string): LeagueGame | undefi
   );
 }
 
+/** 직접 경기 URL을 열었을 때 플레이 가능한 내 경기인지 검증한다. */
+export function leagueGameIssue(league: League, gameId: string, playerTeamId: string): string | null {
+  const playerRef = league.teams.find((t) => t.teamId === playerTeamId);
+  if (!playerRef || playerRef.isCPU) return '이 리그에 참가한 내 팀을 찾을 수 없습니다.';
+  const game = league.schedule.find((g) => g.id === gameId);
+  if (!game) return '해당 리그 경기를 찾을 수 없습니다.';
+  if (game.status === 'FINAL') return '이미 종료된 경기입니다. 결과와 보상은 다시 기록할 수 없습니다.';
+  if (game.status !== 'SCHEDULED') return '이미 진행 중인 경기입니다.';
+  if (game.awayTeamId !== playerTeamId && game.homeTeamId !== playerTeamId) {
+    return '내 팀 경기가 아니므로 직접 플레이할 수 없습니다.';
+  }
+  const opponentId = game.awayTeamId === playerTeamId ? game.homeTeamId : game.awayTeamId;
+  if (!league.teams.some((t) => t.teamId === opponentId)) return '상대 팀 정보를 찾을 수 없습니다.';
+  return null;
+}
+
 /** 특정 라운드에서 아직 안 치른 경기들 */
 export function pendingGamesInRound(league: League, round: number): LeagueGame[] {
   return league.schedule.filter((g) => g.round === round && g.status === 'SCHEDULED');
@@ -240,7 +258,9 @@ export function recordResult(
   return {
     ...league,
     schedule: league.schedule.map((g) =>
-      g.id === gameId ? { ...g, status: 'FINAL' as const, awayScore, homeScore, playedAt: Date.now() } : g,
+      g.id === gameId && g.status === 'SCHEDULED'
+        ? { ...g, status: 'FINAL' as const, awayScore, homeScore, playedAt: Date.now() }
+        : g,
     ),
   };
 }

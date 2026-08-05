@@ -469,14 +469,20 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     if (!state || !trajectory || phase !== 'FLIGHT' || st.swung) return;
     if (!controlsBatter(st)) return;
 
+    const now = performance.now();
+    const elapsed = now - pitchStartAt;
+    // 와인드업 중 입력이 스윙을 소모하지 않도록 실제 릴리스 이후에만 받는다.
+    if (elapsed < 0) return;
+
     const t = type ?? swingType;
-    const elapsed = performance.now() - pitchStartAt;
-    // 화면 시간 오차를 엔진 시간 오차로 환산한다
+    // 입력 후 약 SWING_LEAD_MS 뒤에 배트가 임팩트 지점에 도달한다.
+    // 따라서 공 도착보다 그만큼 일찍 누른 순간을 정타(0ms)로 삼고,
+    // 화면 시간 오차를 엔진 시간 오차로 환산한다.
     const scale = clamp(state.settings.pitchSpeedScale, 0.25, 1);
-    const timingMs = (elapsed - displayFlightMs) * scale;
+    const timingMs = (elapsed - (displayFlightMs - SWING_LEAD_MS)) * scale;
 
     const cmd = { swing: true, type: t, aimX: aim.x, aimY: aim.y, timingMs };
-    set({ swung: true, swungAt: performance.now(), swungType: t });
+    set({ swung: true, swungAt: now, swungType: t });
 
     if (isRemoteMode(mode)) {
       // 도루 지시는 투구와 동시에 판정되므로 스윙과 함께 보낸다
@@ -553,12 +559,13 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
   },
 
   substitutePitcher: (pitcherId) => {
-    const { state, playerSide, mode, sendFn, owners, myUid } = get();
-    if (!state) return;
+    const { state, playerSide, mode, sendFn, owners, myUid, phase } = get();
+    if (!state || phase !== 'SETUP') return;
     // 2대2에서는 자기 투수만 마운드에 올릴 수 있다.
     // (팀원이 던지는 중이어도 자기 불펜을 올리면 조작권이 넘어온다)
     if (isPartyMode(mode) && owners[pitcherId] !== myUid) return;
     const next = changePitcher(structuredClone(state), playerSide, pitcherId);
+    if (next[playerSide].pitcherId === state[playerSide].pitcherId) return;
     // 투수를 바꾸면 피치 클락은 새로 감긴다 (교체하다 볼을 먹지 않도록)
     set({ state: next, pitchClockEndsAt: performance.now() + PITCH_CLOCK_MS });
     const p = next[playerSide].roster[pitcherId];

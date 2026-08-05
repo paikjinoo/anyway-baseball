@@ -89,6 +89,48 @@ export function picksComplete(picks: PartyPicks, slot: 0 | 1): boolean {
   return picks.batters.length === batterQuota(slot) && picks.pitchers.length === PITCHERS_PER_SLOT;
 }
 
+/** 호스트가 게스트의 픽 메시지를 신뢰하기 전에 수행하는 런타임 검증. */
+export function validatePartyPicks(
+  team: Team,
+  picks: PartyPicks,
+  slot: 0 | 1,
+  requireComplete = false,
+): string | null {
+  if (!picks || !Array.isArray(picks.batters) || !Array.isArray(picks.pitchers)) {
+    return '선수 선택 형식이 올바르지 않습니다.';
+  }
+
+  const batterNeed = batterQuota(slot);
+  if (picks.batters.length > batterNeed || picks.pitchers.length > PITCHERS_PER_SLOT) {
+    return '선수 선택 인원이 허용 범위를 넘었습니다.';
+  }
+  if (
+    requireComplete &&
+    (picks.batters.length !== batterNeed || picks.pitchers.length !== PITCHERS_PER_SLOT)
+  ) {
+    return '필요한 선수 선택이 끝나지 않았습니다.';
+  }
+
+  const ids = [...picks.batters, ...picks.pitchers];
+  if (ids.some((id) => typeof id !== 'string') || new Set(ids).size !== ids.length) {
+    return '같은 선수를 중복 선택할 수 없습니다.';
+  }
+
+  const roster = new Map(team.players.map((p) => [p.id, p]));
+  if (picks.batters.some((id) => !roster.has(id) || roster.get(id)?.position === 'P')) {
+    return '야수 선택에 소속 팀 야수가 아닌 선수가 포함되어 있습니다.';
+  }
+  if (
+    picks.pitchers.some((id) => {
+      const p = roster.get(id);
+      return !p || p.position !== 'P' || !p.pitching;
+    })
+  ) {
+    return '투수 선택에 소속 팀 투수가 아닌 선수가 포함되어 있습니다.';
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 
 /** 두 사람의 선수 id가 우연히 겹쳐도 섞이지 않도록 붙이는 접두사 */

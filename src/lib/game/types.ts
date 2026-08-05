@@ -261,6 +261,8 @@ export interface TeamInGame {
   pitcherId: string;
   /** 현재 투수의 투구 수 */
   pitcherPitches: number;
+  /** 이 경기에서 이미 등판한 투수. 강판된 투수의 재등판을 막는다. */
+  usedPitcherIds: string[];
   /** 수비 위치 배치. position -> playerId */
   defense: Partial<Record<Position, string>>;
   runs: number;
@@ -511,6 +513,8 @@ export interface League {
   name: string;
   ownerUid: string;
   teams: LeagueTeamRef[];
+  /** 다른 기기에서도 경기를 재현할 수 있도록 함께 동기화하는 CPU 팀 원본. */
+  cpuTeams?: Team[];
   schedule: LeagueGame[];
   settings: GameSettings;
   /** 팀 간 맞대결 횟수 */

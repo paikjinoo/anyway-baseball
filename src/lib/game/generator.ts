@@ -99,7 +99,7 @@ const POSITION_WEIGHTS: Record<Position, HitterWeights> = {
 
 const BATTING_KEYS: (keyof BattingAttr)[] = ['contact', 'power', 'eye', 'speed', 'fielding', 'arm'];
 
-function emptySeason(): SeasonStat {
+export function emptySeason(): SeasonStat {
   return {
     g: 0, pa: 0, ab: 0, h: 0, double: 0, triple: 0, hr: 0, rbi: 0, r: 0,
     bb: 0, so: 0, sb: 0, cs: 0, ip3: 0, er: 0, pk: 0, pbb: 0, ph: 0, w: 0, l: 0,

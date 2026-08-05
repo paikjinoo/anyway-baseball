@@ -6,8 +6,14 @@ import { useActiveTeam, useAppStore } from '@/lib/store/appStore';
 import { PartyHost } from '@/lib/net/party';
 import type { ConnState } from '@/lib/net/webrtc';
 import type { NetMessage, OwnerMap, PartyPicks, PartySeat } from '@/lib/net/protocol';
-import { createGame } from '@/lib/game/engine';
-import { buildAllStarTeam, disambiguateAbbr, suggestPicks, type AllStarEntry } from '@/lib/game/allstar';
+import { changePitcher, createGame } from '@/lib/game/engine';
+import {
+  buildAllStarTeam,
+  disambiguateAbbr,
+  suggestPicks,
+  validatePartyPicks,
+  type AllStarEntry,
+} from '@/lib/game/allstar';
 import { seedFromString } from '@/lib/game/rng';
 import { GameView } from '@/components/GameView';
 import { PartyRoomView } from '@/components/party/PartyRoomView';
@@ -78,6 +84,8 @@ function PartyHostInner() {
   // 좌석 목록을 최신 상태로 읽어야 하는 콜백들이 있어 ref로도 들고 있는다
   const seatsRef = useRef<PartySeat[]>([]);
   seatsRef.current = seats;
+  const startedRef = useRef(false);
+  startedRef.current = started;
 
   const broadcastSeats = useCallback(
     (next: PartySeat[]) => {
@@ -129,13 +137,22 @@ function PartyHostInner() {
 
   function handlePeerState(peerUid: string, state: ConnState) {
     if (state !== 'closed' && state !== 'failed') return;
+    const st = useMatchStore.getState();
+
+    // 대기실에서는 자리를 완전히 비워 재접속/대체 입장이 가능하게 한다.
+    if (!startedRef.current && !st.state) {
+      teamsRef.current.delete(peerUid);
+      picksRef.current.delete(peerUid);
+      broadcastSeats(seatsRef.current.filter((s) => s.uid !== peerUid));
+      return;
+    }
+
     const next = seatsRef.current.map((s) =>
       s.uid === peerUid ? { ...s, connected: false, ready: false } : s,
     );
     broadcastSeats(next);
 
     // 경기 중이었다면 그 사람의 선수를 방장이 인계받아 경기가 멈추지 않게 한다
-    const st = useMatchStore.getState();
     if (st.state && Object.keys(st.owners).length) {
       const owners: OwnerMap = {};
       for (const [pid, owner] of Object.entries(st.owners)) {
@@ -181,8 +198,16 @@ function PartyHostInner() {
       }
 
       case 'PARTY_PICK': {
-        picksRef.current.set(from, msg.picks);
+        if (typeof msg.ready !== 'boolean') break;
+        const seat = seatsRef.current.find((s) => s.uid === from);
         const roster = teamsRef.current.get(from);
+        if (!seat || !roster) break;
+        const invalid = validatePartyPicks(roster, msg.picks, seat.slot, msg.ready);
+        if (invalid) {
+          host.sendTo(from, { t: 'PARTY_SEATS', seats: seatsRef.current, hostUid: uid });
+          break;
+        }
+        picksRef.current.set(from, msg.picks);
         const nameOf = (id: string) => roster?.players.find((p) => p.id === id)?.name ?? '';
         broadcastSeats(
           seatsRef.current.map((s) =>
@@ -220,14 +245,11 @@ function PartyHostInner() {
       }
       case 'SUB_PITCHER': {
         const st = useMatchStore.getState();
-        if (!st.state) break;
+        if (!st.state || st.phase !== 'SETUP') break;
         // 자기 투수만 올릴 수 있다
         if (st.owners[msg.pitcherId] !== from) break;
-        const next = structuredClone(st.state);
-        if (!next[msg.side].roster[msg.pitcherId]) break;
-        next[msg.side].pitcherId = msg.pitcherId;
-        next[msg.side].pitcherPitches = 0;
-        next[msg.side].defense.P = msg.pitcherId;
+        const next = changePitcher(structuredClone(st.state), msg.side, msg.pitcherId);
+        if (next[msg.side].pitcherId === st.state[msg.side].pitcherId) break;
         st.applyRemoteState(next);
         st.pushLog(
           `${next[msg.side].name} 투수 교체: ${next[msg.side].roster[msg.pitcherId].name}`,
@@ -324,12 +346,14 @@ function PartyHostInner() {
     if (!host || !user || !team || !roomId) return;
 
     const entriesFor = (side: Side): [AllStarEntry, AllStarEntry] | null => {
-      const rows = seats.filter((s) => s.side === side);
-      if (rows.length !== 2) return null;
+      const rows = seatsRef.current.filter((s) => s.side === side);
+      if (rows.length !== 2 || rows.some((s) => !s.connected || !s.ready)) return null;
       const built = rows.map((s) => {
         const t = teamsRef.current.get(s.uid);
         const picks = picksRef.current.get(s.uid);
-        return t && picks ? { uid: s.uid, slot: s.slot, team: t, picks } : null;
+        return t && picks && !validatePartyPicks(t, picks, s.slot, true)
+          ? { uid: s.uid, slot: s.slot, team: t, picks }
+          : null;
       });
       if (built.some((b) => !b)) return null;
       return built as [AllStarEntry, AllStarEntry];

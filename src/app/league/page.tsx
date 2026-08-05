@@ -6,7 +6,7 @@ import { useActiveTeam, useAppStore } from '@/lib/store/appStore';
 import { Rng, seedFromString } from '@/lib/game/rng';
 import { generateTeam, teamRating } from '@/lib/game/generator';
 import { computeStandings, createLeague, nextGameFor, recordResult, simulateGame } from '@/lib/game/league';
-import { cacheTeamLocal, deleteLeague, getCachedTeam, saveLeague } from '@/lib/firebase/store';
+import { deleteLeague, getCachedTeam, saveLeague } from '@/lib/firebase/store';
 import { TeamLogo } from '@/components/ui/TeamLogo';
 import { baseballRate } from '@/lib/format';
 import type { League, LeagueTeamRef, Team } from '@/lib/game/types';
@@ -14,7 +14,8 @@ import type { League, LeagueTeamRef, Team } from '@/lib/game/types';
 export default function LeaguePage() {
   const router = useRouter();
   const user = useAppStore((s) => s.user);
-  const team = useActiveTeam();
+  const activeTeam = useActiveTeam();
+  const allTeams = useAppStore((s) => s.teams);
   const settings = useAppStore((s) => s.settings);
   const leagues = useAppStore((s) => s.leagues);
   const upsertLeague = useAppStore((s) => s.upsertLeague);
@@ -31,25 +32,30 @@ export default function LeaguePage() {
   }, [leagues, selectedId]);
 
   const league = leagues.find((l) => l.id === selectedId) ?? null;
+  const leaguePlayerRef = league?.teams.find((t) => !t.isCPU && t.ownerUid === user?.uid);
+  const team = league
+    ? (allTeams.find((t) => t.id === leaguePlayerRef?.teamId) ?? null)
+    : activeTeam;
   const standings = useMemo(() => (league ? computeStandings(league) : []), [league]);
 
   async function create() {
-    if (!user || !team) return;
+    if (!user || !activeTeam) return;
     setBusy(true);
     const rng = new Rng(seedFromString(`league-${user.uid}-${Date.now()}`));
 
     const refs: LeagueTeamRef[] = [
       {
-        teamId: team.id,
+        teamId: activeTeam.id,
         ownerUid: user.uid,
-        name: team.name,
-        abbr: team.abbr,
-        primaryColor: team.primaryColor,
-        secondaryColor: team.secondaryColor,
-        logoId: team.logoId,
+        name: activeTeam.name,
+        abbr: activeTeam.abbr,
+        primaryColor: activeTeam.primaryColor,
+        secondaryColor: activeTeam.secondaryColor,
+        logoId: activeTeam.logoId,
         isCPU: false,
       },
     ];
+    const cpuTeams: Team[] = [];
 
     for (let i = 0; i < cpuCount; i++) {
       const t = generateTeam(rng, {
@@ -57,7 +63,7 @@ export default function LeaguePage() {
         id: `lt_${rng.int(0, 0xffffff).toString(36)}${i}`,
         strength: 0.92 + rng.next() * 0.2,
       });
-      cacheTeamLocal(t);
+      cpuTeams.push(t);
       refs.push({
         teamId: t.id,
         ownerUid: 'cpu',
@@ -70,7 +76,7 @@ export default function LeaguePage() {
       });
     }
 
-    const l = createLeague(user.uid, `${team.name} 리그`, refs, settings, rounds);
+    const l = createLeague(user.uid, `${activeTeam.name} 리그`, refs, settings, rounds, cpuTeams);
     await saveLeague(l);
     upsertLeague(l);
     setSelectedId(l.id);

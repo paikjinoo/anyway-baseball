@@ -2,11 +2,11 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { useActiveTeam, useAppStore } from '@/lib/store/appStore';
+import { useAppStore } from '@/lib/store/appStore';
 import { GameView } from '@/components/GameView';
 import { useMatchStore } from '@/lib/store/matchStore';
 import { getCachedTeam, saveLeague, saveTeam } from '@/lib/firebase/store';
-import { recordResult } from '@/lib/game/league';
+import { leagueGameIssue, recordResult } from '@/lib/game/league';
 import { distributeRewards, gameRewardPoints } from '@/lib/game/training';
 import type { Side, Team } from '@/lib/game/types';
 
@@ -14,7 +14,10 @@ import type { Side, Team } from '@/lib/game/types';
 export default function LeagueGamePage() {
   const router = useRouter();
   const { leagueId, gameId } = useParams<{ leagueId: string; gameId: string }>();
-  const team = useActiveTeam();
+  const user = useAppStore((s) => s.user);
+  const authReady = useAppStore((s) => s.authReady);
+  const dataReady = useAppStore((s) => s.dataReady);
+  const teams = useAppStore((s) => s.teams);
   const leagues = useAppStore((s) => s.leagues);
   const upsertLeague = useAppStore((s) => s.upsertLeague);
   const upsertTeam = useAppStore((s) => s.upsertTeam);
@@ -28,9 +31,29 @@ export default function LeagueGamePage() {
 
   const league = leagues.find((l) => l.id === leagueId) ?? null;
   const game = league?.schedule.find((g) => g.id === gameId) ?? null;
+  const playerRef = league?.teams.find((t) => !t.isCPU && t.ownerUid === user?.uid) ?? null;
+  const team = teams.find((t) => t.id === playerRef?.teamId) ?? null;
 
   useEffect(() => {
-    if (!league || !game || !team || ready) return;
+    if (!authReady || !dataReady || ready || error) return;
+    if (!user) {
+      setError('로그인이 필요합니다.');
+      return;
+    }
+    if (!league || league.ownerUid !== user.uid) {
+      setError('리그를 찾을 수 없거나 접근 권한이 없습니다.');
+      return;
+    }
+    if (!playerRef || !team) {
+      setError('이 리그에 참가한 내 팀 데이터를 찾을 수 없습니다.');
+      return;
+    }
+    const issue = leagueGameIssue(league, gameId, team.id);
+    if (issue) {
+      setError(issue);
+      return;
+    }
+    if (!game) return;
     const opponentId = game.awayTeamId === team.id ? game.homeTeamId : game.awayTeamId;
     const opponent: Team | null = getCachedTeam(opponentId);
     if (!opponent) {
@@ -47,7 +70,7 @@ export default function LeagueGamePage() {
       seed: `${league.id}-${game.id}`,
     });
     setReady(true);
-  }, [league, game, team, ready, initCpuGame]);
+  }, [authReady, dataReady, user, league, game, gameId, playerRef, team, ready, error, initCpuGame]);
 
   useEffect(() => () => reset(), [reset]);
 
@@ -56,7 +79,16 @@ export default function LeagueGamePage() {
     if (!state || state.phase !== 'GAME_OVER' || recorded || !league || !game || !team) return;
     setRecorded(true);
 
-    const next = recordResult(league, game.id, state.away.runs, state.home.runs);
+    // 화면을 연 뒤 다른 경로에서 먼저 처리됐더라도 결과·보상을 다시 쓰지 않는다.
+    const latestLeague = useAppStore.getState().leagues.find((l) => l.id === league.id);
+    const latestGame = latestLeague?.schedule.find((g) => g.id === game.id);
+    if (!latestLeague || latestGame?.status !== 'SCHEDULED') {
+      reset();
+      setError('이미 처리된 경기라 결과와 보상을 다시 기록하지 않았습니다.');
+      return;
+    }
+
+    const next = recordResult(latestLeague, game.id, state.away.runs, state.home.runs);
     upsertLeague(next);
     void saveLeague(next);
 
@@ -79,7 +111,7 @@ export default function LeagueGamePage() {
             ...p,
             season: {
               ...p.season,
-              g: p.season.g + 1,
+              g: p.season.g + g.season.g,
               pa: p.season.pa + g.season.pa,
               ab: p.season.ab + g.season.ab,
               h: p.season.h + g.season.h,
@@ -97,6 +129,18 @@ export default function LeagueGamePage() {
               pk: p.season.pk + g.season.pk,
               pbb: p.season.pbb + g.season.pbb,
               ph: p.season.ph + g.season.ph,
+              w:
+                p.season.w +
+                g.season.w +
+                (state.winner === playerSide && p.id === mine.pitcherId ? 1 : 0),
+              l:
+                p.season.l +
+                g.season.l +
+                (state.winner !== playerSide &&
+                state.winner !== 'TIE' &&
+                p.id === mine.pitcherId
+                  ? 1
+                  : 0),
             },
           };
         }),
@@ -105,7 +149,7 @@ export default function LeagueGamePage() {
     };
     upsertTeam(merged);
     void saveTeam(merged);
-  }, [state, recorded, league, game, team, upsertLeague, upsertTeam]);
+  }, [state, recorded, league, game, team, upsertLeague, upsertTeam, reset]);
 
   if (error) {
     return (
@@ -118,7 +162,9 @@ export default function LeagueGamePage() {
     );
   }
 
-  if (!ready) return <div className="py-20 text-center text-slate-500">경기 준비 중…</div>;
+  if (!authReady || !dataReady || !ready) {
+    return <div className="py-20 text-center text-slate-500">경기 확인 중…</div>;
+  }
 
   return (
     <GameView

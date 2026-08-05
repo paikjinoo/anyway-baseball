@@ -67,7 +67,7 @@ export default function CpuGamePage() {
           ...p,
           season: {
             ...p.season,
-            g: p.season.g + 1,
+            g: p.season.g + s.g,
             pa: p.season.pa + s.pa,
             ab: p.season.ab + s.ab,
             h: p.season.h + s.h,
@@ -85,8 +85,11 @@ export default function CpuGamePage() {
             pk: p.season.pk + s.pk,
             pbb: p.season.pbb + s.pbb,
             ph: p.season.ph + s.ph,
-            w: p.season.w + (state.winner === side && p.id === mine.pitcherId ? 1 : 0),
-            l: p.season.l + (state.winner !== side && state.winner !== 'TIE' && p.id === mine.pitcherId ? 1 : 0),
+            w: p.season.w + s.w + (state.winner === side && p.id === mine.pitcherId ? 1 : 0),
+            l:
+              p.season.l +
+              s.l +
+              (state.winner !== side && state.winner !== 'TIE' && p.id === mine.pitcherId ? 1 : 0),
           },
         };
       }),
@@ -103,7 +106,13 @@ export default function CpuGamePage() {
   if (!started) {
     return (
       <div className="mx-auto max-w-2xl space-y-5 py-6">
-        <h1 className="text-2xl font-black">CPU 대전</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-black">CPU 대전</h1>
+          <div className="flex-1" />
+          <button className="btn !py-1.5 !text-xs" onClick={() => router.push('/play')}>
+            경기 선택으로 돌아가기
+          </button>
+        </div>
 
         <section className="panel p-5">
           <h2 className="mb-3 font-bold">난이도</h2>

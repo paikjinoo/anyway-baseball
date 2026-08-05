@@ -8,6 +8,7 @@ import { PlayerModel, RELEASE_AT, type PoseKind, type UniformSpec } from './Play
 import {
   DEFENSE_SPOTS,
   MOUND_DISTANCE,
+  swingDisplayRadius,
   ZONE_BOTTOM,
   ZONE_HALF_WIDTH,
   ZONE_TOP,
@@ -414,12 +415,17 @@ function sampleBattedPath(path: Vec3[], hangTime: number, t: number): Vec3 {
 // ---------------------------------------------------------------------------
 
 function StrikeZone({ showAim }: { showAim: boolean }) {
-  const aimRef = useRef<THREE.Mesh>(null);
+  const aimRef = useRef<THREE.Group>(null);
   useFrame(() => {
     const s = useMatchStore.getState();
     if (!aimRef.current) return;
     const w = zoneToWorld(s.aim.x, s.aim.y);
+    const batter = s.state ? currentBatter(s.state) : null;
+    const radius = batter ? swingDisplayRadius(s.swingType, batter.batting.contact) : 0;
+    const worldRadius = radius * ZONE_HALF_WIDTH;
     aimRef.current.position.set(w.x, w.y, 0.02);
+    // 오른쪽 조준 패널과 같은 정원으로 보이도록 가로 폭을 양축의 기준으로 쓴다.
+    aimRef.current.scale.set(worldRadius, worldRadius, 1);
     aimRef.current.visible = showAim && (s.phase === 'FLIGHT' || s.phase === 'SETUP');
   });
 
@@ -445,10 +451,16 @@ function StrikeZone({ showAim }: { showAim: boolean }) {
           </mesh>
         </group>
       ))}
-      <mesh ref={aimRef} visible={showAim}>
-        <ringGeometry args={[0.085, 0.115, 24]} />
-        <meshBasicMaterial color="#22d3ee" transparent opacity={0.95} side={THREE.DoubleSide} />
-      </mesh>
+      <group ref={aimRef} visible={showAim}>
+        <mesh>
+          <circleGeometry args={[1, 32]} />
+          <meshBasicMaterial color="#22d3ee" transparent opacity={0.15} side={THREE.DoubleSide} />
+        </mesh>
+        <mesh position={[0, 0, -0.001]}>
+          <ringGeometry args={[0.93, 1, 32]} />
+          <meshBasicMaterial color="#22d3ee" transparent opacity={0.95} side={THREE.DoubleSide} />
+        </mesh>
+      </group>
     </group>
   );
 }

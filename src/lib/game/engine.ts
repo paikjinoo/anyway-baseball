@@ -4,7 +4,7 @@ import { judgeSwing, makeBattedBall, effectiveBatting } from './batting';
 import { resolveFielding, type DefenseMap } from './fielding';
 import { resolveAdvance, resolveSteals } from './baserunning';
 import { PITCH_DEFS, POSITION_KO, SWING_DEFS } from './constants';
-import { autoLineup } from './generator';
+import { autoLineup, emptySeason } from './generator';
 import type {
   GameSettings,
   GameState,
@@ -29,14 +29,30 @@ import type {
 
 function toTeamInGame(team: Team, settings: GameSettings): TeamInGame {
   const roster: Record<string, Player> = {};
-  for (const p of team.players) roster[p.id] = structuredClone(p);
-
-  let lineup = team.lineup.filter((id) => roster[id]);
-  if (lineup.length !== 9) lineup = autoLineup(team, settings.useDH);
+  for (const p of team.players) {
+    const copy = structuredClone(p);
+    // GameState에는 시즌 누적값이 아니라 이번 경기에서 생긴 델타만 담는다.
+    copy.season = emptySeason();
+    roster[p.id] = copy;
+  }
 
   const rotation = team.rotation.filter((id) => roster[id]);
   const pitcherId =
     rotation[0] ?? team.players.find((p) => p.position === 'P')?.id ?? team.players[0].id;
+
+  let lineup = team.lineup.filter((id) => roster[id]);
+  const storedLineupIsValid = lineup.length === 9 && new Set(lineup).size === 9;
+  if (!storedLineupIsValid || !settings.useDH) lineup = autoLineup(team, settings.useDH);
+
+  // DH 미사용 시 자동 타순이 고른 투수가 실제 선발과 다를 수 있으므로 맞춰 준다.
+  if (!settings.useDH && !lineup.includes(pitcherId)) {
+    const pitcherSlot = lineup.findIndex((id) => roster[id]?.position === 'P');
+    lineup[pitcherSlot >= 0 ? pitcherSlot : lineup.length - 1] = pitcherId;
+  }
+
+  for (const id of new Set([...lineup, pitcherId])) {
+    if (roster[id]) roster[id].season.g = 1;
+  }
 
   return {
     teamId: team.id,
@@ -52,6 +68,7 @@ function toTeamInGame(team: Team, settings: GameSettings): TeamInGame {
     atBatIndex: 0,
     pitcherId,
     pitcherPitches: 0,
+    usedPitcherIds: [pitcherId],
     defense: buildDefense(roster, lineup, pitcherId, settings.useDH),
     runs: 0,
     hits: 0,
@@ -403,6 +420,24 @@ export function resolvePitch(
   // 연출 계층이 야수 이동/송구를 그릴 수 있도록 수비 처리 상세를 넘긴다
   result.fieldPlay = play;
 
+  // 인필드 플라이는 포구 여부와 무관하게 타자 자동 아웃이다.
+  // 떨어뜨린 경우 주자에게 진루 의무가 없으므로 현재 베이스는 그대로 둔다.
+  if (play.infieldFly && !play.caught) {
+    result.kind = 'INFIELD_FLY';
+    result.outsRecorded = 1;
+    result.fielders = [play.primary];
+    result.description = `${batter.name}, 인필드 플라이 선언. 타자 아웃!`;
+    recordMove(result, batter.id, -1, -1);
+    s.outs += 1;
+    recordBatterStat(batter, pitcher, result, 0);
+    result.atBatEnded = true;
+    advanceLineup(s);
+    s.balls = 0;
+    s.strikes = 0;
+    endPitch(s, rng, result);
+    return result;
+  }
+
   // 도루 중 인플레이 타구: 주자는 이미 스타트를 끊었으므로 진루가 유리하다
   const runningStart = [0, 1, 2].map((i) => validSteals.includes(i));
 
@@ -442,26 +477,18 @@ export function resolvePitch(
   // 3아웃을 넘겨 득점이 인정되지 않는 경우 처리
   const outsAtScore = prev.outs;
   const scoreAllowed = outsAtScore + adv.outsMade.length < 3 || !adv.doublePlay;
-  let runs = 0;
+  let scoringRunners: Runner[] = [];
   if (s.outs < 3 || scoreAllowed) {
-    for (const r of adv.scored) {
-      // 3아웃째가 타자주자 아웃(포스)이면 득점 무효
-      runs += 1;
-      result.scoringPlayerIds.push(r.playerId);
-    }
+    // 3아웃째가 타자주자 아웃(포스)이면 득점 무효
+    scoringRunners = adv.scored;
   }
   if (s.outs >= 3 && adv.doublePlay) {
     // 병살로 이닝 종료된 경우 득점 취소
-    runs = 0;
-    result.scoringPlayerIds = [];
+    scoringRunners = [];
   }
 
-  addRuns(s, runs, result);
-  // 득점한 선수의 득점 기록
-  for (const id of result.scoringPlayerIds) {
-    const p = off.roster[id];
-    if (p) p.season.r += 1;
-  }
+  for (const runner of scoringRunners) scoreRunner(s, runner, result, !play.error);
+  const runs = scoringRunners.length;
 
   // 결과 종류 결정
   result.kind = classifyPlay(play, adv, swing.type, bb);
@@ -547,8 +574,7 @@ function applySteals(s: GameState, results: StealResult[], out: PitchResult, rng
     if (r.safe) {
       recordMove(out, r.playerId, r.fromBase, r.fromBase + 1, { running: true });
       if (r.fromBase === 2) {
-        addRuns(s, 1, out);
-        out.scoringPlayerIds.push(r.playerId);
+        scoreRunner(s, runner, out, true);
       } else {
         s.bases[r.fromBase + 1] = runner;
       }
@@ -587,8 +613,7 @@ function maybeWildPitch(
     s.bases[i] = null;
     recordMove(out, r.playerId, i, i + 1);
     if (i === 2) {
-      addRuns(s, 1, out);
-      out.scoringPlayerIds.push(r.playerId);
+      scoreRunner(s, r, out, true);
     } else {
       s.bases[i + 1] = r;
     }
@@ -604,9 +629,9 @@ function forceAdvanceForWalk(s: GameState, batter: Player, out: PitchResult) {
     if (b[1]) {
       if (b[2]) {
         recordMove(out, b[2].playerId, 2, 3);
-        addRuns(s, 1, out);
-        out.scoringPlayerIds.push(b[2]!.playerId);
+        scoreRunner(s, b[2], out, true);
         out.rbi += 1;
+        batter.season.rbi += 1;
       }
       recordMove(out, b[1].playerId, 1, 2);
       b[2] = b[1];
@@ -670,6 +695,19 @@ function addRuns(s: GameState, n: number, out: PitchResult) {
   out.runsScored += n;
 }
 
+/** 득점·득점자·책임 투수 기록을 한 번에 반영한다. */
+function scoreRunner(s: GameState, runner: Runner, out: PitchResult, earned: boolean) {
+  addRuns(s, 1, out);
+  out.scoringPlayerIds.push(runner.playerId);
+  const scorer = offense(s).roster[runner.playerId];
+  if (scorer) scorer.season.r += 1;
+  if (!earned) return;
+  const def = defenseTeam(s);
+  const responsibleId = runner.responsiblePitcherId || def.pitcherId;
+  const responsible = def.roster[responsibleId];
+  if (responsible) responsible.season.er += 1;
+}
+
 function isHit(kind: PlayResultKind): boolean {
   return kind === 'SINGLE' || kind === 'DOUBLE' || kind === 'TRIPLE' || kind === 'HOME_RUN';
 }
@@ -680,6 +718,7 @@ function classifyPlay(
   swingType: 'NORMAL' | 'POWER' | 'BUNT',
   bb: { kind: string; launchAngle: number },
 ): PlayResultKind {
+  if (play.infieldFly) return 'INFIELD_FLY';
   if (play.homeRun) return 'HOME_RUN';
   if (play.error) return 'ERROR';
   if (play.foulCaught) return 'FOUL_OUT';
@@ -791,6 +830,10 @@ function describePlay(
 function endPitch(s: GameState, rng: Rng, out: PitchResult) {
   s.rngState = rng.state;
 
+  // 아웃이 만들어진 시점의 수비 투수에게 아웃 카운트 단위 이닝을 기록한다.
+  const pitcher = currentPitcher(s);
+  if (pitcher?.pitching) pitcher.season.ip3 += out.outsRecorded;
+
   if (s.outs >= 3) {
     // 잔루 집계
     offense(s).lob += s.bases.filter(Boolean).length;
@@ -821,19 +864,23 @@ export function checkGameEnd(s: GameState): void {
   const a = s.away.runs;
   const h = s.home.runs;
 
-  // 콜드게임
-  if (s.settings.mercyRule && s.inning >= s.settings.mercyFromInning) {
+  // 콜드게임: 홈 리드는 초 종료/말 공격 중, 원정 리드는 말 종료 뒤에만 확정한다.
+  const homeHadChance = h > a && s.half === 'BOTTOM';
+  const awayHadChance =
+    a > h &&
+    s.phase === 'INNING_BREAK' &&
+    s.half === 'TOP' &&
+    s.inning - 1 >= s.settings.mercyFromInning;
+  if (
+    s.settings.mercyRule &&
+    (homeHadChance ? s.inning >= s.settings.mercyFromInning : awayHadChance)
+  ) {
     const diff = Math.abs(a - h);
-    if (diff >= s.settings.mercyRunDiff) {
-      // 홈이 지고 있으면 홈 공격이 끝나야 성립
-      const trailingIsHome = h < a;
-      const halfComplete = trailingIsHome ? s.half === 'TOP' : true;
-      if (halfComplete) {
-        s.phase = 'GAME_OVER';
-        s.winner = a > h ? 'away' : 'home';
-        s.endedByMercy = true;
-        return;
-      }
+    if (diff >= s.settings.mercyRunDiff && (homeHadChance || awayHadChance)) {
+      s.phase = 'GAME_OVER';
+      s.winner = a > h ? 'away' : 'home';
+      s.endedByMercy = true;
+      return;
     }
   }
 
@@ -869,10 +916,26 @@ export function checkGameEnd(s: GameState): void {
 /** 투수 교체 */
 export function changePitcher(s: GameState, side: Side, newPitcherId: string): GameState {
   const t = s[side];
-  if (!t.roster[newPitcherId]) return s;
+  const nextPitcher = t.roster[newPitcherId];
+  const used = t.usedPitcherIds ?? [t.pitcherId];
+  if (
+    !nextPitcher?.pitching ||
+    newPitcherId === t.pitcherId ||
+    used.includes(newPitcherId) ||
+    t.lineup.includes(newPitcherId)
+  ) {
+    return s;
+  }
+  const oldPitcherId = t.pitcherId;
   t.pitcherId = newPitcherId;
   t.pitcherPitches = 0;
+  t.usedPitcherIds = [...used, newPitcherId];
   t.defense.P = newPitcherId;
+  nextPitcher.season.g = 1;
+  if (!s.settings.useDH) {
+    const battingSlot = t.lineup.indexOf(oldPitcherId);
+    if (battingSlot >= 0) t.lineup[battingSlot] = newPitcherId;
+  }
   return s;
 }
 
@@ -888,8 +951,9 @@ export function pitcherIsTired(s: GameState, side: Side): boolean {
 export function bullpenCandidates(s: GameState, side: Side): Player[] {
   const t = s[side];
   const inLineup = new Set(t.lineup);
+  const used = new Set(t.usedPitcherIds ?? [t.pitcherId]);
   return Object.values(t.roster)
-    .filter((p) => p.position === 'P' && p.id !== t.pitcherId && !inLineup.has(p.id))
+    .filter((p) => p.position === 'P' && p.pitching && !used.has(p.id) && !inLineup.has(p.id))
     .sort((a, b) => (b.pitching?.stamina ?? 0) - (a.pitching?.stamina ?? 0));
 }
 
