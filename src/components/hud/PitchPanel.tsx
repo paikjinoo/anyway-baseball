@@ -11,17 +11,25 @@ import type { GameState, PitchType, Player, Side } from '@/lib/game/types';
 /**
  * 투구 조작 패널.
  * 1) 구종 선택 -> 2) 코스(존 그리드) 클릭 -> 3) 투구
+ *
+ * mirrored: 지금 카메라에서 존의 좌우가 뒤집혀 보이는가(zoneFlippedOnScreen).
+ * 기본 카메라인 투수 시점은 마운드 뒤에서 잡으므로 화면 오른쪽이 3루 쪽인데,
+ * 존 좌표 +x는 포수 뒤에서 본 오른쪽(1루 쪽)이다. 그대로 두면 오른쪽을 찍었는데
+ * 공은 화면 왼쪽으로 간다.
  */
 export function PitchPanel({
   state,
   pitcher,
   playerSide,
+  mirrored,
 }: {
   state: GameState;
   pitcher: Player;
   playerSide: Side;
+  mirrored: boolean;
 }) {
   const throwPitch = useMatchStore((s) => s.throwPitch);
+  const setPitchPreview = useMatchStore((s) => s.setPitchPreview);
   const substitutePitcher = useMatchStore((s) => s.substitutePitcher);
   const waiting = useMatchStore((s) => s.waitingRemote);
   const party = useMatchStore((s) => isPartyMode(s.mode));
@@ -39,9 +47,20 @@ export function PitchPanel({
     if (!arsenal.some((a) => a.type === type)) setType(arsenal[0]?.type ?? 'FOURSEAM');
   }, [arsenal, type]);
 
+  // 고르는 대로 3D 화면(스트라이크존)에 예상 궤적을 그린다.
+  // 패널이 사라지면(투구·교대·관전 전환) 같이 지운다.
+  useEffect(() => {
+    setPitchPreview({ type, targetX: target.x, targetY: target.y, quickPitch: quick });
+  }, [setPitchPreview, type, target.x, target.y, quick]);
+  useEffect(() => () => setPitchPreview(null), [setPitchPreview]);
+
   const pitches = state[playerSide].pitcherPitches;
   const stam = staminaRemaining(pitcher, pitches);
   const runnersOn = state.bases.some(Boolean);
+
+  // 패널의 좌우를 화면과 같은 방향으로 맞추는 부호. 존 좌표 <-> 패널 좌표 양쪽에
+  // 똑같이 곱하므로(±1) 찍은 자리에 마커가 그대로 남는다.
+  const sx = mirrored ? -1 : 1;
 
   function pickFromEvent(e: React.PointerEvent<HTMLDivElement>) {
     const el = zoneRef.current;
@@ -50,7 +69,7 @@ export function PitchPanel({
     // 패널은 존의 1.7배 범위를 보여준다 (존 밖 유인구 가능)
     const nx = ((e.clientX - r.left) / r.width) * 2 - 1;
     const ny = 1 - ((e.clientY - r.top) / r.height) * 2;
-    setTarget({ x: nx * 1.7, y: ny * 1.7 });
+    setTarget({ x: sx * nx * 1.7, y: ny * 1.7 });
   }
 
   const attr = pitcher.pitching?.arsenal[type];
@@ -131,14 +150,21 @@ export function PitchPanel({
           <div
             className="pointer-events-none absolute h-5 w-5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-lime-400 bg-lime-400/25"
             style={{
-              left: `${((target.x / 1.7 + 1) / 2) * 100}%`,
+              left: `${(((sx * target.x) / 1.7 + 1) / 2) * 100}%`,
               top: `${((1 - target.y / 1.7) / 2) * 100}%`,
             }}
           />
         </div>
+        {/* 어느 쪽이 어느 베이스인지. 카메라를 바꾸면 패널도 같이 뒤집히므로 표시해 둔다. */}
+        <div className="mx-auto mt-1 flex w-full max-w-[190px] justify-between text-[9px] text-slate-600">
+          <span>{mirrored ? '1루' : '3루'}</span>
+          <span>{mirrored ? '3루' : '1루'}</span>
+        </div>
         {attr && (
-          <p className="mt-1.5 text-center text-[10px] text-slate-500">
-            제구 {attr.control} — 노린 곳에서 벗어날 수 있습니다
+          <p className="mt-1.5 text-center text-[10px] leading-relaxed text-slate-500">
+            예상 궤적은 화면 중앙 존에 표시됩니다
+            <br />
+            제구 {attr.control} — 공은 그 원 안쪽으로 흩어집니다
           </p>
         )}
       </div>

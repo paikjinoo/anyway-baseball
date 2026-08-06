@@ -7,6 +7,7 @@ import { useActiveTeam, useAppStore } from '@/lib/store/appStore';
 import { firebaseConfigured } from '@/lib/firebase/client';
 import { watchOpenRooms, type RoomInfo } from '@/lib/net/webrtc';
 import { teamRating } from '@/lib/game/generator';
+import { describeRules } from '@/lib/game/types';
 
 export default function PartyLobbyPage() {
   const router = useRouter();
@@ -71,7 +72,7 @@ export default function PartyLobbyPage() {
         <h2 className="mb-3 font-bold">방 만들기</h2>
         <p className="mb-4 text-sm text-slate-400">
           방장이 <b>홈(후공)</b> 자리에 앉고, 경기 판정은 방장 브라우저에서 처리됩니다. 나머지 세 명은
-          방 코드로 입장합니다. 자리는 방장이 바꿀 수 있습니다.
+          방 코드로 입장합니다. 자리와 <b>경기 규칙</b>은 방을 만든 뒤 대기실에서 방장이 정합니다.
         </p>
         <label className="mb-4 flex items-center gap-2 text-sm">
           <input
@@ -127,6 +128,9 @@ export default function PartyLobbyPage() {
                   <div className="text-xs text-slate-500">
                     {r.hostName} · {r.playerCount ?? 1}/4명 ·{' '}
                     {new Date(r.createdAt).toLocaleTimeString('ko-KR')}
+                  </div>
+                  <div className="mt-0.5 truncate text-[11px] text-slate-600">
+                    {describeRules(r.rules)}
                   </div>
                 </div>
                 <button

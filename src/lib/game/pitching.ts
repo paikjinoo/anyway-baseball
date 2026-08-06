@@ -34,6 +34,41 @@ export function releasePoint(pitcher: Player): Vec3 {
   };
 }
 
+/** 그 구종의 능력치. 던질 줄 모르는 구종이면 직구로 대신한다. */
+function attrOf(pitcher: Player, type: PitchCommand['type']) {
+  return (
+    pitcher.pitching?.arsenal[type] ??
+    pitcher.pitching?.arsenal.FOURSEAM ?? { velocity: 30, control: 30, movement: 20 }
+  );
+}
+
+/** 투구 수에 따른 피로도 (0~1). 스태미나 100 기준 약 110구까지 버틴다. */
+function fatigueOf(pitcher: Player, pitchesThrown: number): number {
+  const stamina = pitcher.pitching?.stamina ?? 40;
+  const capacity = 34 + stamina * 0.78;
+  return clamp((pitchesThrown - capacity * 0.6) / capacity, 0, 1);
+}
+
+/**
+ * 제구 산포. 노린 지점에서 실제 도착점이 흩어지는 정도(존 좌표계 표준편차)다.
+ *
+ * 존 반폭이 1이므로 sigma 0.4면 대체로 노린 사분면 근처에 들어간다.
+ * control 99 -> 0.40, control 50 -> 0.72, control 0 -> 1.05
+ */
+export function controlSpread(
+  pitcher: Player,
+  cmd: PitchCommand,
+  pitchesThrown: number,
+): { x: number; y: number } {
+  const def = PITCH_DEFS[cmd.type];
+  let sigma = 1.06 - 0.62 * norm(attrOf(pitcher, cmd.type).control);
+  sigma *= 1 + fatigueOf(pitcher, pitchesThrown) * 0.5;
+  sigma *= 1 + def.difficulty * 0.06;
+  if (cmd.quickPitch) sigma *= 1.35; // 퀵모션은 제구가 나빠진다
+  if (cmd.type === 'KNUCKLE') sigma *= 1.5;
+  return { x: sigma, y: sigma * 0.92 };
+}
+
 /**
  * 1구를 계산한다.
  *
@@ -49,14 +84,8 @@ export function computePitch(
   pitchesThrown: number,
 ): PitchTrajectory {
   const def = PITCH_DEFS[cmd.type];
-  const attr = pitcher.pitching?.arsenal[cmd.type] ??
-    pitcher.pitching?.arsenal.FOURSEAM ?? { velocity: 30, control: 30, movement: 20 };
-
-  // --- 피로도 -----------------------------------------------------------
-  const stamina = pitcher.pitching?.stamina ?? 40;
-  // 스태미나 100 기준 약 110구까지 버틴다.
-  const capacity = 34 + stamina * 0.78;
-  const fatigue = clamp((pitchesThrown - capacity * 0.6) / capacity, 0, 1);
+  const attr = attrOf(pitcher, cmd.type);
+  const fatigue = fatigueOf(pitcher, pitchesThrown);
 
   // --- 구속 -------------------------------------------------------------
   const veloStat = norm(attr.velocity);
@@ -66,17 +95,9 @@ export function computePitch(
   velocity = clamp(velocity, 80, 172);
 
   // --- 제구 -------------------------------------------------------------
-  const ctrlStat = norm(attr.control);
-  // 존 반폭이 1이므로 sigma 0.4면 대체로 노린 사분면 근처에 들어간다.
-  // control 99 -> 0.40, control 50 -> 0.72, control 0 -> 1.05
-  let sigma = 1.06 - 0.62 * ctrlStat;
-  sigma *= 1 + fatigue * 0.5;
-  sigma *= 1 + def.difficulty * 0.06;
-  if (cmd.quickPitch) sigma *= 1.35; // 퀵모션은 제구가 나빠진다
-  if (cmd.type === 'KNUCKLE') sigma *= 1.5;
-
-  const zoneX = cmd.targetX + rng.normal(0, sigma);
-  const zoneY = cmd.targetY + rng.normal(0, sigma * 0.92);
+  const spread = controlSpread(pitcher, cmd, pitchesThrown);
+  const zoneX = cmd.targetX + rng.normal(0, spread.x);
+  const zoneY = cmd.targetY + rng.normal(0, spread.y);
 
   // --- 무브먼트 ----------------------------------------------------------
   const moveStat = norm(attr.movement);
@@ -115,6 +136,39 @@ export function computePitch(
     zoneY,
     isStrikeZone,
   };
+}
+
+/**
+ * 난수를 전부 평균값으로 돌려주는 난수원. 상태를 갖지 않으므로 몇 번을 뽑아도 같다.
+ * 실제 투구와 같은 계산식을 쓰되 흔들림만 지우고 싶을 때 쓴다.
+ */
+class MeanRng extends Rng {
+  constructor() {
+    super(0);
+  }
+  next(): number {
+    return 0.5;
+  }
+  gauss(): number {
+    return 0;
+  }
+}
+
+/**
+ * 투구 전에 보여 주는 예상 궤적.
+ *
+ * 실제 투구(computePitch)와 같은 계산이지만 난수 — 제구 산포·구속 편차·무브먼트
+ * 흔들림 — 만 0으로 둔 평균 궤적이다. 따라서 도착점은 노린 지점과 정확히 같고,
+ * 실제 공은 이 선 주위로 controlSpread 만큼 흩어진다.
+ *
+ * 게임 RNG를 건드리지 않으므로 몇 번을 불러도 이후 투구 결과가 달라지지 않는다.
+ */
+export function previewPitch(
+  pitcher: Player,
+  cmd: PitchCommand,
+  pitchesThrown: number,
+): PitchTrajectory {
+  return computePitch(new MeanRng(), pitcher, cmd, pitchesThrown);
 }
 
 /** 구종 무브먼트를 화면에서 읽히게 하는 과장 배수 */

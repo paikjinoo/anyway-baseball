@@ -8,7 +8,7 @@ import type { NetMessage } from '@/lib/net/protocol';
 import { GameView } from '@/components/GameView';
 import { useMatchStore } from '@/lib/store/matchStore';
 import { changePitcher } from '@/lib/game/engine';
-import type { Team } from '@/lib/game/types';
+import { describeRules, type MatchRules, type Team } from '@/lib/game/types';
 
 export default function GuestRoomPage() {
   const router = useRouter();
@@ -19,6 +19,7 @@ export default function GuestRoomPage() {
   const peerRef = useRef<PeerConnection | null>(null);
   const [conn, setConn] = useState<ConnState>('idle');
   const [hostTeam, setHostTeam] = useState<Team | null>(null);
+  const [rules, setRules] = useState<MatchRules | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [started, setStarted] = useState(false);
 
@@ -57,6 +58,9 @@ export default function GuestRoomPage() {
     switch (msg.t) {
       case 'HELLO':
         setHostTeam(msg.team);
+        break;
+      case 'ROOM_RULES':
+        setRules(msg.rules);
         break;
       case 'START':
         initOnlineGame({
@@ -132,6 +136,18 @@ export default function GuestRoomPage() {
           <p className="mt-3 rounded-lg bg-rose-500/10 px-3 py-2 text-xs text-rose-300">{error}</p>
         )}
       </section>
+
+      {rules && (
+        <section className="panel p-5">
+          <h2 className="mb-2 font-bold">이 경기의 규칙</h2>
+          <p className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-slate-300">
+            {describeRules(rules)}
+          </p>
+          <p className="mt-2 text-[11px] text-slate-500">
+            방장이 정한 규칙입니다. 시작 전까지 바뀔 수 있습니다.
+          </p>
+        </section>
+      )}
 
       {hostTeam && (
         <section className="panel p-5">

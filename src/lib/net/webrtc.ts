@@ -18,6 +18,7 @@ import {
 } from 'firebase/firestore';
 import { getDb, iceServers, firebaseConfigured } from '../firebase/client';
 import { decode, encode, type NetMessage } from './protocol';
+import type { MatchRules } from '../game/types';
 
 /**
  * Firestore를 시그널링에만 쓰는 P2P 연결.
@@ -45,6 +46,12 @@ export interface RoomInfo {
   mode?: RoomMode;
   /** 2대2에서 현재 들어와 있는 인원 (호스트 포함) */
   playerCount?: number;
+  /**
+   * 이 방의 경기 규칙. 목록에서 들어가기 전에 확인할 수 있도록 함께 적어 둔다.
+   * (연결된 게스트에게는 ROOM_RULES 메시지로 실시간 반영된다)
+   * 없으면 규칙 기능이 생기기 전에 만들어진 방이다.
+   */
+  rules?: MatchRules;
 }
 
 export interface PeerHandlers {
@@ -113,7 +120,13 @@ export class PeerConnection {
   // 호스트: 방 생성
   // -------------------------------------------------------------------------
 
-  async host(opts: { hostUid: string; hostName: string; teamName: string; isPrivate?: boolean }): Promise<string> {
+  async host(opts: {
+    hostUid: string;
+    hostName: string;
+    teamName: string;
+    isPrivate?: boolean;
+    rules: MatchRules;
+  }): Promise<string> {
     const db = getDb();
     if (!firebaseConfigured || !db) {
       throw new Error('온라인 대전에는 Firebase 설정이 필요합니다. .env.local을 확인하세요.');
@@ -150,6 +163,7 @@ export class PeerConnection {
       isPrivate: opts.isPrivate ?? false,
       mode: '1v1',
       playerCount: 1,
+      rules: opts.rules,
     };
 
     await setDoc(roomRef, {
@@ -249,6 +263,13 @@ export class PeerConnection {
     } else {
       this.outbox.push(msg);
     }
+  }
+
+  /** 방장이 규칙을 바꿨을 때 방 목록에도 반영한다 */
+  async updateRoomRules(rules: MatchRules) {
+    const db = getDb();
+    if (!db || !this.roomId) return;
+    await updateDoc(doc(db, 'rooms', this.roomId), { rules }).catch(() => {});
   }
 
   /** 연결이 성립한 뒤 시그널링 문서를 정리해 Firestore 용량을 아낀다 */

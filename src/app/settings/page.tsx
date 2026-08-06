@@ -1,6 +1,7 @@
 'use client';
 
 import { useAppStore } from '@/lib/store/appStore';
+import { RuleSettings } from '@/components/settings/RuleSettings';
 import {
   playBatCrack,
   playHomeRunCelebration,
@@ -59,102 +60,16 @@ export default function SettingsPage() {
       </section>
 
       <section className="panel p-5">
-        <h2 className="mb-4 font-bold">경기 규칙</h2>
-
-        <div className="mb-5">
-          <label className="field-label">정규 이닝</label>
-          <div className="grid grid-cols-2 gap-2">
-            {([7, 9] as const).map((n) => (
-              <button
-                key={n}
-                onClick={() => update({ regulationInnings: n })}
-                className={`rounded-xl border-2 px-3 py-3 font-semibold transition ${
-                  settings.regulationInnings === n
-                    ? 'border-lime-400 bg-lime-500/15 text-lime-200'
-                    : 'border-white/10 bg-white/[0.03] hover:bg-white/[0.07]'
-                }`}
-              >
-                {n}이닝제
-              </button>
-            ))}
-          </div>
-          <p className="mt-1.5 text-[11px] text-slate-500">
-            동점이면 최대 3이닝까지 연장 후 무승부 처리됩니다.
-          </p>
-        </div>
-
-        <label className="mb-4 flex items-center justify-between">
-          <span>
-            <span className="block text-sm font-semibold">콜드게임</span>
-            <span className="text-[11px] text-slate-500">
-              정해진 이닝 이후 점수차가 크면 경기를 끝냅니다
-            </span>
-          </span>
-          <input
-            type="checkbox"
-            checked={settings.mercyRule}
-            onChange={(e) => update({ mercyRule: e.target.checked })}
-            className="h-5 w-5 accent-lime-500"
-          />
-        </label>
-
-        <div className={settings.mercyRule ? 'mb-5 grid gap-4 sm:grid-cols-2' : 'hidden'}>
-          <div>
-            <label className="field-label">발동 이닝: {settings.mercyFromInning}회부터</label>
-            <input
-              type="range"
-              min={3}
-              max={settings.regulationInnings}
-              value={Math.min(settings.mercyFromInning, settings.regulationInnings)}
-              onChange={(e) => update({ mercyFromInning: Number(e.target.value) })}
-            />
-          </div>
-          <div>
-            <label className="field-label">점수차: {settings.mercyRunDiff}점</label>
-            <input
-              type="range"
-              min={5}
-              max={20}
-              value={settings.mercyRunDiff}
-              onChange={(e) => update({ mercyRunDiff: Number(e.target.value) })}
-            />
-          </div>
-        </div>
-
-        <label className="flex items-center justify-between">
-          <span>
-            <span className="block text-sm font-semibold">지명타자 (DH)</span>
-            <span className="text-[11px] text-slate-500">끄면 투수가 타순에 들어갑니다</span>
-          </span>
-          <input
-            type="checkbox"
-            checked={settings.useDH}
-            onChange={(e) => update({ useDH: e.target.checked })}
-            className="h-5 w-5 accent-lime-500"
-          />
-        </label>
+        <h2 className="mb-1 font-bold">경기 규칙</h2>
+        <p className="mb-4 text-[11px] leading-relaxed text-slate-500">
+          CPU 대전과 리그에 적용되는 내 기본값입니다. 온라인 대전에서는{' '}
+          <b className="text-slate-400">방을 만들 때 정한 규칙</b>이 우선합니다.
+        </p>
+        <RuleSettings value={settings} onChange={update} />
       </section>
 
       <section className="panel p-5">
-        <h2 className="mb-4 font-bold">난이도 / 연출</h2>
-
-        <div className="mb-5">
-          <label className="field-label">
-            투구 체감 속도 {Math.round(settings.pitchSpeedScale * 100)}%
-          </label>
-          <input
-            type="range"
-            min={25}
-            max={100}
-            value={Math.round(settings.pitchSpeedScale * 100)}
-            onChange={(e) => update({ pitchSpeedScale: Number(e.target.value) / 100 })}
-          />
-          <p className="mt-1.5 text-[11px] text-slate-500">
-            낮출수록 공이 천천히 날아와 타이밍 맞추기가 쉬워집니다. 100%는 실제 구속 그대로라
-            매우 어렵습니다. (판정 자체는 동일하게 환산됩니다)
-          </p>
-        </div>
-
+        <h2 className="mb-4 font-bold">연출</h2>
         <label className="flex items-center justify-between">
           <span className="text-sm font-semibold">카메라 흔들림</span>
           <input

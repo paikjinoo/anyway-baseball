@@ -11,6 +11,7 @@ import { changePitcher } from '@/lib/game/engine';
 import { GameView } from '@/components/GameView';
 import { PartyRoomView } from '@/components/party/PartyRoomView';
 import { useMatchStore } from '@/lib/store/matchStore';
+import type { MatchRules } from '@/lib/game/types';
 
 export default function PartyGuestPage() {
   const router = useRouter();
@@ -26,6 +27,7 @@ export default function PartyGuestPage() {
   const [started, setStarted] = useState(false);
   const [myPicks, setMyPicks] = useState<PartyPicks>({ batters: [], pitchers: [] });
   const [myReady, setMyReady] = useState(false);
+  const [rules, setRules] = useState<MatchRules | null>(null);
 
   const uid = user?.uid ?? '';
 
@@ -64,6 +66,10 @@ export default function PartyGuestPage() {
       case 'PARTY_SEATS':
         setSeats(msg.seats);
         setHostUid(msg.hostUid);
+        break;
+
+      case 'ROOM_RULES':
+        setRules(msg.rules);
         break;
 
       case 'PARTY_START': {
@@ -167,6 +173,7 @@ export default function PartyGuestPage() {
         sendPicks(myPicks, v);
       }}
       error={error}
+      rules={rules}
       isHost={false}
       onLeave={() => {
         peerRef.current?.send({ t: 'LEAVE', reason: '한 명이 나갔습니다.' });

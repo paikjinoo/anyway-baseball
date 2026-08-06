@@ -296,7 +296,8 @@ function revealTime(
   // 송구 없이 직접 베이스를 밟으러 가는 구간 (1루수 땅볼 처리 등)
   const carry = field.chase.legs[1];
   if (carry) t = Math.max(t, carry.end);
-  const lastThrow = field.throws[field.throws.length - 1];
+  // 복귀 송구는 승부가 끝난 뒤의 일이라 결과를 미룰 이유가 없다
+  const lastThrow = field.throws.filter((th) => !th.relay).pop();
   if (lastThrow) t = Math.max(t, lastThrow.end);
   // 몇 루타인지, 세이프인지는 주자가 멈춰야 결정된다
   for (const r of runners) {
@@ -317,6 +318,14 @@ export function batterRunner(tl: PlayTimeline): RunnerAnim | null {
 /** 연출용 야수 이동 속도 (m/s). 판정에 쓰이는 값이 아니라 보기 좋은 근사치다. */
 const FIELDER_SPEED = 7.4;
 /**
+ * 연출에서 절대 넘지 않는 이동 속도 (m/s).
+ *
+ * 판정 시각에 맞추려고 이동 시간을 줄이다 보면 야수가 순간이동하듯 뛴다.
+ * 그럴 바에는 조금 늦게 도착하는 편이 낫다. 사람이 낼 수 있는 최고 속도가
+ * 12m/s대이므로 전력질주로 읽히는 선까지만 허용한다.
+ */
+const FIELDER_MAX_SPEED = 9.6;
+/**
  * 타구를 보고 첫 발을 떼기까지 (s).
  * 야수는 공이 떨어지기를 기다렸다가 뛰는 게 아니라, 타구를 판단하자마자
  * 낙구 지점으로 출발해 미리 가서 기다린다. fielding.reactionTime과 같은 뜻이지만
@@ -329,9 +338,20 @@ const RELAY_PAUSE = 0.24;
 const FUMBLE_MAX = 1.1;
 /** 이 거리 안이면 던지지 않고 직접 베이스를 밟으러 간다 */
 const CARRY_DISTANCE = 4;
+/** 그 베이스를 원래 지키는 야수라면 이만큼까지는 직접 밟으러 간다 */
+const COVER_CARRY_DISTANCE = 7;
+/** 공을 확보하고 내야로 돌려보내기까지 (s) */
+const RETURN_PAUSE = 0.35;
 
 /** 베이스를 커버하는 포지션 */
 const COVER_OF: Position[] = ['1B', '2B', '3B', 'C'];
+/**
+ * 원래 커버해야 할 야수가 타구를 처리하러 빠졌을 때 대신 들어오는 야수.
+ * 1루수가 타구를 쫓아가면 투수가 1루를 커버하는, 그 장면이다.
+ */
+const BACKUP_COVER_OF: Position[] = ['P', 'SS', 'SS', 'P'];
+/** 외야 송구를 받아 주는 중계수 후보 */
+const CUTOFF_CANDIDATES: Position[] = ['2B', 'SS'];
 
 export interface MoveLeg {
   from: Vec3;
@@ -357,6 +377,11 @@ export interface BallThrow {
   to: Vec3;
   start: number;
   end: number;
+  /**
+   * 승부와 무관한 복귀 송구(내야로 공을 돌려보내는 것)인가.
+   * 결과 공개 시점과 연출 길이는 이 송구를 기다리지 않는다.
+   */
+  relay?: boolean;
 }
 
 export interface FieldAnim {
@@ -700,7 +725,8 @@ export function sampleGroundBall(g: GroundBall, t: number): Vec3 {
 
 function fieldEnd(f: FieldAnim | null): number {
   if (!f) return 0;
-  const last = f.throws[f.throws.length - 1];
+  // 복귀 송구는 결과가 공개된 뒤 여유 시간에 흘러가면 되므로 길이에 세지 않는다
+  const last = f.throws.filter((th) => !th.relay).pop();
   return (last ? last.end : f.chase.secure) + 0.5;
 }
 
@@ -738,13 +764,23 @@ function buildChase(
   const home = DEFENSE_SPOTS[play.primary];
   const runUp = dist2d(home, ball);
   // 실책이면 공에는 먼저 닿고, 확보만 늦어진다 (더듬는 연출)
-  const secure = Math.max(0.1, play.secureTime);
-  const reach = play.error ? Math.max(bb.hangTime, secure - FUMBLE_MAX) : secure;
+  const rawSecure = Math.max(0.1, play.secureTime);
+  const rawReach = play.error ? Math.max(bb.hangTime, rawSecure - FUMBLE_MAX) : rawSecure;
   // 타구를 보자마자 낙구 지점으로 출발한다. 도착이 포구 시각보다 이르면
   // 그 자리에서 공을 기다린다(뜬공을 미리 가서 잡는 모습). 늦게 출발시켜
   // 도착 시각을 맞추면 야수가 공이 떨어질 때까지 멀뚱히 서 있게 된다.
-  const start = Math.min(BREAK_DELAY, reach);
-  const arrive = Math.min(reach, start + runUp / FIELDER_SPEED);
+  //
+  // 반대로 시간이 모자라면 먼저(최대 타격 순간까지) 출발시키고, 그래도 모자라면
+  // 상한 속도까지만 올린다. 남은 차이는 "조금 늦게 도착"으로 흡수한다 —
+  // 판정 시각에 억지로 맞추면 야수가 40m/s로 뛰는 그림이 나온다.
+  const start = clamp(rawReach - runUp / FIELDER_SPEED, 0, BREAK_DELAY);
+  const arrive = Math.max(
+    Math.min(rawReach, start + runUp / FIELDER_SPEED),
+    start + runUp / FIELDER_MAX_SPEED,
+  );
+  // 야수가 늦게 닿으면 공도 그때까지 땅에 남아 있어야 한다 (글러브로 순간이동 금지)
+  const reach = Math.max(rawReach, arrive);
+  const secure = Math.max(rawSecure, arrive);
 
   const chase: FielderChase = {
     pos: play.primary,
@@ -769,12 +805,16 @@ function buildChase(
 
   for (const base of outBases.slice(0, 2)) {
     const bag = BASE_COORDS[base];
-    const cover = COVER_OF[base];
     const d = dist2d(origin, bag);
+    // 그 베이스를 지킬 야수. 원래 커버가 타구를 처리하러 빠졌으면 백업이 들어온다.
+    const natural = COVER_OF[base];
+    const cover = natural === play.primary ? BACKUP_COVER_OF[base] : natural;
+    const carryLimit = natural === play.primary ? COVER_CARRY_DISTANCE : CARRY_DISTANCE;
 
-    if (throws.length === 0 && (cover === play.primary || d < CARRY_DISTANCE)) {
-      // 직접 베이스를 밟는다 (1루수 땅볼 처리 등)
-      const end = Math.max(secure + 0.2, throwArrivalTime(play, base));
+    if (throws.length === 0 && d < carryLimit) {
+      // 코앞이면 던지지 않고 직접 베이스를 밟는다 (1루수 앞 땅볼 등).
+      // 뛰어가는 시간은 실제로 걸리는 만큼 준다.
+      const end = Math.max(secure + d / FIELDER_SPEED, throwArrivalTime(play, base));
       chase.legs.push({ from: ball, to: bag, start: secure, end });
       origin = bag;
       originTime = end;
@@ -787,26 +827,93 @@ function buildChase(
         : originTime + RELAY_PAUSE + d / Math.max(20, play.throwSpeed);
     const begin = throws.length === 0 ? Math.max(originTime, end - d / Math.max(20, play.throwSpeed)) : originTime + RELAY_PAUSE;
     throws.push({ from: origin, to: bag, start: begin, end });
-    if (cover !== play.primary && !covers.some((c) => c.pos === cover)) {
-      const spot = DEFENSE_SPOTS[cover];
-      // 베이스 커버도 타구와 동시에 출발해 미리 가서 송구를 기다린다
-      const coverStart = Math.min(BREAK_DELAY, end);
-      covers.push({
-        pos: cover,
-        leg: {
-          from: spot,
-          to: bag,
-          start: coverStart,
-          end: Math.min(end, coverStart + dist2d(spot, bag) / FIELDER_SPEED),
-        },
-        look: origin,
-      });
-    }
+    addCover(covers, cover, play.primary, bag, origin, end);
     origin = bag;
     originTime = end;
   }
 
+  // ---- 복귀 송구 ---------------------------------------------------------
+  // 아웃을 잡을 곳이 없으면(안타 · 뜬공 포구 등) 여기까지 송구가 하나도 없다.
+  // 그대로 두면 야수가 공을 든 채 그라운드에 서 있다. 실제로는 곧바로
+  // 내야로 공을 돌려보내므로, 승부와 무관한 복귀 송구를 붙인다.
+  if (!throws.length && chase.legs.length === 1) {
+    addReturnThrow(throws, covers, play, origin, originTime);
+  }
+
   return { chase, throws, covers };
+}
+
+/** 베이스 커버. 타구와 동시에 출발해 미리 가서 송구를 기다린다. */
+function addCover(
+  covers: FieldAnim['covers'],
+  cover: Position,
+  primary: Position,
+  to: Vec3,
+  look: Vec3,
+  arriveBy: number,
+) {
+  if (cover === primary || covers.some((c) => c.pos === cover)) return;
+  const spot = DEFENSE_SPOTS[cover];
+  const d = dist2d(spot, to);
+  const start = Math.min(BREAK_DELAY, arriveBy);
+  covers.push({
+    pos: cover,
+    leg: {
+      from: spot,
+      to,
+      // 일찍 닿으면 기다리고, 모자라면 상한 속도까지만 올린다
+      start,
+      end: Math.max(Math.min(arriveBy, start + d / FIELDER_SPEED), start + d / FIELDER_MAX_SPEED),
+    },
+    look,
+  });
+}
+
+/**
+ * 내야로 공을 돌려보내는 송구.
+ * 외야수는 마중 나온 중계수에게, 내야수는 투수에게 던진다.
+ * 투수·포수가 들고 있으면 이미 제자리이므로 아무것도 하지 않는다.
+ */
+function addReturnThrow(
+  throws: BallThrow[],
+  covers: FieldAnim['covers'],
+  play: NonNullable<PitchResult['fieldPlay']>,
+  from: Vec3,
+  fromTime: number,
+) {
+  const primary = play.primary;
+  if (primary === 'P' || primary === 'C') return;
+
+  const outfield = !play.infield;
+  const target = outfield
+    ? CUTOFF_CANDIDATES.reduce((best, p) =>
+        dist2d(DEFENSE_SPOTS[p], from) < dist2d(DEFENSE_SPOTS[best], from) ? p : best,
+      )
+    : 'P';
+  if (target === primary) return;
+
+  const spot = DEFENSE_SPOTS[target];
+  // 중계수는 타구와 동시에 출발해 외야 쪽으로 마중 나간다.
+  // 마중 나갈 수 있는 거리는 공을 확보할 때까지 실제로 달릴 수 있는 만큼이다.
+  const gap = dist2d(spot, from);
+  const advance = outfield
+    ? Math.min(gap * 0.45, FIELDER_SPEED * Math.max(0, fromTime - BREAK_DELAY))
+    : 0;
+  const meet: Vec3 =
+    advance > 0.5
+      ? {
+          x: spot.x + ((from.x - spot.x) / gap) * advance,
+          y: 0,
+          z: spot.z + ((from.z - spot.z) / gap) * advance,
+        }
+      : spot;
+
+  const start = fromTime + RETURN_PAUSE;
+  const end = start + dist2d(from, meet) / Math.max(20, play.throwSpeed);
+  throws.push({ from, to: meet, start, end, relay: true });
+  // 마중 나갈 때만 야수를 움직인다. 제자리에서 받는 경우(투수)까지 covers에 넣으면
+  // 타격 직후부터 포구 자세로 고정되어 투수의 팔로스루가 잘린다.
+  if (advance > 0.5) addCover(covers, target, primary, meet, from, start);
 }
 
 // ---------------------------------------------------------------------------

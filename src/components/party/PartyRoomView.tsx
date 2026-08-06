@@ -4,9 +4,10 @@ import { useState } from 'react';
 import { SeatBoard } from './SeatBoard';
 import { DraftPanel } from './DraftPanel';
 import { picksComplete } from '@/lib/game/allstar';
+import { RuleSettings } from '@/components/settings/RuleSettings';
 import type { ConnState } from '@/lib/net/webrtc';
 import type { PartyPicks, PartySeat } from '@/lib/net/protocol';
-import type { Team } from '@/lib/game/types';
+import { describeRules, type MatchRules, type Team } from '@/lib/game/types';
 
 const CONN_LABEL: Record<ConnState, string> = {
   idle: '준비 중…',
@@ -31,6 +32,8 @@ export function PartyRoomView({
   ready,
   onReadyChange,
   error,
+  rules,
+  onRulesChange,
   isHost,
   onSwapSide,
   onShuffle,
@@ -48,6 +51,10 @@ export function PartyRoomView({
   ready: boolean;
   onReadyChange: (v: boolean) => void;
   error: string | null;
+  /** 이 방의 경기 규칙. 게스트는 방장이 보내 주기 전까지 null이다. */
+  rules: MatchRules | null;
+  /** 방장만 넘긴다 */
+  onRulesChange?: (patch: Partial<MatchRules>) => void;
   isHost: boolean;
   onSwapSide?: (uid: string) => void;
   onShuffle?: () => void;
@@ -111,6 +118,23 @@ export function PartyRoomView({
 
         {error && (
           <p className="mt-3 rounded-lg bg-rose-500/10 px-3 py-2 text-xs text-rose-300">{error}</p>
+        )}
+      </section>
+
+      <section className="panel p-5">
+        <h2 className="mb-1 font-bold">이 경기의 규칙</h2>
+        {isHost && rules && onRulesChange ? (
+          <>
+            <p className="mb-4 text-[11px] leading-relaxed text-slate-500">
+              방장이 정한 규칙이 이 경기에만 적용됩니다. 올스타전은 야수 9명으로 타순을 짜므로
+              지명타자는 항상 켜집니다.
+            </p>
+            <RuleSettings value={rules} onChange={onRulesChange} hideDH compact />
+          </>
+        ) : (
+          <p className="mt-2 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-slate-300">
+            {describeRules(rules ?? undefined)}
+          </p>
         )}
       </section>
 

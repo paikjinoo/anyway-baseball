@@ -22,7 +22,7 @@ import {
   hostStartPitch,
   useMatchStore,
 } from '@/lib/store/matchStore';
-import type { Side, Team } from '@/lib/game/types';
+import { pickRules, type MatchRules, type Side, type Team } from '@/lib/game/types';
 
 /** 자리 배정 순서. 방장이 홈 slot 0에 앉고, 들어온 순서대로 나머지를 채운다. */
 const SEAT_ORDER: { side: Side; slot: 0 | 1 }[] = [
@@ -78,8 +78,13 @@ function PartyHostInner() {
   const [started, setStarted] = useState(false);
   const [myPicks, setMyPicks] = useState<PartyPicks>({ batters: [], pitchers: [] });
   const [myReady, setMyReady] = useState(false);
+  // 올스타 라인업은 야수 9명으로 짜므로 지명타자는 항상 켠 채로 둔다
+  const [rules, setRules] = useState<MatchRules>(() => ({ ...pickRules(settings), useDH: true }));
 
   const uid = user?.uid ?? '';
+  // 방을 만드는 effect는 한 번만 도는데, 그 안에서 최신 규칙을 읽어야 한다
+  const rulesRef = useRef(rules);
+  rulesRef.current = rules;
 
   // 좌석 목록을 최신 상태로 읽어야 하는 콜백들이 있어 ref로도 들고 있는다
   const seatsRef = useRef<PartySeat[]>([]);
@@ -120,6 +125,7 @@ function PartyHostInner() {
         hostName: user.displayName,
         teamName: team.name,
         isPrivate: params.get('private') === '1',
+        rules: rulesRef.current,
       })
       .then((id) => {
         setRoomId(id);
@@ -134,6 +140,14 @@ function PartyHostInner() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.uid, team?.id]);
+
+  // 규칙이 바뀌면 들어와 있는 사람들과 방 목록 양쪽에 알린다
+  useEffect(() => {
+    if (started) return;
+    hostRef.current?.broadcast({ t: 'ROOM_RULES', rules });
+    const id = setTimeout(() => void hostRef.current?.updateRoomRules(rules), 600);
+    return () => clearTimeout(id);
+  }, [rules, started]);
 
   function handlePeerState(peerUid: string, state: ConnState) {
     if (state !== 'closed' && state !== 'failed') return;
@@ -193,6 +207,7 @@ function PartyHostInner() {
         }
         setConn('connected');
         broadcastSeats(next);
+        host.sendTo(from, { t: 'ROOM_RULES', rules: rulesRef.current });
         void host.cleanupSignaling();
         break;
       }
@@ -372,8 +387,9 @@ function PartyHostInner() {
     const home = buildAllStarTeam(homeEntries, 'home', seedFromString(seed + ':home'));
     disambiguateAbbr(away.team, home.team);
 
-    // 올스타 라인업은 야수 9명으로 짜므로 지명타자를 항상 쓴다
-    const gameSettings = { ...settings, useDH: true };
+    // 사운드·카메라는 각자 자기 설정을 쓰고, 승부 조건만 방 규칙으로 덮는다.
+    // 올스타 라인업은 야수 9명으로 짜므로 지명타자는 항상 쓴다.
+    const gameSettings = { ...settings, ...rules, useDH: true };
     const state = createGame(away.team, home.team, gameSettings, seed);
     const owners: OwnerMap = { ...away.owners, ...home.owners };
     const seatNames = Object.fromEntries(seats.map((s) => [s.uid, s.name]));
@@ -432,6 +448,8 @@ function PartyHostInner() {
         applyMyPicks(myPicks, v);
       }}
       error={error}
+      rules={rules}
+      onRulesChange={(p) => setRules((r) => ({ ...r, ...p }))}
       isHost
       onSwapSide={swapSide}
       onShuffle={shuffleSeats}

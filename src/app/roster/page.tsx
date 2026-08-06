@@ -23,8 +23,11 @@ import { arsenalOf } from '@/lib/game/pitching';
 import { hitterScore, pitcherScore } from '@/lib/game/generator';
 import {
   BATTING_KEYS,
+  BATTING_KEY_DESC,
   BATTING_KEY_KO,
+  PITCH_ATTR_DESC,
   PITCH_ATTR_KO,
+  STAMINA_DESC,
   learnPitch,
   learnPitchCost,
   learnablePitchesFor,
@@ -225,12 +228,26 @@ export default function RosterPage() {
 
 // ---------------------------------------------------------------------------
 
-function Bar({ label, value, max = 99 }: { label: string; value: number; max?: number }) {
+function Bar({
+  label,
+  value,
+  max = 99,
+  marker,
+}: {
+  label: string;
+  value: number;
+  max?: number;
+  /** 설명을 펼칠 수 있는 항목에 붙는 화살표 */
+  marker?: string;
+}) {
   const pct = Math.round((value / max) * 100);
   const color = value >= 80 ? '#f43f5e' : value >= 65 ? '#f59e0b' : value >= 50 ? '#38bdf8' : '#64748b';
   return (
     <div className="flex items-center gap-3">
-      <span className="w-20 shrink-0 text-xs text-slate-400">{label}</span>
+      <span className="flex w-20 shrink-0 items-center gap-1 text-xs text-slate-400">
+        {label}
+        {marker && <span className="text-[11px] leading-none text-slate-500">{marker}</span>}
+      </span>
       <div className="h-2.5 flex-1 overflow-hidden rounded-full bg-white/8">
         <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
       </div>
@@ -320,6 +337,54 @@ function Mini({ label, v }: { label: string; v: string | number }) {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * 훈련 항목 한 줄.
+ * 능력치 이름을 누르면 그 능력치가 높을 때 무엇이 좋아지는지 설명을 펼친다.
+ */
+function TrainRow({
+  label,
+  value,
+  desc,
+  cost,
+  points,
+  open,
+  onToggle,
+  onTrain,
+}: {
+  label: string;
+  value: number;
+  desc: string;
+  cost: number;
+  points: number;
+  open: boolean;
+  onToggle: () => void;
+  onTrain: () => void;
+}) {
+  const maxed = !Number.isFinite(cost);
+  const can = !maxed && points >= cost;
+  return (
+    <div className={`rounded-lg transition ${open ? 'bg-white/[0.05]' : ''}`}>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          title={`${label} 설명 보기`}
+          className="min-w-0 flex-1 rounded-lg px-1.5 py-1 transition hover:bg-white/[0.06]"
+        >
+          <Bar label={label} value={value} marker={open ? '▲' : '▼'} />
+        </button>
+        <button className="btn !py-1 !px-2.5 !text-xs" disabled={!can} onClick={onTrain}>
+          +1 · {maxed ? 'MAX' : `${cost}P`}
+        </button>
+      </div>
+      {open && (
+        <p className="px-2.5 pb-2 text-[11px] leading-relaxed text-slate-300">{desc}</p>
+      )}
+    </div>
+  );
+}
+
 function TrainTab({
   player,
   onChange,
@@ -331,6 +396,9 @@ function TrainTab({
 }) {
   const arsenal = arsenalOf(player);
   const learnable = learnablePitchesFor(player);
+  /** 설명을 펼친 항목. 같은 항목을 다시 누르면 접힌다. */
+  const [openKey, setOpenKey] = useState<string | null>(null);
+  const toggle = (k: string) => setOpenKey((cur) => (cur === k ? null : k));
 
   return (
     <div className="space-y-4">
@@ -338,52 +406,52 @@ function TrainTab({
         <h3 className="mb-1 font-bold">타자 훈련</h3>
         <p className="mb-4 text-xs text-slate-500">
           능력치가 높을수록 1 올리는 비용이 급격히 커집니다. 잠재력({player.potential})이 상한입니다.
+          <br />
+          능력치 이름을 누르면 그 능력치가 높을 때 무엇이 좋아지는지 볼 수 있습니다.
         </p>
-        <div className="space-y-2">
-          {BATTING_KEYS.map((k) => {
-            const cur = player.batting[k];
-            const cost = statUpgradeCost(cur, player.potential);
-            const can = Number.isFinite(cost) && player.trainingPoints >= cost;
-            return (
-              <div key={k} className="flex items-center gap-3">
-                <div className="flex-1">
-                  <Bar label={BATTING_KEY_KO[k]} value={cur} />
-                </div>
-                <button
-                  className="btn !py-1 !px-2.5 !text-xs"
-                  disabled={!can}
-                  onClick={() => {
-                    const r = trainBatting(player, k, 1);
-                    if (r.ok) onChange(r.player, r.message);
-                    else onMessage(r.message);
-                  }}
-                >
-                  +1 · {Number.isFinite(cost) ? `${cost}P` : 'MAX'}
-                </button>
-              </div>
-            );
-          })}
+        <div className="space-y-1">
+          {BATTING_KEYS.map((k) => (
+            <TrainRow
+              key={k}
+              label={BATTING_KEY_KO[k]}
+              value={player.batting[k]}
+              desc={BATTING_KEY_DESC[k]}
+              cost={statUpgradeCost(player.batting[k], player.potential)}
+              points={player.trainingPoints}
+              open={openKey === `bat:${k}`}
+              onToggle={() => toggle(`bat:${k}`)}
+              onTrain={() => {
+                const r = trainBatting(player, k, 1);
+                if (r.ok) onChange(r.player, r.message);
+                else onMessage(r.message);
+              }}
+            />
+          ))}
         </div>
       </section>
 
       {player.pitching && (
         <>
           <section className="panel p-5">
-            <div className="mb-4 flex items-center justify-between">
-              <h3 className="font-bold">투수 훈련</h3>
-              <button
-                className="btn !py-1 !px-2.5 !text-xs"
-                disabled={player.trainingPoints < statUpgradeCost(player.pitching.stamina, player.potential)}
-                onClick={() => {
+            <h3 className="mb-1 font-bold">투수 훈련</h3>
+            <p className="mb-4 text-xs text-slate-500">
+              항목 이름을 누르면 설명이 표시됩니다.
+            </p>
+            <div className="space-y-5">
+              <TrainRow
+                label="스태미나"
+                value={player.pitching.stamina}
+                desc={STAMINA_DESC}
+                cost={statUpgradeCost(player.pitching.stamina, player.potential)}
+                points={player.trainingPoints}
+                open={openKey === 'stamina'}
+                onToggle={() => toggle('stamina')}
+                onTrain={() => {
                   const r = trainStamina(player, 1);
                   if (r.ok) onChange(r.player, r.message);
                   else onMessage(r.message);
                 }}
-              >
-                스태미나 +1 · {statUpgradeCost(player.pitching.stamina, player.potential)}P
-              </button>
-            </div>
-            <div className="space-y-5">
+              />
               {arsenal.map(({ type, attr, def }) => (
                 <div key={type}>
                   <div className="mb-2 flex items-center gap-2">
@@ -395,29 +463,24 @@ function TrainTab({
                     </span>
                     <span className="text-[11px] text-slate-500">{def.desc}</span>
                   </div>
-                  <div className="space-y-2">
-                    {(['velocity', 'control', 'movement'] as const).map((key) => {
-                      const cost = pitchUpgradeCost(attr[key], player.potential, type as PitchType);
-                      const can = Number.isFinite(cost) && player.trainingPoints >= cost;
-                      return (
-                        <div key={key} className="flex items-center gap-3">
-                          <div className="flex-1">
-                            <Bar label={PITCH_ATTR_KO[key]} value={attr[key]} />
-                          </div>
-                          <button
-                            className="btn !py-1 !px-2.5 !text-xs"
-                            disabled={!can}
-                            onClick={() => {
-                              const r = trainPitch(player, type as PitchType, key, 1);
-                              if (r.ok) onChange(r.player, r.message);
-                              else onMessage(r.message);
-                            }}
-                          >
-                            +1 · {Number.isFinite(cost) ? `${cost}P` : 'MAX'}
-                          </button>
-                        </div>
-                      );
-                    })}
+                  <div className="space-y-1">
+                    {(['velocity', 'control', 'movement'] as const).map((key) => (
+                      <TrainRow
+                        key={key}
+                        label={PITCH_ATTR_KO[key]}
+                        value={attr[key]}
+                        desc={PITCH_ATTR_DESC[key]}
+                        cost={pitchUpgradeCost(attr[key], player.potential, type as PitchType)}
+                        points={player.trainingPoints}
+                        open={openKey === `${type}:${key}`}
+                        onToggle={() => toggle(`${type}:${key}`)}
+                        onTrain={() => {
+                          const r = trainPitch(player, type as PitchType, key, 1);
+                          if (r.ok) onChange(r.player, r.message);
+                          else onMessage(r.message);
+                        }}
+                      />
+                    ))}
                   </div>
                 </div>
               ))}

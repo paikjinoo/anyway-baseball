@@ -7,6 +7,7 @@ import { useActiveTeam, useAppStore } from '@/lib/store/appStore';
 import { firebaseConfigured } from '@/lib/firebase/client';
 import { watchOpenRooms, type RoomInfo } from '@/lib/net/webrtc';
 import { teamRating } from '@/lib/game/generator';
+import { describeRules } from '@/lib/game/types';
 
 export default function OnlineLobbyPage() {
   const router = useRouter();
@@ -66,7 +67,8 @@ NEXT_PUBLIC_FIREBASE_APP_ID=...`}
         <h2 className="mb-3 font-bold">방 만들기</h2>
         <p className="mb-4 text-sm text-slate-400">
           내가 <b>홈(후공)</b>이 되고, 경기 판정은 방장 브라우저에서 처리됩니다. 상대는 방 코드로
-          입장할 수 있습니다.
+          입장할 수 있습니다. 이닝 수·콜드게임·투구 체감 속도 같은{' '}
+          <b>경기 규칙은 방을 만든 뒤 대기 화면에서</b> 정합니다.
         </p>
         <label className="mb-4 flex items-center gap-2 text-sm">
           <input
@@ -121,6 +123,9 @@ NEXT_PUBLIC_FIREBASE_APP_ID=...`}
                   <div className="truncate font-semibold">{r.teamName}</div>
                   <div className="text-xs text-slate-500">
                     {r.hostName} · {new Date(r.createdAt).toLocaleTimeString('ko-KR')}
+                  </div>
+                  <div className="mt-0.5 truncate text-[11px] text-slate-600">
+                    {describeRules(r.rules)}
                   </div>
                 </div>
                 <button

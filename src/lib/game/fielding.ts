@@ -18,12 +18,23 @@ function rangeSpeed(p: Player): number {
 
 /**
  * 타구 판단 후 첫 발을 떼기까지 걸리는 시간 (s).
- * 외야수는 공을 오래 보고 판단하므로 첫 발이 빠르다.
+ *
+ * 내야수는 투구마다 크리프 스텝으로 이미 체중을 옮기고 있어 첫 발이 훨씬 빠르다.
+ * 외야수는 타구를 조금 더 보고 판단한다.
  */
 function reactionTime(p: Player, pos?: Position): number {
-  const base = lerp(0.55, 0.25, norm(p.batting.fielding));
-  return pos && OUTFIELD.includes(pos) ? base - 0.12 : base;
+  const f = norm(p.batting.fielding);
+  if (pos && OUTFIELD.includes(pos)) return lerp(0.43, 0.13, f);
+  return lerp(0.32, 0.14, f);
 }
+
+/**
+ * 몸이 닿지 않아도 처리할 수 있는 반경 (m).
+ * 야수는 공이 있는 자리에 몸을 세울 필요가 없고, 글러브를 뻗거나 다이빙해
+ * 이만큼을 더 커버한다. 이 값이 없으면 타구선에 몸을 정확히 갖다 놓아야만
+ * 아웃이 되어 내야 안타가 폭증한다.
+ */
+const GLOVE_REACH = 1.6;
 
 /**
  * 정지 상태에서 거리 d(m)를 이동하는 데 걸리는 시간 (s).
@@ -239,14 +250,23 @@ function nearestFielderTo(point: Vec3, defense: DefenseMap, pool: Position[]): P
  * 땅볼 처리.
  * 타구가 굴러가는 경로를 시간축으로 이산화하고, 각 시점에서
  * 어떤 야수가 이미 그 지점에 도달해 있는지를 검사한다.
+ *
+ * 공은 **착지한 자리에서부터** 구른다. 예전에는 홈플레이트(travelled=0)에서
+ * 굴리기 시작했는데, 그러면 타구가 공중에서 간 거리가 통째로 사라져서
+ * 야수가 이미 자기 머리 위를 넘어간 공을 처리하는 것으로 계산됐다
+ * (외야 깊숙이 떨어진 낮은 직선타를 투수가 잡는 식).
  */
 function resolveGrounder(rng: Rng, bb: BattedBall, defense: DefenseMap): FieldPlay {
   // 월드 +X는 3루 방향이므로 sprayAngle(+ = 우익)의 x 부호를 뒤집는다
   const dir = { x: -Math.sin((bb.sprayAngle * Math.PI) / 180), z: Math.cos((bb.sprayAngle * Math.PI) / 180) };
-  // 지면 마찰: 첫 바운드 후 속도의 약 70%가 유지되고 이후 감속
-  let speed = (bb.exitVelocity / 3.6) * (bb.kind === 'BUNT' ? 0.42 : 0.7);
-  let travelled = 0;
-  let t = Math.max(0.05, bb.hangTime * 0.6); // 첫 바운드까지
+  // 지면 마찰: 첫 바운드에서 수평 속도의 약 30%가 깎이고 이후 감속.
+  // 착지 속도를 알 수 없는 구버전 데이터는 타구 속도에서 근사한다.
+  const impact = bb.landingVel
+    ? Math.hypot(bb.landingVel.x, bb.landingVel.z)
+    : (bb.exitVelocity / 3.6) * 0.95;
+  let speed = impact * (bb.kind === 'BUNT' ? 0.45 : 0.7);
+  let travelled = bb.distance;
+  let t = Math.max(0.05, bb.hangTime);
   const dt = 0.04;
 
   const positions = [...INFIELD, ...OUTFIELD] as Position[];
@@ -261,7 +281,7 @@ function resolveGrounder(rng: Rng, bb: BattedBall, defense: DefenseMap): FieldPl
       const p = defense.players[pos];
       if (!p) continue;
       const d = dist2d(DEFENSE_SPOTS[pos], point);
-      const reach = reactionTime(p, pos) + travelTime(p, d);
+      const reach = reactionTime(p, pos) + travelTime(p, Math.max(0, d - GLOVE_REACH));
       if (reach <= t) {
         // 이 야수가 이 지점에 도달 가능 -> 처리
         const hard = clamp((bb.exitVelocity - 130) / 80, 0, 1); // 강습 타구는 어렵다

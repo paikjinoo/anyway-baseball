@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { GameScene, type CameraMode } from './three/GameScene';
+import { GameScene, zoneFlippedOnScreen, type CameraMode } from './three/GameScene';
 import { CountDisplay, Scoreboard } from './hud/Scoreboard';
 import { PitchClock } from './hud/PitchClock';
 import { PitchPanel } from './hud/PitchPanel';
@@ -192,7 +192,12 @@ export function GameView({
           {canBat ? (
             <BatPanel state={hud} batter={batter} />
           ) : canPitch && phase === 'SETUP' ? (
-            <PitchPanel state={state} pitcher={pitcher} playerSide={playerSide as Side} />
+            <PitchPanel
+              state={state}
+              pitcher={pitcher}
+              playerSide={playerSide as Side}
+              mirrored={zoneFlippedOnScreen(cameraMode, batting)}
+            />
           ) : (
             <div className="panel p-4 text-center text-sm text-slate-400">
               {spectating ? (

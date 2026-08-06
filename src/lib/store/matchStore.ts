@@ -111,6 +111,14 @@ interface MatchStore {
   trajectory: PitchTrajectory | null;
   pitchCmd: PitchCommand | null;
   /**
+   * 투구 전, 수비측이 패널에서 고르고 있는 구종과 코스.
+   * 3D 화면이 예상 궤적을 그리는 데 쓴다.
+   *
+   * 스토어는 클라이언트마다 따로이고 이 값은 투구 패널만 채우므로,
+   * 타자 쪽 화면에는 절대 전달되지 않는다(구종이 새면 게임이 성립하지 않는다).
+   */
+  pitchPreview: PitchCommand | null;
+  /**
    * performance.now() 기준 "공을 놓는" 시각.
    * 투수 모션이 먼저 재생되므로 투구를 확정한 시점보다 WINDUP_MS 만큼 뒤다.
    */
@@ -191,6 +199,8 @@ interface MatchStore {
 
   setAim: (x: number, y: number) => void;
   setSwingType: (t: SwingType) => void;
+  /** 투구 패널이 선택 상태를 3D 화면에 알린다. 패널이 사라지면 null로 지운다. */
+  setPitchPreview: (cmd: PitchCommand | null) => void;
   toggleSteal: (base: number) => void;
   /** 수비측(사람)이 투구를 확정 */
   throwPitch: (cmd: PitchCommand) => void;
@@ -345,6 +355,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
   inningBreakEndsAt: 0,
   trajectory: null,
   pitchCmd: null,
+  pitchPreview: null,
   pitchStartAt: 0,
   deliveryStartAt: 0,
   displayFlightMs: 800,
@@ -391,6 +402,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       inningBreakEndsAt: 0,
       trajectory: null,
       pitchCmd: null,
+      pitchPreview: null,
       lastResult: null,
       prePitchState: null,
       timeline: null,
@@ -428,6 +440,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       inningBreakEndsAt: 0,
       trajectory: null,
       pitchCmd: null,
+      pitchPreview: null,
       lastResult: null,
       prePitchState: null,
       timeline: null,
@@ -465,6 +478,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       inningBreakEndsAt: 0,
       trajectory: null,
       pitchCmd: null,
+      pitchPreview: null,
       lastResult: null,
       prePitchState: null,
       timeline: null,
@@ -520,6 +534,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
 
   setAim: (x, y) => set({ aim: { x: clamp(x, -1.9, 1.9), y: clamp(y, -1.9, 1.9) } }),
   setSwingType: (t) => set({ swingType: t }),
+  setPitchPreview: (cmd) => set({ pitchPreview: cmd }),
 
   toggleSteal: (base) =>
     set((s) => ({
@@ -697,6 +712,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       inningBreakEndsAt: 0,
       trajectory: null,
       pitchCmd: null,
+      pitchPreview: null,
       lastResult: null,
       prePitchState: null,
       timeline: null,

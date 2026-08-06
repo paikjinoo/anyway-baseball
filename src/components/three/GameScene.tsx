@@ -1,20 +1,30 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { Stadium } from './Stadium';
 import { PlayerModel, RELEASE_AT, type PoseKind, type UniformSpec } from './PlayerModel';
 import {
+  BALL_RADIUS,
   DEFENSE_SPOTS,
   MOUND_DISTANCE,
+  PITCH_DEFS,
   swingDisplayRadius,
   ZONE_BOTTOM,
+  ZONE_HALF_HEIGHT,
   ZONE_HALF_WIDTH,
   ZONE_TOP,
   zoneToWorld,
 } from '@/lib/game/constants';
-import { pitchPositionExtended } from '@/lib/game/pitching';
+/** 홈플레이트 앞뒤 길이 (m). 존을 입체로 그릴 때의 두께. */
+const PLATE_DEPTH = 0.43;
+import {
+  controlSpread,
+  pitchPositionAt,
+  pitchPositionExtended,
+  previewPitch,
+} from '@/lib/game/pitching';
 import {
   baseFacing,
   baseStation,
@@ -260,6 +270,15 @@ function Batter() {
   );
 }
 
+/**
+ * 마운드 흙더미 위 높이. Stadium의 마운드 실린더(반지름 2.75, 윗면 0.26)와 맞춘다.
+ * 가장자리에서 뚝 떨어지면 발이 허공에 뜨므로 바깥쪽 0.6m를 경사로 잇는다.
+ */
+function moundHeightAt(p: Vec3): number {
+  const d = Math.hypot(p.x, p.z - MOUND_DISTANCE);
+  return 0.26 * clamp((2.75 - d) / 0.6, 0, 1);
+}
+
 /** 투수. 와인드업 -> 릴리스 -> 팔로스루를 시간축으로 재생한다. */
 function Pitcher() {
   // 단계가 바뀌면 다시 그려야 하므로 구독만 걸어둔다
@@ -278,7 +297,7 @@ function Pitcher() {
   const p = currentPitcher(scene);
   const uni = uniformOf(defenseTeam(scene));
 
-  // 투수 앞 땅볼 등, 투수가 직접 타구를 처리하는 경우
+  // 투수 앞 땅볼, 1루 커버, 복귀 송구 받기 등 투수가 움직이는 경우
   const t = playClock(s);
   const motion = t !== null ? sampleFielder(s.timeline?.field ?? null, 'P', t) : null;
   if (motion) {
@@ -289,7 +308,8 @@ function Pitcher() {
         pose={motion.pose}
         animT={motion.cycle}
         intensity={motion.intensity}
-        position={[motion.pos.x, 0, motion.pos.z]}
+        // 마운드 위에 있을 때는 흙더미 높이만큼 올려 세운다 (평지면 0)
+        position={[motion.pos.x, moundHeightAt(motion.pos), motion.pos.z]}
         rotationY={motion.yaw}
       />
     );
@@ -320,6 +340,7 @@ const TRAIL_MIN_HEIGHT = 1.1;
 
 function Ball() {
   const ref = useRef<THREE.Mesh>(null);
+  const ballMat = useRef<THREE.MeshStandardMaterial>(null);
   const trailRef = useRef<THREE.Points>(null);
   const trailMat = useRef<THREE.PointsMaterial>(null);
   const trailPositions = useRef(new Float32Array(60 * 3));
@@ -339,6 +360,17 @@ function Ball() {
     }
     mesh.visible = true;
     mesh.position.set(pos.x, pos.y, pos.z);
+
+    // 투구 중에는 공을 무엇보다 앞에 그린다.
+    //
+    // 타자 시점 카메라와 홈플레이트 사이에 포수가 있고, SD 비율이라 머리가 커서
+    // **존 아래쪽이 통째로 포수 머리에 가린다** (홈플레이트 기준 0.6m 아래로는
+    // 아예 안 보인다). 하필 그 구간이 낮은 코스를 판단하는 자리라, 공이 존을
+    // 지나는 마지막 순간에 사라져 버렸다. 어차피 공은 포수보다 앞에 있으므로
+    // 깊이 검사를 끄면 그 구간만 되살아나고 다른 장면은 그대로다.
+    // (타구 연출에서는 야수 뒤로 지나가는 공도 있으므로 원래대로 되돌린다)
+    if (ballMat.current) ballMat.current.depthTest = s.phase !== 'FLIGHT';
+    mesh.renderOrder = s.phase === 'FLIGHT' ? 10 : 0;
 
     // 궤적 잔상
     const arr = trailPositions.current;
@@ -374,7 +406,13 @@ function Ball() {
     <>
       <mesh ref={ref} castShadow>
         <sphereGeometry args={[0.055, 12, 10]} />
-        <meshStandardMaterial color="#ffffff" emissive="#ffffff" emissiveIntensity={0.18} roughness={0.5} />
+        <meshStandardMaterial
+          ref={ballMat}
+          color="#ffffff"
+          emissive="#ffffff"
+          emissiveIntensity={0.18}
+          roughness={0.5}
+        />
       </mesh>
       <points ref={trailRef} geometry={trailGeo}>
         <pointsMaterial
@@ -390,6 +428,24 @@ function Ball() {
   );
 }
 
+/**
+ * 포수가 공을 잡는 깊이 (m). 홈플레이트를 지난 공은 여기서 멈춘다.
+ *
+ * 이 제동이 없으면 공이 플레이트를 지나 카메라 코앞(약 2.5m)까지 돌진해
+ * 화면을 가득 채우며 아래로 빠져나간다. 하필 그 순간이 존을 지나는 높낮이를
+ * 눈으로 재는 시점이라, 낮은 코스가 특히 안 보였다.
+ */
+const MITT_Z = -1.25;
+
+/** 미트까지만 그리는 투구 궤적 */
+function pitchDisplayPos(traj: NonNullable<Store['trajectory']>, t: number): Vec3 {
+  const p = pitchPositionExtended(traj, Math.min(t, 1.24));
+  if (p.z >= MITT_Z) return p;
+  const a = pitchPositionAt(traj, 1); // 플레이트 통과 지점 (z = 0)
+  const u = (MITT_Z - a.z) / (p.z - a.z);
+  return { x: a.x + (p.x - a.x) * u, y: a.y + (p.y - a.y) * u, z: MITT_Z };
+}
+
 /** 현재 시각의 공 위치. 투구 중이면 투구 궤적, 타구 후면 타구 궤적. */
 function ballPosition(s: Store): Vec3 | null {
   const now = performance.now();
@@ -397,15 +453,15 @@ function ballPosition(s: Store): Vec3 | null {
     // 릴리스 전(와인드업 중)에는 공이 글러브 안에 있으므로 그리지 않는다
     const t = (now - s.pitchStartAt) / s.displayFlightMs;
     if (t < 0) return null;
-    return pitchPositionExtended(s.trajectory, Math.min(t, 1.24));
+    return pitchDisplayPos(s.trajectory, t);
   }
   if (s.phase === 'RESULT' && s.lastResult) {
     const r = s.lastResult;
     const elapsed = now - s.resultStartAt;
     // 판정이 공보다 먼저 확정되는 구간(CPU 선행 스윙 등)에서는 투구 궤적을 계속 그린다
     if (elapsed < 0 || !r.battedBall || !r.contact) {
-      const t = Math.min(1.24, (now - s.pitchStartAt) / s.displayFlightMs);
-      return s.trajectory && t >= 0 ? pitchPositionExtended(s.trajectory, t) : null;
+      const t = (now - s.pitchStartAt) / s.displayFlightMs;
+      return s.trajectory && t >= 0 ? pitchDisplayPos(s.trajectory, t) : null;
     }
     // 주자 연출과 같은 시계를 쓴다
     const t = (elapsed / 1000) * s.playRate;
@@ -437,6 +493,19 @@ function sampleBattedPath(path: Vec3[], hangTime: number, t: number): Vec3 {
 
 function StrikeZone({ showAim }: { showAim: boolean }) {
   const aimRef = useRef<THREE.Group>(null);
+  const rootRef = useRef<THREE.Group>(null);
+
+  // 존은 그라운드에 놓인 물체가 아니라 판정 기준을 보여 주는 오버레이다.
+  // 깊이 검사를 켜 두면 카메라와 홈플레이트 사이에 선 포수 머리에 가려
+  // 정작 낮은 코스를 잴 때 기준선이 사라진다. 항상 앞에 그린다.
+  useEffect(() => {
+    rootRef.current?.traverse((o) => {
+      o.renderOrder = 9;
+      const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+      if (m) m.depthTest = false;
+    });
+  }, []);
+
   useFrame(() => {
     const s = useMatchStore.getState();
     if (!aimRef.current) return;
@@ -451,13 +520,18 @@ function StrikeZone({ showAim }: { showAim: boolean }) {
   });
 
   const h = ZONE_TOP - ZONE_BOTTOM;
+  const w = ZONE_HALF_WIDTH * 2;
   const cy = (ZONE_TOP + ZONE_BOTTOM) / 2;
 
   return (
-    <group>
+    <group ref={rootRef}>
+      {/* 판정면(플레이트 앞 모서리)의 테두리. **존을 나타내는 사각형은 이것 하나뿐이다.**
+          같은 크기·같은 색의 사각형을 하나라도 더 그리면(예: 뒷면 테두리) 타자 시점에서는
+          그게 아래로 어긋나 겹쳐 보여서 "존이 두 개"로 읽힌다 — 공이 어느 선을 지났는지
+          판단할 수 없게 되므로, 깊이감은 아래 바닥면·기둥처럼 모양이 다른 것으로만 준다. */}
       <lineSegments position={[0, cy, 0.01]}>
-        <edgesGeometry args={[new THREE.PlaneGeometry(ZONE_HALF_WIDTH * 2, h)]} />
-        <lineBasicMaterial color="#fbbf24" transparent opacity={0.8} />
+        <edgesGeometry args={[new THREE.PlaneGeometry(w, h)]} />
+        <lineBasicMaterial color="#fbbf24" transparent opacity={0.9} />
       </lineSegments>
       {/* 9분할 보조선 */}
       {[-1 / 3, 1 / 3].map((f) => (
@@ -467,10 +541,26 @@ function StrikeZone({ showAim }: { showAim: boolean }) {
             <meshBasicMaterial color="#fbbf24" transparent opacity={0.28} />
           </mesh>
           <mesh position={[0, cy + f * h * 0.5, 0.008]}>
-            <planeGeometry args={[ZONE_HALF_WIDTH * 2, 0.004]} />
+            <planeGeometry args={[w, 0.004]} />
             <meshBasicMaterial color="#fbbf24" transparent opacity={0.28} />
           </mesh>
         </group>
+      ))}
+
+      {/* 존의 바닥면. 홈플레이트 깊이(43cm)만큼 뒤로 깔아 둔다.
+          위에서 내려다보는 타자 시점에서 이 면이 보이므로, 공이 그 아래로
+          지나가면 "존 밑"이라는 게 한눈에 읽힌다. 선만 그려서는 존 하단
+          경계가 공과 겹쳐 보여 낮은 코스를 구분할 수 없었다. */}
+      <mesh position={[0, ZONE_BOTTOM, -PLATE_DEPTH / 2]} rotation={[-Math.PI / 2, 0, 0]}>
+        <planeGeometry args={[w, PLATE_DEPTH]} />
+        <meshBasicMaterial color="#fbbf24" transparent opacity={0.16} side={THREE.DoubleSide} />
+      </mesh>
+      {/* 존 아래를 지면까지 잇는 기둥. 공의 높이를 잴 기준선이 된다. */}
+      {[-1, 1].map((sx) => (
+        <mesh key={`post${sx}`} position={[sx * ZONE_HALF_WIDTH, ZONE_BOTTOM / 2, 0.008]}>
+          <planeGeometry args={[0.006, ZONE_BOTTOM]} />
+          <meshBasicMaterial color="#fbbf24" transparent opacity={0.22} />
+        </mesh>
       ))}
       <group ref={aimRef} visible={showAim}>
         <mesh>
@@ -480,6 +570,107 @@ function StrikeZone({ showAim }: { showAim: boolean }) {
         <mesh position={[0, 0, -0.001]}>
           <ringGeometry args={[0.93, 1, 32]} />
           <meshBasicMaterial color="#22d3ee" transparent opacity={0.95} side={THREE.DoubleSide} />
+        </mesh>
+      </group>
+    </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 투구 전 예상 궤적
+// ---------------------------------------------------------------------------
+
+/** 궤적을 몇 조각으로 나눠 그릴지. 커브의 낙차가 각지지 않을 만큼만. */
+const PREVIEW_SEGMENTS = 40;
+/** 예상 궤적 선의 굵기 (m). 18m 떨어진 존까지 이어지므로 공보다 가늘게 잡는다. */
+const PREVIEW_TUBE_RADIUS = 0.024;
+
+/**
+ * 투수가 구종·코스를 고르는 동안 그 공이 그릴 선을 미리 보여 준다.
+ *
+ * 패널의 격자만으로는 "어느 칸을 노렸는가"밖에 알 수 없어서, 구종마다 다른
+ * 변화(커브의 낙차, 슬라이더의 횡 이동)를 감안해 코스를 고를 수가 없었다.
+ *
+ * 난수를 뺀 평균 궤적이라 도착점은 노린 지점과 같다. 실제 공은 제구만큼
+ * 흩어지므로, 그 산포(±1σ)를 도착점 둘레의 타원으로 함께 그린다.
+ *
+ * 이 값을 채우는 건 투구 패널뿐이고 스토어는 클라이언트마다 따로이므로,
+ * 타자 화면에 구종이 새지 않는다.
+ */
+function PitchPreview() {
+  const cmd = useMatchStore((s) => s.pitchPreview);
+  const state = useMatchStore((s) => s.state);
+  // 패널이 아직 떠 있어도(원격 투구 대기 등) 공이 떠난 뒤에는 그리지 않는다
+  const setup = useMatchStore((s) => s.phase === 'SETUP');
+
+  const preview = useMemo(() => {
+    if (!cmd || !state) return null;
+    const pitcher = currentPitcher(state);
+    const pitches = defenseTeam(state).pitcherPitches;
+    const traj = previewPitch(pitcher, cmd, pitches);
+    const points = Array.from({ length: PREVIEW_SEGMENTS + 1 }, (_, i) => {
+      const p = pitchPositionAt(traj, i / PREVIEW_SEGMENTS);
+      return new THREE.Vector3(p.x, p.y, p.z);
+    });
+    return {
+      curve: new THREE.CatmullRomCurve3(points),
+      plate: traj.plate,
+      spread: controlSpread(pitcher, cmd, pitches),
+      color: PITCH_DEFS[cmd.type].color,
+    };
+  }, [cmd, state]);
+
+  if (!setup || !preview) return null;
+
+  return (
+    <group>
+      {/* 궤적. 마운드의 투수 몸에는 가려지는 게 자연스러우므로 깊이 검사를 켜 둔다. */}
+      <mesh>
+        <tubeGeometry args={[preview.curve, PREVIEW_SEGMENTS, PREVIEW_TUBE_RADIUS, 6, false]} />
+        <meshBasicMaterial
+          color={preview.color}
+          transparent
+          opacity={0.6}
+          depthWrite={false}
+        />
+      </mesh>
+
+      {/* 도착점. 존 위에 겹치는 표시라 항상 앞에 그린다 (존·조준 커서와 같은 취급).
+          존 평면에 눕힌 원판이므로 양면으로 그려야 타자 시점(존 뒤)에서도 보인다. */}
+      <group position={[preview.plate.x, preview.plate.y, 0.02]}>
+        {/* 제구 산포. 실제 공은 대체로 이 타원 안으로 들어온다. */}
+        <mesh
+          renderOrder={9}
+          scale={[preview.spread.x * ZONE_HALF_WIDTH, preview.spread.y * ZONE_HALF_HEIGHT, 1]}
+        >
+          <ringGeometry args={[0.93, 1, 48]} />
+          <meshBasicMaterial
+            color={preview.color}
+            transparent
+            opacity={0.4}
+            depthTest={false}
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+        <mesh renderOrder={10}>
+          <circleGeometry args={[BALL_RADIUS, 20]} />
+          <meshBasicMaterial
+            color={preview.color}
+            transparent
+            opacity={0.9}
+            depthTest={false}
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+        <mesh renderOrder={10}>
+          <ringGeometry args={[BALL_RADIUS * 1.75, BALL_RADIUS * 2.15, 28]} />
+          <meshBasicMaterial
+            color="#f8fafc"
+            transparent
+            opacity={0.85}
+            depthTest={false}
+            side={THREE.DoubleSide}
+          />
         </mesh>
       </group>
     </group>
@@ -554,10 +745,15 @@ function CameraRig({ mode }: { mode: CameraMode }) {
       look = new THREE.Vector3(0, 0, 34);
     } else if (batting || mode === 'BATTER') {
       // 타자 시점: 포수 뒤에서 투수를 바라본다.
+      //
       // SD 비율이라 포수 머리가 커서, 낮게 잡으면 홈플레이트와 존을 가린다.
-      // 조금 더 높이·뒤로 물러나 포수 머리 위로 넘겨다본다.
-      camPos = new THREE.Vector3(0, 2.55, -5.5);
-      look = new THREE.Vector3(0, 1.25, 14);
+      // 그래서 높이 잡되, 시선은 마운드가 아니라 **홈플레이트 쪽**으로 내린다.
+      // 예전처럼 멀리(z=14)를 보면 존이 화면 밑바닥(76~90% 지점)에 깔려서
+      // 존 아래로 오는 공이 화면 밖으로 나가 버려 높낮이를 읽을 수 없었다.
+      // 지금 구도에서 존은 화면 52~63%, 홈플레이트 지면이 71%에 잡혀
+      // 존 아래로도 화면이 3분의 1쯤 남는다.
+      camPos = new THREE.Vector3(0, 3.05, -6.6);
+      look = new THREE.Vector3(0, 1.2, 0);
     } else {
       // 투수 시점: 마운드 뒤 약간 높은 곳
       camPos = new THREE.Vector3(0, 3.1, MOUND_DISTANCE + 7.2);
@@ -592,6 +788,23 @@ function CameraRig({ mode }: { mode: CameraMode }) {
   });
 
   return null;
+}
+
+/**
+ * 지금 화면이 스트라이크존을 어느 쪽에서 보고 있는가 (true면 좌우가 뒤집혀 보인다).
+ *
+ * 존 좌표 +x는 **포수 뒤에서 본 오른쪽**(1루 쪽, 월드 -X)으로 정의돼 있다(zoneToWorld).
+ * 홈 뒤에서 잡는 샷(타자 시점·전체 뷰)은 그 정의와 같지만, 마운드 뒤에서 잡는
+ * 투수 시점만 화면 오른쪽이 3루(월드 +X)가 되어 부호가 반대가 된다.
+ *
+ * 조작 패널의 좌우를 화면과 맞추는 데 쓴다. 위 CameraRig의 분기와 같이 고쳐야 한다.
+ * (패널이 떠 있는 SETUP 단계에는 INNING_BREAK·타구 추적 샷이 잡히지 않으므로
+ *  여기서는 카메라 모드와 공수만 보면 된다)
+ */
+export function zoneFlippedOnScreen(mode: CameraMode, batting: boolean): boolean {
+  if (mode === 'FIELD') return false; // 전체 뷰: 홈 뒤 높은 곳
+  if (batting || mode === 'BATTER') return false; // 타자 시점: 포수 뒤
+  return true; // 투수 시점: 마운드 뒤
 }
 
 // ---------------------------------------------------------------------------
@@ -659,6 +872,7 @@ export function GameScene({ cameraMode = 'DRAMATIC' }: { cameraMode?: CameraMode
       <SceneActors />
       <Ball />
       {!inningBreak && <StrikeZone showAim={playerBatting} />}
+      {!inningBreak && <PitchPreview />}
 
       <CameraRig mode={cameraMode} />
       <Driver />

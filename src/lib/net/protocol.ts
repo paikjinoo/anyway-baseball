@@ -1,6 +1,7 @@
 import type {
   GameSettings,
   GameState,
+  MatchRules,
   OffenseCommand,
   PitchCommand,
   PitchResult,
@@ -62,6 +63,13 @@ export type OwnerMap = Record<string, string>;
 export type NetMessage =
   /** 접속 직후 신원/팀 교환 */
   | { t: 'HELLO'; uid: string; name: string; team: Team }
+  /**
+   * 호스트 -> 게스트: 이 방의 경기 규칙.
+   * 방장이 대기실에서 규칙을 바꿀 때마다 다시 보낸다. 게스트는 시작 전에
+   * 어떤 조건으로 붙는 경기인지 알아야 하고, 투구 체감 속도처럼 화면에
+   * 바로 영향을 주는 값도 여기 들어 있다.
+   */
+  | { t: 'ROOM_RULES'; rules: MatchRules }
   /** 호스트 -> 게스트: 경기 시작. 초기 상태를 통째로 전달한다. */
   | { t: 'START'; state: GameState; settings: GameSettings; guestSide: Side }
   /** 수비측 -> 호스트: 구종/코스 결정 */

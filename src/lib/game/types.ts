@@ -190,6 +190,50 @@ export const DEFAULT_SETTINGS: GameSettings = {
   cameraShake: true,
 };
 
+/**
+ * 한 경기의 규칙. GameSettings 중 **양쪽에 똑같이 적용돼야 하는** 값만 모은 것이다.
+ *
+ * 사운드나 카메라 흔들림은 각자 자기 브라우저 설정을 쓰지만, 이닝 수·콜드게임·DH·
+ * 투구 체감 속도는 승부 조건이라 한쪽만 다르면 경기가 성립하지 않는다.
+ * 온라인 방을 만들 때 방장이 정하고, 그 값이 그대로 GameState.settings에 들어간다.
+ */
+export type MatchRules = Pick<
+  GameSettings,
+  'regulationInnings' | 'mercyRule' | 'mercyRunDiff' | 'mercyFromInning' | 'useDH' | 'pitchSpeedScale'
+>;
+
+export const RULE_KEYS = [
+  'regulationInnings',
+  'mercyRule',
+  'mercyRunDiff',
+  'mercyFromInning',
+  'useDH',
+  'pitchSpeedScale',
+] as const;
+
+/** 설정 뭉치에서 경기 규칙만 뽑아낸다 */
+export function pickRules(s: GameSettings | MatchRules): MatchRules {
+  return {
+    regulationInnings: s.regulationInnings,
+    mercyRule: s.mercyRule,
+    mercyRunDiff: s.mercyRunDiff,
+    mercyFromInning: s.mercyFromInning,
+    useDH: s.useDH,
+    pitchSpeedScale: s.pitchSpeedScale,
+  };
+}
+
+/** 방 목록·대기실에 한 줄로 보여줄 규칙 요약 */
+export function describeRules(r: MatchRules | undefined): string {
+  if (!r) return '기본 규칙';
+  return [
+    `${r.regulationInnings}이닝`,
+    r.mercyRule ? `콜드 ${r.mercyRunDiff}점(${r.mercyFromInning}회~)` : '콜드 없음',
+    r.useDH ? 'DH' : '투수 타석',
+    `구속 ${Math.round(r.pitchSpeedScale * 100)}%`,
+  ].join(' · ');
+}
+
 // ---------------------------------------------------------------------------
 // 경기 상태
 // ---------------------------------------------------------------------------

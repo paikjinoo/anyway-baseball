@@ -7,8 +7,9 @@ import { PeerConnection, type ConnState } from '@/lib/net/webrtc';
 import type { NetMessage } from '@/lib/net/protocol';
 import { changePitcher, createGame } from '@/lib/game/engine';
 import { GameView } from '@/components/GameView';
+import { RuleSettings } from '@/components/settings/RuleSettings';
 import { hostResolveWithSwing, hostStartPitch, useMatchStore } from '@/lib/store/matchStore';
-import type { Team } from '@/lib/game/types';
+import { pickRules, type MatchRules, type Team } from '@/lib/game/types';
 
 export default function HostRoomPage() {
   return (
@@ -32,6 +33,14 @@ function HostRoomInner() {
   const [error, setError] = useState<string | null>(null);
   const [started, setStarted] = useState(false);
   const [copied, setCopied] = useState(false);
+  /**
+   * 이 방의 경기 규칙. 내 설정값에서 출발하되 여기서 바꾼 값이 경기에 들어간다.
+   * (설정 화면의 값을 건드리지는 않는다 — 방마다 다르게 열 수 있어야 한다)
+   */
+  const [rules, setRules] = useState<MatchRules>(() => pickRules(settings));
+  // 방을 만드는 effect는 한 번만 도는데, 그 안에서 최신 규칙을 읽어야 한다
+  const rulesRef = useRef(rules);
+  rulesRef.current = rules;
 
   const initOnlineGame = useMatchStore((s) => s.initOnlineGame);
   const applyRemoteState = useMatchStore((s) => s.applyRemoteState);
@@ -54,6 +63,7 @@ function HostRoomInner() {
         hostName: user.displayName,
         teamName: team.name,
         isPrivate: params.get('private') === '1',
+        rules: rulesRef.current,
       })
       .then(setRoomId)
       .catch((e) => setError(String(e?.message ?? e)));
@@ -66,6 +76,15 @@ function HostRoomInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.uid, team?.id]);
 
+  // 규칙이 바뀌면 들어와 있는 상대와 방 목록 양쪽에 알린다.
+  // 방 문서 쓰기는 슬라이더를 놓은 뒤에만 일어나도록 조금 늦춘다.
+  useEffect(() => {
+    if (started) return;
+    peerRef.current?.send({ t: 'ROOM_RULES', rules });
+    const id = setTimeout(() => void peerRef.current?.updateRoomRules(rules), 600);
+    return () => clearTimeout(id);
+  }, [rules, started]);
+
   function handleMessage(msg: NetMessage) {
     const peer = peerRef.current;
     if (!peer || !team) return;
@@ -73,8 +92,9 @@ function HostRoomInner() {
     switch (msg.t) {
       case 'HELLO': {
         setGuestTeam(msg.team);
-        // 호스트 팀 정보를 회신
+        // 호스트 팀 정보와 이 방의 규칙을 회신
         peer.send({ t: 'HELLO', uid: user!.uid, name: user!.displayName, team });
+        peer.send({ t: 'ROOM_RULES', rules: rulesRef.current });
         void peer.cleanupSignaling();
         break;
       }
@@ -115,8 +135,10 @@ function HostRoomInner() {
     if (!peer || !team || !guestTeam) return;
     // 호스트는 홈, 게스트는 원정
     const seed = `online-${roomId}-${Date.now()}`;
-    const state = createGame(guestTeam, team, settings, seed);
-    peer.send({ t: 'START', state, settings, guestSide: 'away' });
+    // 사운드·카메라는 각자 자기 설정을 쓰고, 승부 조건만 방 규칙으로 덮는다
+    const gameSettings = { ...settings, ...rules };
+    const state = createGame(guestTeam, team, gameSettings, seed);
+    peer.send({ t: 'START', state, settings: gameSettings, guestSide: 'away' });
     initOnlineGame({
       state,
       mode: 'ONLINE_HOST',
@@ -193,6 +215,15 @@ function HostRoomInner() {
         {error && (
           <p className="mt-3 rounded-lg bg-rose-500/10 px-3 py-2 text-xs text-rose-300">{error}</p>
         )}
+      </section>
+
+      <section className="panel p-5">
+        <h2 className="mb-1 font-bold">이 경기의 규칙</h2>
+        <p className="mb-4 text-[11px] leading-relaxed text-slate-500">
+          방장이 정한 규칙이 이 경기에만 적용됩니다. 상대 화면에도 그대로 반영되며, 내 기본 설정은
+          바뀌지 않습니다.
+        </p>
+        <RuleSettings value={rules} onChange={(p) => setRules((r) => ({ ...r, ...p }))} compact />
       </section>
 
       {guestTeam && (

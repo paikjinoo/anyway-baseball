@@ -15,6 +15,7 @@ import {
 import { getDb, iceServers, firebaseConfigured } from '../firebase/client';
 import { decode, encode, type NetMessage } from './protocol';
 import type { ConnState, RoomInfo } from './webrtc';
+import type { MatchRules } from '../game/types';
 
 /**
  * 2대2 대전용 P2P 연결 (별 구조).
@@ -104,6 +105,7 @@ export class PartyHost {
     hostName: string;
     teamName: string;
     isPrivate?: boolean;
+    rules: MatchRules;
   }): Promise<string> {
     const db = getDb();
     if (!firebaseConfigured || !db) {
@@ -123,6 +125,7 @@ export class PartyHost {
       isPrivate: opts.isPrivate ?? false,
       mode: '2v2',
       playerCount: 1,
+      rules: opts.rules,
     };
     await setDoc(roomRef, { ...info, createdAtServer: serverTimestamp() });
 
@@ -253,6 +256,13 @@ export class PartyHost {
   sendTo(uid: string, msg: NetMessage) {
     const p = this.peers.get(uid);
     if (p?.ch?.readyState === 'open') p.ch.send(encode(msg));
+  }
+
+  /** 방장이 규칙을 바꿨을 때 방 목록에도 반영한다 */
+  async updateRoomRules(rules: MatchRules) {
+    const db = getDb();
+    if (!db || !this.roomId) return;
+    await updateDoc(doc(db, 'rooms', this.roomId), { rules }).catch(() => {});
   }
 
   async setStatus(status: RoomInfo['status']) {
