@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { PITCH_DEFS } from '@/lib/game/constants';
 import { arsenalOf, staminaRemaining } from '@/lib/game/pitching';
 import { bullpenCandidates } from '@/lib/game/engine';
-import { isPartyMode, useMatchStore } from '@/lib/store/matchStore';
+import { isPartyMode, isRelayMode, useMatchStore } from '@/lib/store/matchStore';
 import { playClick } from '@/lib/audio/sfx';
 import type { GameState, PitchType, Player, Side } from '@/lib/game/types';
 
@@ -32,7 +32,9 @@ export function PitchPanel({
   const setPitchPreview = useMatchStore((s) => s.setPitchPreview);
   const substitutePitcher = useMatchStore((s) => s.substitutePitcher);
   const waiting = useMatchStore((s) => s.waitingRemote);
-  const party = useMatchStore((s) => isPartyMode(s.mode));
+  const mode = useMatchStore((s) => s.mode);
+  const party = isPartyMode(mode);
+  const relay = isRelayMode(mode);
   const owners = useMatchStore((s) => s.owners);
   const myUid = useMatchStore((s) => s.myUid);
 
@@ -192,11 +194,13 @@ export function PitchPanel({
         {waiting ? '상대 대기 중…' : '투구!'}
       </button>
 
-      <button className="btn w-full !py-1.5 !text-xs" onClick={() => setShowBullpen((v) => !v)}>
-        투수 교체 {showBullpen ? '닫기' : party ? '(내 투수만)' : '열기'}
-      </button>
-      {showBullpen && (
-        <div className="max-h-40 space-y-1 overflow-y-auto">
+      {!relay && (
+        <>
+          <button className="btn w-full !py-1.5 !text-xs" onClick={() => setShowBullpen((v) => !v)}>
+            투수 교체 {showBullpen ? '닫기' : party ? '(내 투수만)' : '열기'}
+          </button>
+          {showBullpen && (
+            <div className="max-h-40 space-y-1 overflow-y-auto">
           {/* 2대2에서는 자기 투수만 올릴 수 있다 */}
           {bullpenCandidates(state, playerSide)
             .filter((p) => !party || owners[p.id] === myUid)
@@ -213,7 +217,9 @@ export function PitchPanel({
                 <span className="text-slate-500">스태미나 {p.pitching?.stamina ?? 0}</span>
               </button>
             ))}
-        </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

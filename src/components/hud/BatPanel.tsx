@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { useMatchStore } from '@/lib/store/matchStore';
+import { isRelayMode, useMatchStore } from '@/lib/store/matchStore';
 import { SWING_DEFS, swingDisplayRadius } from '@/lib/game/constants';
 import { playClick } from '@/lib/audio/sfx';
 import type { GameState, Player, SwingType } from '@/lib/game/types';
@@ -30,6 +30,7 @@ export function BatPanel({ state, batter }: { state: GameState; batter: Player }
   const toggleSteal = useMatchStore((s) => s.toggleSteal);
   const requestPitch = useMatchStore((s) => s.requestPitch);
   const mode = useMatchStore((s) => s.mode);
+  const relay = isRelayMode(mode);
   const zoneRef = useRef<HTMLDivElement>(null);
   // 투수가 공을 놓기 전(와인드업 중)에는 스윙 안내를 띄우지 않는다
   const [released, setReleased] = useState(false);
@@ -48,12 +49,17 @@ export function BatPanel({ state, batter }: { state: GameState; batter: Player }
     return () => clearTimeout(id);
   }, [phase]);
 
+  useEffect(() => {
+    if (relay && swingType === 'BUNT') setSwingType('NORMAL');
+  }, [relay, setSwingType, swingType]);
+
   // 키보드 조작
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.repeat) return;
       const t = SWING_KEYS[e.code];
       if (t) {
+        if (relay && t === 'BUNT') return;
         e.preventDefault();
         // 투구 전이면 Space는 "투구 받기"로 동작한다
         if (useMatchStore.getState().phase === 'SETUP') {
@@ -75,7 +81,7 @@ export function BatPanel({ state, batter }: { state: GameState; batter: Player }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [swing, setAim, setSwingType, requestPitch]);
+  }, [relay, swing, setAim, setSwingType, requestPitch]);
 
   function move(e: React.PointerEvent<HTMLDivElement>) {
     const el = zoneRef.current;
@@ -117,7 +123,7 @@ export function BatPanel({ state, batter }: { state: GameState; batter: Player }
           onPointerDown={(e) => {
             move(e);
             if (phase === 'SETUP') return;
-            const t: SwingType = e.shiftKey ? 'POWER' : swingType === 'BUNT' ? 'BUNT' : 'NORMAL';
+            const t: SwingType = e.shiftKey ? 'POWER' : !relay && swingType === 'BUNT' ? 'BUNT' : 'NORMAL';
             swing(t);
           }}
           className="relative mx-auto aspect-square w-full max-w-[190px] cursor-crosshair touch-none rounded-lg border border-white/10 bg-slate-950/70"
@@ -151,8 +157,8 @@ export function BatPanel({ state, batter }: { state: GameState; batter: Player }
       </div>
 
       {/* 타격 방식 */}
-      <div className="grid grid-cols-3 gap-1.5">
-        {(['NORMAL', 'POWER', 'BUNT'] as SwingType[]).map((t) => (
+      <div className={`grid gap-1.5 ${relay ? 'grid-cols-2' : 'grid-cols-3'}`}>
+        {(['NORMAL', 'POWER', ...(relay ? [] : ['BUNT'])] as SwingType[]).map((t) => (
           <button
             key={t}
             onClick={() => {

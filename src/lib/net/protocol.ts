@@ -8,6 +8,12 @@ import type {
   Side,
   Team,
 } from '../game/types';
+import type {
+  RelayLobbyPlayer,
+  RelayPick,
+  RelayRoomRules,
+  RelayState,
+} from '../game/relay';
 
 // ---------------------------------------------------------------------------
 // 2대2 (올스타전) 관련 타입
@@ -110,7 +116,34 @@ export type NetMessage =
       owners: OwnerMap;
     }
   /** 호스트 -> 전원: 조작 권한 변경 (연결이 끊긴 사람의 선수를 호스트가 인계받을 때) */
-  | { t: 'PARTY_OWNERS'; owners: OwnerMap; notice?: string };
+  | { t: 'PARTY_OWNERS'; owners: OwnerMap; notice?: string }
+  // --- 2~7인 릴레이 타격 대결 ---
+  | {
+      t: 'RELAY_LOBBY';
+      players: RelayLobbyPlayer[];
+      hostUid: string;
+      rules: RelayRoomRules;
+    }
+  | { t: 'RELAY_PICK'; uid: string; pick: RelayPick; ready: boolean }
+  | { t: 'RELAY_START'; state: RelayState }
+  | { t: 'RELAY_PITCH'; turnId: number; pitchSeq: number; cmd: PitchCommand }
+  | {
+      t: 'RELAY_PITCH_GO';
+      turnId: number;
+      pitchSeq: number;
+      cmd: PitchCommand;
+      serverTime: number;
+    }
+  | {
+      t: 'RELAY_SWING';
+      turnId: number;
+      pitchSeq: number;
+      cmd: OffenseCommand['swing'];
+    }
+  | { t: 'RELAY_RESULT'; result: PitchResult; state: RelayState }
+  | { t: 'RELAY_STATE'; state: RelayState; notice?: string }
+  | { t: 'RELAY_RESYNC_REQ' }
+  | { t: 'RELAY_RESYNC'; state: RelayState };
 
 export function encode(msg: NetMessage): string {
   return JSON.stringify(msg);

@@ -1,5 +1,5 @@
 import { Rng, clamp, lerp, norm } from './rng';
-import { BASE_COORDS, DEFENSE_SPOTS, GLOVE_DEFS, fenceDistance } from './constants';
+import { BASE_COORDS, DEFENSE_SPOTS, GLOVE_DEFS, MOUND_DISTANCE, fenceDistance } from './constants';
 import type { BattedBall, FieldPlay, Player, Position, Vec3 } from './types';
 
 const INFIELD: Position[] = ['P', 'C', '1B', '2B', '3B', 'SS'];
@@ -34,7 +34,7 @@ function reactionTime(p: Player, pos?: Position): number {
  * 이만큼을 더 커버한다. 이 값이 없으면 타구선에 몸을 정확히 갖다 놓아야만
  * 아웃이 되어 내야 안타가 폭증한다.
  */
-const GLOVE_REACH = 1.6;
+const GLOVE_REACH = 1.45;
 
 /**
  * 정지 상태에서 거리 d(m)를 이동하는 데 걸리는 시간 (s).
@@ -57,9 +57,33 @@ function throwSpeed(p: Player): number {
   return lerp(24, 44, norm(p.batting.arm));
 }
 
-/** 포구 후 송구 동작까지 (s) */
-function transferTime(p: Player): number {
-  return lerp(0.95, 0.5, norm(p.batting.fielding));
+/**
+ * 포구 후 송구 동작까지 (s). MLB 실측 exchange 중앙값은 0.75초쯤이고
+ * 백핸드·역모션 처리까지 섞이면 꼬리가 길다.
+ *
+ * 난수를 빼면 모든 1루 승부가 같은 여유로 끝나 접전이 사라진다.
+ * 실제로는 포구가 흔들리거나 송구가 살짝 빗나가는 일이 늘 있다.
+ */
+function transferTime(rng: Rng, p: Player): number {
+  const base = lerp(1.02, 0.62, norm(p.batting.fielding));
+  return Math.max(0.42, base + rng.normal(0, 0.1));
+}
+
+const HOME: Vec3 = { x: 0, y: 0, z: 0 };
+
+/** 내야 흙의 경계. 실제 구장은 마운드 중심에서 반경 95 ft. */
+const INFIELD_ARC = 28.96;
+
+/**
+ * 이 지점이 내야를 벗어났는가.
+ *
+ * `throughInfield`를 "내야수가 처리했는가"로 정하면, 유격수가 뒤로 물러나
+ * 외야 잔디에서 주운 공까지 내야 땅볼로 분류되어 1루 승부가 붙는다
+ * (홈에서 52m에 떨어진 라이너가 "유격수 땅볼 아웃"이 되는 식).
+ * 판단 기준은 누가 잡았는지가 아니라 공이 어디까지 갔는지다.
+ */
+function beyondInfield(point: Vec3): boolean {
+  return Math.hypot(point.x, point.z - MOUND_DISTANCE) > INFIELD_ARC;
 }
 
 /** 장비 보정 포함 실효 수비 능력 */
@@ -154,7 +178,12 @@ export function resolveFielding(
     if (cand) {
       const { pos, reachTime, player } = cand;
       const margin = bb.hangTime - reachTime;
-      if (margin >= 0) {
+      // 낮게 깔린 라이너는 떨어지는 공을 기다렸다 잡을 수가 없다. 야수가 낙구
+      // 지점에 미리 가 있어야 하고, 아니면 눈앞에서 떨어진다. 이 여유를 0으로
+      // 두면 가라앉는 타구가 전부 아웃이 되어 라인드라이브 안타율이 .60까지
+      // 떨어진다 (MLB .655).
+      const sinkMargin = clamp((22 - bb.launchAngle) * 0.018, 0, 0.28);
+      if (margin >= sinkMargin) {
         // 여유가 적을수록 포구 실패 확률 증가
         const diff = clamp(1 - margin / 1.4, 0, 1);
         const catchP = clamp(0.998 - diff * 0.2 + norm(effFielding(player)) * 0.1, 0.6, 0.999);
@@ -166,7 +195,7 @@ export function resolveFielding(
             secureTime: bb.hangTime,
             securePoint: bb.landing,
             throwSpeed: throwSpeed(player),
-            transferTime: transferTime(player),
+            transferTime: transferTime(rng, player),
             infield: INFIELD.includes(pos),
             infieldFly,
           };
@@ -179,27 +208,20 @@ export function resolveFielding(
           secureTime: bb.hangTime + rng.range(0.8, 1.8),
           securePoint: bb.landing,
           throwSpeed: throwSpeed(player),
-          transferTime: transferTime(player),
+          transferTime: transferTime(rng, player),
           infield: INFIELD.includes(pos),
           infieldFly,
         };
       }
-      // 못 잡음 -> 안타. 낙구 후 달려가 잡는 시간
-      const chase = reachTime - bb.hangTime;
-      const p = defense.players[pos]!;
-      return {
-        ...base,
-        primary: pos,
-        // 낙구 후 실제로 뛰어가 잡는 시간. 여기를 짧게 잡으면 갭 타구가
-        // 전부 단타로 처리되어 2·3루타가 사라진다.
-        secureTime: bb.hangTime + Math.max(0.4, chase * 0.95) + rng.range(0.15, 0.5),
-        securePoint: bb.landing,
-        throwSpeed: throwSpeed(p),
-        transferTime: transferTime(p),
-        infield: INFIELD.includes(pos),
-        throughInfield: !INFIELD.includes(pos),
-        infieldFly,
-      };
+      // 못 잡음 -> 안타.
+      //
+      // 떨어진 공을 낙구 지점에 고정해두면, 갭에 떨어져 외야를 가르는 타구가
+      // 전부 그 자리에서 처리되어 2루타가 절반으로 줄어든다. 실제로는 공이
+      // 튀어서 계속 굴러가고, 그 사이 타자가 2루를 밟는다.
+      // 착지 후의 구르기는 땅볼과 같은 물리라서 그대로 재사용한다
+      // (resolveGrounder는 landingVel의 수평 성분에서 굴리기 시작한다 —
+      // 가라앉는 라이너는 멀리 구르고, 가파른 뜬공은 그 자리에 선다).
+      return { ...resolveGrounder(rng, bb, defense), infieldFly };
     }
   }
 
@@ -221,7 +243,8 @@ function bestCatcher(rng: Rng, bb: BattedBall, defense: DefenseMap) {
     const backward = bb.distance > Math.hypot(DEFENSE_SPOTS[pos].x, DEFENSE_SPOTS[pos].z);
     // 외야수는 타구가 뜬 직후부터 낙구 지점을 향해 최단 경로로 움직인다.
     // (루트 효율 + 타자에 맞춘 사전 시프트) 이를 실효 이동거리 감소로 근사한다.
-    const route = OUTFIELD.includes(pos) ? 0.86 : 1.0;
+    // 외야수 루트 효율. 이 값이 뜬공 안타율을 정한다 (MLB .130).
+    const route = OUTFIELD.includes(pos) ? 0.78 : 1.0;
     const t = reactionTime(p, pos) + travelTime(p, (d * route) / (backward ? 0.88 : 1.0));
     if (!best || t < best.reachTime) best = { pos, reachTime: t, player: p };
   }
@@ -290,7 +313,7 @@ function resolveGrounder(rng: Rng, bb: BattedBall, defense: DefenseMap): FieldPl
         // 정위치에서 멀리 이동해 잡을수록 자세가 무너져 포구/송구가 늦어진다.
         // 이 페널티가 없으면 내야가 모든 땅볼을 아웃으로 만들어 내야안타가 사라진다.
         const covered = dist2d(DEFENSE_SPOTS[pos], point);
-        const rangePenalty = clamp((covered - 2.5) * 0.055, 0, 0.6);
+        const rangePenalty = clamp((covered - 2.5) * 0.085, 0, 0.9);
         return {
           primary: pos,
           caught: false,
@@ -302,9 +325,10 @@ function resolveGrounder(rng: Rng, bb: BattedBall, defense: DefenseMap): FieldPl
           secureTime: t + rangePenalty + (isError ? rng.range(1.0, 2.2) : 0),
           securePoint: point,
           throwSpeed: throwSpeed(p),
-          transferTime: transferTime(p) + rangePenalty * 0.4,
+          transferTime: transferTime(rng, p) + rangePenalty * 0.4,
           infield: INFIELD.includes(pos),
-          throughInfield: !INFIELD.includes(pos),
+          // 내야수가 처리했더라도 외야 잔디까지 나가 주운 공이면 내야를 뚫린 것이다
+          throughInfield: !INFIELD.includes(pos) || beyondInfield(point),
           infieldFly: false,
         };
       }
@@ -326,11 +350,22 @@ function resolveGrounder(rng: Rng, bb: BattedBall, defense: DefenseMap): FieldPl
     secureTime: t + 0.6,
     securePoint: point,
     throwSpeed: p ? throwSpeed(p) : 32,
-    transferTime: p ? transferTime(p) : 0.7,
+    transferTime: p ? transferTime(rng, p) : 0.7,
     infield: false,
     throughInfield: true,
     infieldFly: false,
   };
+}
+
+/**
+ * 송구 비행 시간 (s).
+ *
+ * 야구공은 공기저항으로 속도가 v0·e^(-k·d)로 줄어든다 (k ≈ 0.0057 /m).
+ * d/v0로 계산하면 내야 송구가 8%, 100m 중계 송구가 35% 빨라진다.
+ */
+function throwFlight(d: number, v0: number): number {
+  const k = 0.0057;
+  return (Math.exp(k * d) - 1) / (k * v0);
 }
 
 /**
@@ -340,7 +375,7 @@ function resolveGrounder(rng: Rng, bb: BattedBall, defense: DefenseMap): FieldPl
 export function throwArrivalTime(play: FieldPlay, baseIndex: number): number {
   const target = BASE_COORDS[baseIndex];
   const d = Math.hypot(play.securePoint.x - target.x, play.securePoint.z - target.z);
-  let time = play.secureTime + play.transferTime + d / play.throwSpeed;
+  let time = play.secureTime + play.transferTime + throwFlight(d, play.throwSpeed);
   if (d > 50) {
     // 중계 플레이 1회 (커트맨 포구 + 재송구 동작)
     time += 0.85;

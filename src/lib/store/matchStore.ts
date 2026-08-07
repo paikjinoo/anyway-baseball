@@ -19,6 +19,16 @@ import { decidePitch, decideSteal, decideSwing, shouldChangePitcher, type Diffic
 import { PITCH_CLOCK_MS, PITCH_CLOCK_NET_GRACE_MS } from '../game/constants';
 import { arsenalOf } from '../game/pitching';
 import { buildTimeline, type PlayTimeline } from '../game/playback';
+import {
+  advanceRelayState,
+  applyRelayPitchResult,
+  currentRelayBatter,
+  currentRelayPitcher,
+  relayGameState,
+  resolveRelayPitch,
+  resolveRelayPitchClockViolation,
+  type RelayState,
+} from '../game/relay';
 import type {
   GameSettings,
   GameState,
@@ -46,19 +56,32 @@ import {
   stopCrowd,
 } from '../audio/sfx';
 
-export type MatchMode = 'CPU' | 'ONLINE_HOST' | 'ONLINE_GUEST' | 'PARTY_HOST' | 'PARTY_GUEST';
+export type MatchMode =
+  | 'CPU'
+  | 'ONLINE_HOST'
+  | 'ONLINE_GUEST'
+  | 'PARTY_HOST'
+  | 'PARTY_GUEST'
+  | 'RELAY_HOST'
+  | 'RELAY_GUEST';
 
 /** 판정 권한을 가진 쪽인가 (호스트 권위 모델) */
 export function isHostMode(m: MatchMode): boolean {
-  return m === 'CPU' || m === 'ONLINE_HOST' || m === 'PARTY_HOST';
+  return m === 'CPU' || m === 'ONLINE_HOST' || m === 'PARTY_HOST' || m === 'RELAY_HOST';
 }
 /** 2대2인가 */
 export function isPartyMode(m: MatchMode): boolean {
   return m === 'PARTY_HOST' || m === 'PARTY_GUEST';
 }
+export function isRelayMode(m: MatchMode): boolean {
+  return m === 'RELAY_HOST' || m === 'RELAY_GUEST';
+}
+function usesOwnerControls(m: MatchMode): boolean {
+  return isPartyMode(m) || isRelayMode(m);
+}
 /** 입력을 호스트로 보내야 하는 쪽인가 */
 export function isRemoteMode(m: MatchMode): boolean {
-  return m === 'ONLINE_GUEST' || m === 'PARTY_GUEST';
+  return m === 'ONLINE_GUEST' || m === 'PARTY_GUEST' || m === 'RELAY_GUEST';
 }
 
 /** UI가 다루는 진행 단계 */
@@ -84,6 +107,8 @@ interface MatchStore {
   mode: MatchMode;
   difficulty: Difficulty;
   state: GameState | null;
+  /** 릴레이 모드의 순환표·점수 원장. 일반 경기에서는 null이다. */
+  relayState: RelayState | null;
   /** 사람이 조종하는 팀 */
   playerSide: Side;
   phase: MatchPhase;
@@ -192,6 +217,15 @@ interface MatchStore {
     seatNames: Record<string, string>;
     sendFn: (m: unknown) => void;
   }) => void;
+  initRelayGame: (opts: {
+    relayState: RelayState;
+    mode: 'RELAY_HOST' | 'RELAY_GUEST';
+    myUid: string;
+    settings: GameSettings;
+    sendFn: (m: unknown) => void;
+  }) => void;
+  applyRelayState: (state: RelayState, notice?: string) => void;
+  applyRelayResult: (result: PitchResult, state: RelayState) => void;
   setOwners: (owners: OwnerMap) => void;
   applyRemoteState: (s: GameState) => void;
   applyRemoteResult: (r: PitchResult) => void;
@@ -346,6 +380,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
   mode: 'CPU',
   difficulty: 'NORMAL',
   state: null,
+  relayState: null,
   playerSide: 'away',
   phase: 'IDLE',
   myUid: '',
@@ -393,6 +428,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       mode: 'CPU',
       difficulty,
       state,
+      relayState: null,
       playerSide,
       myUid: '',
       owners: {},
@@ -430,6 +466,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     set({
       mode,
       state,
+      relayState: null,
       playerSide,
       myUid: '',
       owners: {},
@@ -468,6 +505,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     set({
       mode,
       state,
+      relayState: null,
       playerSide,
       myUid,
       owners,
@@ -505,6 +543,93 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
         { id: logId++, text: '1회 초 시작', kind: 'inning' },
       ],
     });
+  },
+
+  initRelayGame: ({ relayState, mode, myUid, settings, sendFn }) => {
+    logId = 0;
+    cancelReveal();
+    startCrowd();
+    const state = relayGameState(relayState, settings);
+    const control = relayControlState(relayState, state, myUid);
+    set({
+      mode,
+      state,
+      relayState,
+      playerSide: control.playerSide,
+      myUid,
+      owners: control.owners,
+      seatNames: Object.fromEntries(relayState.participants.map((p) => [p.uid, p.name])),
+      sendFn,
+      phase: relayState.phase === 'GAME_OVER' ? 'GAME_OVER' : 'SETUP',
+      pitchClockEndsAt:
+        relayState.phase === 'GAME_OVER' ? 0 : performance.now() + PITCH_CLOCK_MS,
+      inningBreakEndsAt: 0,
+      trajectory: null,
+      pitchCmd: null,
+      pitchPreview: null,
+      lastResult: null,
+      prePitchState: null,
+      timeline: null,
+      revealed: true,
+      revealAt: 0,
+      swung: false,
+      swungAt: 0,
+      stealOrders: [],
+      aim: { x: 0, y: 0 },
+      swingType: 'NORMAL',
+      waitingRemote: false,
+      message: null,
+      log: [
+        { id: logId++, text: `${relayState.participants.length}인 릴레이 타격 대결 시작!`, kind: 'info' },
+        {
+          id: logId++,
+          text: `1라운드 — ${currentRelayPitcher(relayState)?.name ?? '-'} 투구`,
+          kind: 'inning',
+        },
+      ],
+    });
+  },
+
+  applyRelayState: (relayState, notice) => {
+    const st = get();
+    if (!st.state) return;
+    const state = relayGameState(relayState, st.state.settings);
+    const control = relayControlState(relayState, state, st.myUid);
+    const roundChanged = st.relayState?.roundIndex !== relayState.roundIndex;
+    set({
+      relayState,
+      state,
+      playerSide: control.playerSide,
+      owners: control.owners,
+      seatNames: Object.fromEntries(relayState.participants.map((p) => [p.uid, p.name])),
+      phase: relayState.phase === 'GAME_OVER' ? 'GAME_OVER' : 'SETUP',
+      pitchClockEndsAt:
+        relayState.phase === 'GAME_OVER' ? 0 : performance.now() + PITCH_CLOCK_MS,
+      trajectory: null,
+      pitchCmd: null,
+      pitchPreview: null,
+      lastResult: null,
+      prePitchState: null,
+      timeline: null,
+      revealed: true,
+      revealAt: 0,
+      swung: false,
+      swungAt: 0,
+      waitingRemote: false,
+    });
+    if (notice) get().pushLog(notice, 'info');
+    if (roundChanged && relayState.phase !== 'GAME_OVER') {
+      get().pushLog(
+        `${relayState.roundIndex + 1}라운드 — ${currentRelayPitcher(relayState)?.name ?? '-'} 투구`,
+        'inning',
+      );
+    }
+    if (relayState.phase === 'GAME_OVER') stopCrowd();
+  },
+
+  applyRelayResult: (result, relayState) => {
+    set({ relayState });
+    applyResult(set, get, result);
   },
 
   setOwners: (owners) => set({ owners }),
@@ -558,7 +683,16 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
 
     if (isRemoteMode(st.mode)) {
       // 게스트는 판정 권한이 없다. 명령만 보내고 PITCH_GO를 기다린다.
-      st.sendFn?.({ t: 'PITCH', cmd });
+      if (isRelayMode(st.mode) && st.relayState) {
+        st.sendFn?.({
+          t: 'RELAY_PITCH',
+          turnId: st.relayState.turnId,
+          pitchSeq: st.relayState.pitchSeq + 1,
+          cmd,
+        });
+      } else {
+        st.sendFn?.({ t: 'PITCH', cmd });
+      }
       set({ waitingRemote: true });
       return;
     }
@@ -587,8 +721,17 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     set({ swung: true, swungAt: now, swungType: t });
 
     if (isRemoteMode(mode)) {
-      // 도루 지시는 투구와 동시에 판정되므로 스윙과 함께 보낸다
-      sendFn?.({ t: 'SWING', cmd, steal: st.stealOrders });
+      if (isRelayMode(mode) && st.relayState) {
+        sendFn?.({
+          t: 'RELAY_SWING',
+          turnId: st.relayState.turnId,
+          pitchSeq: st.relayState.pitchSeq + 1,
+          cmd,
+        });
+      } else {
+        // 도루 지시는 투구와 동시에 판정되므로 스윙과 함께 보낸다
+        sendFn?.({ t: 'SWING', cmd, steal: st.stealOrders });
+      }
       set({ waitingRemote: true });
       return;
     }
@@ -608,7 +751,16 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     if (isRemoteMode(st.mode)) {
       if (elapsed < st.displayFlightMs * 1.22 || st.swung) return;
       if (controlsBatter(st) && !st.waitingRemote) {
-        st.sendFn?.({ t: 'SWING', cmd: noSwing, steal: st.stealOrders });
+        if (isRelayMode(st.mode) && st.relayState) {
+          st.sendFn?.({
+            t: 'RELAY_SWING',
+            turnId: st.relayState.turnId,
+            pitchSeq: st.relayState.pitchSeq + 1,
+            cmd: noSwing,
+          });
+        } else {
+          st.sendFn?.({ t: 'SWING', cmd: noSwing, steal: st.stealOrders });
+        }
         set({ swung: true, waitingRemote: true });
       }
       return;
@@ -633,8 +785,18 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
   advance: () => {
     // 연출이 잘렸더라도(빠른 진행·나가기 등) 실황 로그는 남기고 넘어간다
     flushReveal();
-    const { state } = get();
+    const current = get();
+    const { state } = current;
     if (!state) return;
+    if (isRelayMode(current.mode)) {
+      // 게스트는 호스트가 보낸 RELAY_STATE를 기다린다. 각자 타이머로 넘기면
+      // 네트워크 지연에 따라 차례가 갈라질 수 있다.
+      if (current.mode === 'RELAY_GUEST' || !current.relayState) return;
+      const nextRelay = advanceRelayState(current.relayState);
+      current.applyRelayState(nextRelay);
+      current.sendFn?.({ t: 'RELAY_STATE', state: nextRelay });
+      return;
+    }
     if (state.phase === 'GAME_OVER') {
       stopCrowd();
       set({ phase: 'GAME_OVER' });
@@ -690,6 +852,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
   substitutePitcher: (pitcherId) => {
     const { state, playerSide, mode, sendFn, owners, myUid, phase } = get();
     if (!state || phase !== 'SETUP') return;
+    if (isRelayMode(mode)) return;
     // 2대2에서는 자기 투수만 마운드에 올릴 수 있다.
     // (팀원이 던지는 중이어도 자기 불펜을 올리면 조작권이 넘어온다)
     if (isPartyMode(mode) && owners[pitcherId] !== myUid) return;
@@ -707,6 +870,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     stopCrowd();
     set({
       state: null,
+      relayState: null,
       phase: 'IDLE',
       pitchClockEndsAt: 0,
       inningBreakEndsAt: 0,
@@ -741,6 +905,18 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
 type SetFn = (partial: Partial<MatchStore> | ((s: MatchStore) => Partial<MatchStore>)) => void;
 type GetFn = () => MatchStore;
 
+function relayControlState(relay: RelayState, state: GameState, myUid: string) {
+  const batter = currentRelayBatter(relay);
+  const pitcher = currentRelayPitcher(relay);
+  return {
+    playerSide: (batter?.uid === myUid ? 'away' : 'home') as Side,
+    owners: {
+      [currentBatter(state).id]: batter?.uid ?? '',
+      [currentPitcher(state).id]: pitcher?.uid ?? '',
+    },
+  };
+}
+
 /** 사람이 지금 공격 중인가 */
 export function isPlayerBatting(s: Pick<MatchStore, 'state' | 'playerSide'>): boolean {
   if (!s.state) return false;
@@ -761,21 +937,25 @@ type ControlSlice = Pick<MatchStore, 'state' | 'playerSide' | 'mode' | 'owners' 
 
 /** 지금 타석에 선 선수를 내가 조작하는가 */
 export function controlsBatter(s: ControlSlice): boolean {
-  if (!s.state || !isPlayerBatting(s)) return false;
-  if (!isPartyMode(s.mode)) return true;
+  if (!s.state) return false;
+  if (isRelayMode(s.mode)) return s.owners[currentBatter(s.state).id] === s.myUid;
+  if (!isPlayerBatting(s)) return false;
+  if (!usesOwnerControls(s.mode)) return true;
   return s.owners[currentBatter(s.state).id] === s.myUid;
 }
 
 /** 지금 마운드에 선 투수를 내가 조작하는가 */
 export function controlsPitcher(s: ControlSlice): boolean {
-  if (!s.state || !isPlayerPitching(s)) return false;
-  if (!isPartyMode(s.mode)) return true;
+  if (!s.state) return false;
+  if (isRelayMode(s.mode)) return s.owners[currentPitcher(s.state).id] === s.myUid;
+  if (!isPlayerPitching(s)) return false;
+  if (!usesOwnerControls(s.mode)) return true;
   return s.owners[currentPitcher(s.state).id] === s.myUid;
 }
 
 /** 지금 화면을 조작 중인 사람 (2대2 관전 안내용) */
 export function currentControllerUid(s: ControlSlice): string | null {
-  if (!s.state || !isPartyMode(s.mode)) return null;
+  if (!s.state || !usesOwnerControls(s.mode)) return null;
   const p = isPlayerBatting(s) ? currentBatter(s.state) : currentPitcher(s.state);
   return s.owners[p.id] ?? null;
 }
@@ -825,6 +1005,15 @@ function tickPitchClock(set: SetFn, get: GetFn, now: number) {
   // 온라인에서는 게스트 시계가 조금 늦게 출발하므로 그만큼 더 기다려 준다
   const grace = st.mode === 'CPU' ? 0 : PITCH_CLOCK_NET_GRACE_MS;
   if (now < st.pitchClockEndsAt + grace) return;
+
+  if (isRelayMode(st.mode) && st.relayState) {
+    const result = resolveRelayPitchClockViolation(st.state, subject);
+    const relayState = applyRelayPitchResult(st.relayState, result);
+    set({ relayState });
+    st.sendFn?.({ t: 'RELAY_RESULT', result, state: relayState });
+    applyResult(set, get, result);
+    return;
+  }
 
   const result = resolvePitchClockViolation(st.state, subject);
   if (st.mode !== 'CPU') st.sendFn?.({ t: 'RESULT', result });
@@ -876,7 +1065,17 @@ function startPitch(set: SetFn, get: GetFn, cmd: PitchCommand) {
   if (!state || st.phase !== 'SETUP') return;
 
   const traj = preparePitch(state, cmd);
-  if (st.mode !== 'CPU') st.sendFn?.({ t: 'PITCH_GO', cmd, serverTime: Date.now() });
+  if (isRelayMode(st.mode) && st.relayState) {
+    st.sendFn?.({
+      t: 'RELAY_PITCH_GO',
+      turnId: st.relayState.turnId,
+      pitchSeq: st.relayState.pitchSeq + 1,
+      cmd,
+      serverTime: Date.now(),
+    });
+  } else if (st.mode !== 'CPU') {
+    st.sendFn?.({ t: 'PITCH_GO', cmd, serverTime: Date.now() });
+  }
   playPitchRelease(WINDUP_MS / 1000);
   set({
     pitchCmd: cmd,
@@ -906,6 +1105,16 @@ function finalize(
   const cmd = st.pitchCmd;
   // 같은 투구를 두 번 판정하지 않는다 (지연 도착한 스윙 / 타임아웃 중복)
   if (!state || !cmd || st.phase !== 'FLIGHT') return;
+
+  if (isRelayMode(st.mode) && st.relayState) {
+    const normalizedSwing = swing.type === 'BUNT' ? { ...swing, type: 'NORMAL' as const } : swing;
+    const result = resolveRelayPitch(state, cmd, normalizedSwing);
+    const relayState = applyRelayPitchResult(st.relayState, result);
+    set({ relayState });
+    if (isHostMode(st.mode)) st.sendFn?.({ t: 'RELAY_RESULT', result, state: relayState });
+    applyResult(set, get, result);
+    return;
+  }
 
   const result = resolvePitch(state, cmd, { steal, swing });
   if (st.mode !== 'CPU' && isHostMode(st.mode)) st.sendFn?.({ t: 'RESULT', result });

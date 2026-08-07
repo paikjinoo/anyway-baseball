@@ -289,8 +289,10 @@ export interface SwingDef {
 }
 
 export const SWING_DEFS: Record<'NORMAL' | 'POWER' | 'BUNT', SwingDef> = {
-  NORMAL: { ko: '일반타격', contactRadius: 0.8, timingWindow: 100, powerMult: 1.0, whiffBias: 0 },
-  POWER: { ko: '강한타격', contactRadius: 0.48, timingWindow: 68, powerMult: 1.14, whiffBias: 0.1 },
+  // contactRadius는 스윙 대비 컨택률을 결정한다 (MLB 76%). 0.8/0.48이면
+  // 컨택 60%, 강한타격은 절반이 헛스윙이라 삼진이 폭증한다.
+  NORMAL: { ko: '일반타격', contactRadius: 1.0, timingWindow: 100, powerMult: 1.0, whiffBias: 0 },
+  POWER: { ko: '강한타격', contactRadius: 0.66, timingWindow: 68, powerMult: 1.14, whiffBias: 0.1 },
   BUNT: { ko: '번트', contactRadius: 1.3, timingWindow: 185, powerMult: 0.18, whiffBias: -0.2 },
 };
 
@@ -385,5 +387,8 @@ export const DRAG_K = 0.0064;
 /**
  * 백스핀 양력(매그너스) 계수. 실제로는 속도에 수직으로 작용하지만
  * 여기서는 수직 성분만 근사한다.
+ *
+ * 이 값이 홈런 수를 정한다 (경기당 1.15). 45 m/s에서 양력/중력 비가
+ * 0.0019면 0.39g로 실제 백스핀 타구(0.25~0.35g)보다 세다.
  */
-export const LIFT_K = 0.0019;
+export const LIFT_K = 0.0013;

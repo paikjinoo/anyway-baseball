@@ -69,17 +69,26 @@ export function judgeSwing(
   const veloFactor = clamp(1.42 - traj.velocity / 150, 0.6, 1.25);
   const window = def.timingWindow * veloFactor * (0.68 + 0.6 * contactStat);
   const timingErr = Math.abs(swing.timingMs);
-  if (timingErr > window * 1.55) return { kind: 'WHIFF' };
+  // 타이밍이 어긋났다고 배트를 헛돌리지는 않는다. 이르면 당겨서, 늦으면 밀어서
+  // 파울이 된다. 이 배수가 작으면 파울이 생길 구간 자체가 없어져 타석이
+  // 3.3구 만에 끝나고 볼넷이 사라진다 (MLB는 스윙의 38%가 파울, 4구 이상).
+  if (timingErr > window * 2.6) return { kind: 'WHIFF' };
 
   // --- 품질 계산 ---------------------------------------------------------
   // 0.15의 기본값을 주는 이유: 배트에 맞은 이상 최소한의 타구는 나가야 한다.
   // (이 값이 없으면 타구속도 분포 전체가 실제 야구보다 크게 낮아진다)
-  const spatialQ = 1 - clamp(effSpatial / radius, 0, 1);
+  // "배트에 닿았는가"(reachQ)와 "정확히 맞았는가"(sweetQ)는 다른 척도다.
+  // 타구의 질까지 radius로 나누면, 컨택 판정을 넓히는 순간 모든 타구의 질이
+  // 함께 올라가 타율이 통째로 뛴다. 스윗스팟은 판정 반경보다 좁다.
+  const reachQ = 1 - clamp(effSpatial / radius, 0, 1);
+  const sweetQ = 1 - clamp(effSpatial / (radius * 0.78), 0, 1);
   const timingQ = 1 - clamp(timingErr / window, 0, 1.3);
-  let quality = clamp(0.15 + spatialQ * 0.44 + timingQ * 0.5, 0, 1);
+  let quality = clamp(0.15 + sweetQ * 0.44 + timingQ * 0.5, 0, 1);
 
-  // 헛스윙 보정: 품질이 매우 낮으면 확률적으로 헛스윙/파울팁
-  const whiffP = clamp((0.42 - quality) * 1.55 + def.whiffBias, 0, 0.8);
+  // 헛스윙 보정: 배트가 공의 궤도를 벗어났을 때만 헛친다.
+  // 여기에 quality(타이밍 포함)를 쓰면 빗맞아 파울이 될 스윙까지 헛스윙으로
+  // 돌려버려 파울이 사라진다. 판단 근거는 공간 오차뿐이다.
+  const whiffP = clamp((0.52 - reachQ) * 1.15 + def.whiffBias, 0, 0.8);
   if (rng.chance(whiffP)) {
     return rng.chance(0.35) ? { kind: 'FOUL_TIP' } : { kind: 'WHIFF' };
   }
@@ -128,10 +137,15 @@ export function makeBattedBall(
   // (땅볼 44% / 라인드라이브 21% / 뜬공 26% / 팝업 9%)
   // 분산이 좁으면 라인드라이브만 쏟아져 타율이 비현실적으로 치솟는다.
   const vertOffset = swing.aimY - traj.zoneY; // + 이면 배트가 공 위
-  let launch = 11 - vertOffset * 38 + rng.normal(0, 19);
+  // 아래 두 상수는 최종 발사각 분포를 MLB 실측 N(11.5도, 27.7도)에 맞춘 값이다.
+  // 좁히면 8~26도(라인드라이브) 구간에 타구가 몰려 BABIP이 .34까지 치솟고,
+  // 팝업이 사라진다. 헤드리스 시뮬레이션의 "타구 종류 비중"으로 검증할 것.
+  let launch = 9 - vertOffset * 38 + rng.normal(0, 30);
   // 품질이 좋을수록 이상적 발사각으로 수렴하되, 너무 강하게 끌어당기면
   // 잘 맞은 타구가 전부 홈런 각도로 몰린다.
-  launch = lerp(launch, 20 + rng.normal(0, 8), quality * 0.28);
+  // 이 수렴 계수가 홈런/뜬공 비율을 정한다 (MLB 13.5%). 타구속도와 비거리가
+  // 정상인데 홈런만 많다면, 잘 맞은 타구가 전부 이상적 발사각으로 몰린 것이다.
+  launch = lerp(launch, 20 + rng.normal(0, 8), quality * 0.2);
   if (swing.type === 'POWER') launch += 4;
   if (swing.type === 'BUNT') launch = rng.range(-16, 6);
   launch = clamp(launch, -70, 88);
@@ -143,7 +157,10 @@ export function makeBattedBall(
   // 타석이 너무 빨리 끝나 삼진이 급감하고 안타가 폭증한다.
   const pullDir = isLefty ? 1 : -1;
   const timingRatio = clamp(-timingErr / 110, -1.8, 1.8);
-  let spray = timingRatio * 78 * pullDir;
+  // 이 계수가 파울 비율을 정한다. |spray|>45도가 파울이므로 78이면 타이밍이
+  // 63ms 어긋나야 파울이 되는데, 그러면 빗맞은 타구가 전부 페어로 굴러가
+  // 인플레이가 51%까지 오르고(MLB 38%) 타석이 3.2구 만에 끝난다.
+  let spray = timingRatio * 126 * pullDir;
   // 조준점 좌우도 방향에 영향
   spray += (swing.aimX - traj.zoneX) * 14 * pullDir;
   spray += rng.normal(0, 19 * (1.3 - quality * 0.6));

@@ -7,9 +7,16 @@ import type { Player, Position, Runner, StealResult, Vec3 } from './types';
 // 주루 시간 모델
 // ---------------------------------------------------------------------------
 
-/** 타격 후 1루까지 (s). 최고 3.85초 ~ 최저 4.95초. */
+/**
+ * 타격 후 1루까지 (s).
+ *
+ * 라인업에 서는 타자의 speed 능력치는 실제로 대략 28~68에 몰려 있어서,
+ * 매핑 구간을 능력치 0~99에 그대로 걸면 전원이 4.2~4.6초의 좁은 구간에
+ * 뭉친다. 진짜 빠른 주자가 없어지면 내야안타가 통째로 사라진다.
+ * MLB 실측(최속 3.9 / 평균 4.30 / 최저 4.75)에 그 구간이 맞도록 넓혔다.
+ */
 export function homeToFirst(p: Player, bunt: boolean): number {
-  const t = lerp(4.95, 3.85, norm(p.batting.speed));
+  const t = lerp(5.2, 3.35, norm(p.batting.speed));
   return bunt ? t - 0.18 : t;
 }
 

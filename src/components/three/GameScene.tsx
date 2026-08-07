@@ -38,6 +38,7 @@ import {
   cpuBatterTick,
   INNING_BREAK_MS,
   isPlayerBatting,
+  isRelayMode,
   swingMotionMs,
   useMatchStore,
   WINDUP_MS,
@@ -885,13 +886,14 @@ function SceneActors() {
   const phase = useMatchStore((s) => s.phase);
   const state = useMatchStore((s) => s.state);
   const prePitch = useMatchStore((s) => s.prePitchState);
+  const relay = useMatchStore((s) => isRelayMode(s.mode));
   const scene = (phase === 'RESULT' ? prePitch : null) ?? state;
   if (!scene) return null;
 
   return (
     <>
-      <Fielders state={scene} />
-      <Runners />
+      {!relay && <Fielders state={scene} />}
+      {!relay && <Runners />}
       <Batter />
       <Pitcher />
     </>

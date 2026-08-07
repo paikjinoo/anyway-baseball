@@ -14,18 +14,19 @@ import {
 } from 'firebase/firestore';
 import { getDb, iceServers, firebaseConfigured } from '../firebase/client';
 import { decode, encode, type NetMessage } from './protocol';
-import type { ConnState, RoomInfo } from './webrtc';
+import type { ConnState, RoomInfo, RoomMode } from './webrtc';
 import type { MatchRules } from '../game/types';
+import type { RelayRoomRules } from '../game/relay';
 
 /**
- * 2대2 대전용 P2P 연결 (별 구조).
+ * 2대2·릴레이 다인 대전용 P2P 연결 (별 구조).
  *
  *        게스트A
  *          |
  * 게스트C─호스트─게스트B      게스트끼리는 직접 연결하지 않는다.
  *
  * 호스트가 판정과 중계를 모두 맡으므로 1:1과 같은 host-authoritative 모델이
- * 그대로 유지된다. 게스트가 3명이라 offer/answer 쌍도 3개 필요한데,
+ * 그대로 유지된다. 게스트 수만큼 offer/answer 쌍이 필요한데,
  * 1:1처럼 방 문서에 offer 하나를 두면 확장이 안 되므로
  * `rooms/{roomId}/peers/{uid}` 문서를 게스트마다 하나씩 만들고
  * **게스트가 offer를, 호스트가 answer를** 쓰는 방향으로 뒤집었다.
@@ -86,9 +87,16 @@ export class PartyHost {
   private unsubs: (() => void)[] = [];
   private handlers: PartyHostHandlers;
   private roomId: string | null = null;
+  private maxGuests: number;
+  private roomMode: RoomMode;
 
-  constructor(handlers: PartyHostHandlers) {
+  constructor(
+    handlers: PartyHostHandlers,
+    options: { maxGuests?: number; mode?: RoomMode } = {},
+  ) {
     this.handlers = handlers;
+    this.maxGuests = options.maxGuests ?? MAX_GUESTS;
+    this.roomMode = options.mode ?? '2v2';
   }
 
   get currentRoomId(): string | null {
@@ -105,7 +113,8 @@ export class PartyHost {
     hostName: string;
     teamName: string;
     isPrivate?: boolean;
-    rules: MatchRules;
+    rules?: MatchRules;
+    relayRules?: RelayRoomRules;
   }): Promise<string> {
     const db = getDb();
     if (!firebaseConfigured || !db) {
@@ -123,10 +132,12 @@ export class PartyHost {
       status: 'waiting',
       createdAt: Date.now(),
       isPrivate: opts.isPrivate ?? false,
-      mode: '2v2',
+      mode: this.roomMode,
       playerCount: 1,
-      rules: opts.rules,
+      maxPlayers: this.maxGuests + 1,
     };
+    if (opts.rules) info.rules = opts.rules;
+    if (opts.relayRules) info.relayRules = opts.relayRules;
     await setDoc(roomRef, { ...info, createdAtServer: serverTimestamp() });
 
     // 게스트가 만든 peer 문서를 감시한다
@@ -159,11 +170,11 @@ export class PartyHost {
     const db = getDb();
     if (!db || !this.roomId) return;
 
-    if (this.peers.size >= MAX_GUESTS) {
+    if (this.peers.size >= this.maxGuests) {
       // 정원 초과. 아직 데이터채널이 없으니 문서로 거절 사유를 알린다.
       // (그냥 지우면 상대는 "연결 중…"에서 영영 멈춘다)
       await updateDoc(doc(db, 'rooms', this.roomId, 'peers', uid), {
-        rejected: '방이 가득 찼습니다 (4명).',
+        rejected: `방이 가득 찼습니다 (${this.maxGuests + 1}명).`,
       }).catch(() => {});
       return;
     }
@@ -265,6 +276,13 @@ export class PartyHost {
     await updateDoc(doc(db, 'rooms', this.roomId), { rules }).catch(() => {});
   }
 
+  /** 릴레이 방장이 대기실 규칙을 바꿨을 때 방 목록에도 반영한다. */
+  async updateRelayRules(relayRules: RelayRoomRules) {
+    const db = getDb();
+    if (!db || !this.roomId) return;
+    await updateDoc(doc(db, 'rooms', this.roomId), { relayRules }).catch(() => {});
+  }
+
   async setStatus(status: RoomInfo['status']) {
     const db = getDb();
     if (!db || !this.roomId) return;
@@ -341,9 +359,11 @@ export class PartyGuest {
   private roomId: string | null = null;
   private uid: string | null = null;
   private outbox: NetMessage[] = [];
+  private expectedMode: RoomMode;
 
-  constructor(handlers: PartyGuestHandlers) {
+  constructor(handlers: PartyGuestHandlers, options: { mode?: RoomMode } = {}) {
     this.handlers = handlers;
+    this.expectedMode = options.mode ?? '2v2';
   }
 
   get connected(): boolean {
@@ -363,13 +383,16 @@ export class PartyGuest {
     const snap = await getDoc(roomRef);
     if (!snap.exists()) throw new Error('방을 찾을 수 없습니다.');
     const room = snap.data() as RoomInfo;
-    if (room.mode !== '2v2') throw new Error('2대2 방이 아닙니다.');
+    if ((room.mode ?? '1v1') !== this.expectedMode) {
+      throw new Error(this.expectedMode === 'relay' ? '릴레이 대결 방이 아닙니다.' : '2대2 방이 아닙니다.');
+    }
     if (room.status !== 'waiting') throw new Error('이미 시작되었거나 종료된 방입니다.');
 
     const peerRef = doc(roomRef, 'peers', me.uid);
     const priorPeer = await getDoc(peerRef);
-    if ((room.playerCount ?? 1) >= 4 && !priorPeer.exists()) {
-      throw new Error('방이 가득 찼습니다 (4명).');
+    const maxPlayers = room.maxPlayers ?? (this.expectedMode === '2v2' ? 4 : 7);
+    if ((room.playerCount ?? 1) >= maxPlayers && !priorPeer.exists()) {
+      throw new Error(`방이 가득 찼습니다 (${maxPlayers}명).`);
     }
 
     const pc = new RTCPeerConnection({ iceServers: iceServers(), iceCandidatePoolSize: 4 });

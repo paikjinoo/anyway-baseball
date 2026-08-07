@@ -31,7 +31,7 @@ export default function PlayIndexPage() {
         </div>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
         <ModeCard
           href="/play/cpu"
           title="CPU 대전"
@@ -49,6 +49,13 @@ export default function PlayIndexPage() {
           href="/play/party"
           title="2대2 올스타전"
           desc="네 명이 두 팀으로. 같은 편끼리 자기 팀 선수를 반씩 골라 한 팀을 만들고, 내 선수 타석에서만 조작합니다."
+          cta={firebaseConfigured ? '로비 입장' : 'Firebase 필요'}
+          disabled={!firebaseConfigured}
+        />
+        <ModeCard
+          href="/play/relay"
+          title="릴레이 타격 대결"
+          desc="2~7명이 개인전으로 참가해 라운드마다 한 명은 투수, 나머지는 타자로 점수를 겨룹니다."
           cta={firebaseConfigured ? '로비 입장' : 'Firebase 필요'}
           disabled={!firebaseConfigured}
         />

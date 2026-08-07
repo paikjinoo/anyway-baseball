@@ -19,6 +19,7 @@ import {
 import { getDb, iceServers, firebaseConfigured } from '../firebase/client';
 import { decode, encode, type NetMessage } from './protocol';
 import type { MatchRules } from '../game/types';
+import type { RelayRoomRules } from '../game/relay';
 
 /**
  * Firestore를 시그널링에만 쓰는 P2P 연결.
@@ -32,7 +33,7 @@ import type { MatchRules } from '../game/types';
 
 export type ConnState = 'idle' | 'creating' | 'waiting' | 'connecting' | 'connected' | 'failed' | 'closed';
 
-export type RoomMode = '1v1' | '2v2';
+export type RoomMode = '1v1' | '2v2' | 'relay';
 
 export interface RoomInfo {
   id: string;
@@ -44,14 +45,18 @@ export interface RoomInfo {
   isPrivate: boolean;
   /** 없으면 1:1 (mode 필드가 생기기 전에 만들어진 방) */
   mode?: RoomMode;
-  /** 2대2에서 현재 들어와 있는 인원 (호스트 포함) */
+  /** 다인 방에서 현재 들어와 있는 인원 (호스트 포함) */
   playerCount?: number;
+  /** 다인 방 정원. 이전 2대2 방은 없으며 4명으로 간주한다. */
+  maxPlayers?: number;
   /**
    * 이 방의 경기 규칙. 목록에서 들어가기 전에 확인할 수 있도록 함께 적어 둔다.
    * (연결된 게스트에게는 ROOM_RULES 메시지로 실시간 반영된다)
    * 없으면 규칙 기능이 생기기 전에 만들어진 방이다.
    */
   rules?: MatchRules;
+  /** 릴레이 타격 대결의 대기실 규칙. */
+  relayRules?: RelayRoomRules;
 }
 
 export interface PeerHandlers {
@@ -332,8 +337,8 @@ function openRoomFilter(mode: RoomMode) {
     // 30분 넘게 방치된 방은 숨긴다
     now - (r.createdAt ?? 0) < 30 * 60 * 1000 &&
     (r.mode ?? '1v1') === mode &&
-    // 2대2는 4명이 차면 더 받지 않는다
-    (mode !== '2v2' || (r.playerCount ?? 1) < 4);
+    // 다인 방은 정원이 차면 더 받지 않는다
+    (mode === '1v1' || (r.playerCount ?? 1) < (r.maxPlayers ?? (mode === '2v2' ? 4 : 7)));
 }
 
 export async function listOpenRooms(mode: RoomMode = '1v1', max = 20): Promise<RoomInfo[]> {

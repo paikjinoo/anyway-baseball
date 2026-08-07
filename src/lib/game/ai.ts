@@ -116,7 +116,9 @@ export function decidePitch(state: GameState, rng: Rng, difficulty: Difficulty):
     // 일반 카운트: 존 모서리
     const cornerX = rng.chance(0.5) ? 1 : -1;
     const cornerY = rng.chance(0.55) ? -1 : 1;
-    const edge = lerp(0.45, 0.92, p.pitchIq);
+    // 존 안쪽 깊숙이 노리면 스트라이크 비율이 올라가 볼넷이 마른다.
+    // MLB 존 투구 비율은 48.5%다.
+    const edge = lerp(0.58, 1.08, p.pitchIq);
     targetX = cornerX * rng.range(edge * 0.6, edge);
     targetY = cornerY * rng.range(edge * 0.5, edge);
     // 장타력 있는 타자에게는 더 낮게
