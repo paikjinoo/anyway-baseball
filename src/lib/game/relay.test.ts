@@ -166,10 +166,10 @@ describe('릴레이 점수와 순위', () => {
 describe('릴레이 판정과 입력 검증', () => {
   it.each([
     [1, 'SINGLE'],
-    [5, 'GROUND_OUT'],
+    [7, 'GROUND_OUT'],
     [16, 'FOUL'],
     [19, 'HOME_RUN'],
-    [21, 'FLY_OUT'],
+    [36, 'FLY_OUT'],
   ] as const)('고정 시드 %d에서 %s 판정을 재현한다', (seed, expected) => {
     expect(seededPitch(seed).kind).toBe(expected);
   });

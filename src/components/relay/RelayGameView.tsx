@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from 'react';
 import { BatPanel } from '@/components/hud/BatPanel';
 import { PitchClock } from '@/components/hud/PitchClock';
 import { PitchPanel } from '@/components/hud/PitchPanel';
+import { RewardNote } from '@/components/hud/RewardNote';
+import { useMatchReward } from '@/lib/store/matchReward';
 import { GameScene, zoneFlippedOnScreen, type CameraMode } from '@/components/three/GameScene';
 import { PITCH_DEFS } from '@/lib/game/constants';
 import { currentBatter, currentPitcher } from '@/lib/game/engine';
@@ -33,6 +35,7 @@ export function RelayGameView({ onExit }: { onExit: () => void }) {
   const canPitch = useMatchStore(controlsPitcher);
   const advance = useMatchStore((s) => s.advance);
   const log = useMatchStore((s) => s.log);
+  const reward = useMatchReward();
   const [cameraMode, setCameraMode] = useState<CameraMode>('DRAMATIC');
   const [showLog, setShowLog] = useState(true);
   const logRef = useRef<HTMLDivElement>(null);
@@ -211,6 +214,11 @@ export function RelayGameView({ onExit }: { onExit: () => void }) {
                 </div>
               ))}
             </div>
+            {reward && (
+              <div className="mt-5">
+                <RewardNote reward={reward} />
+              </div>
+            )}
             <button className="btn btn-primary mt-6 w-full" onClick={onExit}>
               나가기
             </button>

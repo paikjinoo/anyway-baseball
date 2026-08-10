@@ -1,13 +1,17 @@
 import { Rng, clamp } from './rng';
 import { LEARNABLE_PITCHES, PITCH_DEFS } from './constants';
+import { TIER_PITCH_SLOTS } from './progression';
+import { TEAM_SCHEMA_VERSION } from './types';
 import type {
   BatSide,
   BattingAttr,
   BattingStance,
+  BodyType,
   Gear,
   Handedness,
   PitchAttr,
   PitchType,
+  PitcherRole,
   PitchingAttr,
   PitchingForm,
   Player,
@@ -102,7 +106,7 @@ const BATTING_KEYS: (keyof BattingAttr)[] = ['contact', 'power', 'eye', 'speed',
 export function emptySeason(): SeasonStat {
   return {
     g: 0, pa: 0, ab: 0, h: 0, double: 0, triple: 0, hr: 0, rbi: 0, r: 0,
-    bb: 0, so: 0, sb: 0, cs: 0, ip3: 0, er: 0, pk: 0, pbb: 0, ph: 0, w: 0, l: 0,
+    bb: 0, hbp: 0, so: 0, sb: 0, cs: 0, ip3: 0, er: 0, pk: 0, pbb: 0, ph: 0, np: 0, w: 0, l: 0,
   };
 }
 
@@ -162,7 +166,12 @@ function makeGear(rng: Rng, pos: Position, teamColor: string, accent: string): G
   };
 }
 
-/** 투수 아스널 생성. 직구는 반드시 포함하고, 변화구는 1~3개를 랜덤 습득. */
+/**
+ * 투수 아스널 생성. 직구는 반드시 포함한다.
+ *
+ * 신규 선수는 전원 C등급이고 C등급 구종 슬롯은 3개이므로, 직구를 뺀 변화구는 최대 2개다.
+ * 선발이 상한을 채우고 불펜은 하나 적게 시작한다.
+ */
 function makeArsenal(rng: Rng, budget: number, isStarter: boolean): PitchingAttr {
   const arsenal: Partial<Record<PitchType, PitchAttr>> = {};
 
@@ -170,8 +179,9 @@ function makeArsenal(rng: Rng, budget: number, isStarter: boolean): PitchingAttr
   const fourseam = distribute(rng, ['v', 'c', 'm'], [1.15, 1.0, 0.85], budget, 25, 95);
   arsenal.FOURSEAM = { velocity: fourseam[0], control: fourseam[1], movement: fourseam[2] };
 
-  // 변화구 개수: 선발이 더 많이 보유
-  const count = isStarter ? rng.int(2, 3) : rng.int(1, 2);
+  // 직구를 뺀 나머지 슬롯. C등급 상한(3개)을 절대 넘지 않는다.
+  const breakingSlots = TIER_PITCH_SLOTS.C - 1;
+  const count = Math.min(breakingSlots, isStarter ? breakingSlots : rng.int(1, breakingSlots));
   const pool = rng.shuffle(LEARNABLE_PITCHES.slice());
   for (let i = 0; i < count; i++) {
     const t = pool[i];
@@ -192,8 +202,8 @@ function makeArsenal(rng: Rng, budget: number, isStarter: boolean): PitchingAttr
 export interface GeneratePlayerOptions {
   position: Position;
   number: number;
-  /** 선발 투수 여부 (position === 'P'일 때만 의미 있음) */
-  isStarter?: boolean;
+  /** 투수 역할. position === 'P'일 때만 의미 있다. 기본값은 중간계투. */
+  role?: PitcherRole;
   teamColor?: string;
   accentColor?: string;
   name?: string;
@@ -201,10 +211,19 @@ export interface GeneratePlayerOptions {
   strength?: number;
 }
 
+/** 체형 추첨. 기본형이 절반이고 슬림/거구가 나머지를 반씩 나눈다. */
+function rollBody(rng: Rng): BodyType {
+  const r = rng.next();
+  if (r < 0.5) return 'NORMAL';
+  return r < 0.75 ? 'SLIM' : 'BIG';
+}
+
 export function generatePlayer(rng: Rng, opt: GeneratePlayerOptions): Player {
   const pos = opt.position;
   const strength = opt.strength ?? 1.0;
   const isPitcher = pos === 'P';
+  const role: PitcherRole | undefined = isPitcher ? (opt.role ?? 'RP') : undefined;
+  const isStarter = role === 'SP';
 
   const budget = clamp(
     rng.normal(HITTER_BUDGET_MEAN, HITTER_BUDGET_SD) * strength,
@@ -227,22 +246,32 @@ export function generatePlayer(rng: Rng, opt: GeneratePlayerOptions): Player {
     id: `p_${rng.int(0, 0xffffff).toString(36)}${rng.int(0, 0xffffff).toString(36)}`,
     name: opt.name ?? randomKoreanName(rng),
     number: opt.number,
+    kind: isPitcher ? 'PITCHER' : 'BATTER',
     position: pos,
+    role,
+    body: isPitcher ? 'NORMAL' : rollBody(rng),
     bats: rng.chance(0.06) ? 'S' : (rng.chance(0.32) ? 'L' : 'R') as BatSide,
     throws: (isPitcher ? (rng.chance(0.27) ? 'L' : 'R') : rng.chance(0.1) ? 'L' : 'R') as Handedness,
     stance: rng.int(0, 5) as BattingStance,
     form: (isPitcher ? rng.int(0, 4) : rng.int(0, 1)) as PitchingForm,
     gear: makeGear(rng, pos, opt.teamColor ?? '#2563eb', opt.accentColor ?? '#f59e0b'),
     batting,
+    // 기본 지급 선수는 전원 C등급 1레벨에서 시작한다.
+    tier: 'C',
+    level: 1,
+    exp: 0,
     potential: Math.round(clamp(rng.normal(82, 7, 2), 62, 99)),
-    // 창단 직후에도 훈련을 체험할 수 있도록 소량을 지급한다.
-    trainingPoints: rng.int(30, 60),
+    // 훈련 포인트는 레벨업으로만 들어온다. 창단 직후엔 비어 있다.
+    trainingPoints: 0,
+    spentPoints: 0,
+    base: { batting, stamina: 0, arsenal: {} },
+    fatigue: 0,
     season: emptySeason(),
   };
 
   if (isPitcher) {
     const pbudget = clamp(rng.normal(PITCHER_BUDGET_MEAN, PITCHER_BUDGET_SD) * strength, 120, 240);
-    player.pitching = makeArsenal(rng, pbudget, opt.isStarter ?? false);
+    player.pitching = makeArsenal(rng, pbudget, isStarter);
   } else {
     // 야수도 비상시 등판할 수 있도록 아주 낮은 직구 하나만 부여
     player.pitching = {
@@ -257,6 +286,13 @@ export function generatePlayer(rng: Rng, opt: GeneratePlayerOptions): Player {
     };
   }
 
+  // 능력치초기화권이 되돌릴 지점. 훈련으로 바뀔 값만 복사해 둔다.
+  player.base = {
+    batting: { ...batting },
+    stamina: player.pitching.stamina,
+    arsenal: structuredClone(player.pitching.arsenal),
+  };
+
   return player;
 }
 
@@ -264,18 +300,23 @@ export function generatePlayer(rng: Rng, opt: GeneratePlayerOptions): Player {
 // 팀 로스터 생성
 // ---------------------------------------------------------------------------
 
-/** 로스터 구성: 선발 5, 불펜 5, 포수 2, 내야 5, 외야 5, 지명 1 = 23명 */
-const ROSTER_PLAN: { position: Position; isStarter?: boolean }[] = [
-  { position: 'P', isStarter: true },
-  { position: 'P', isStarter: true },
-  { position: 'P', isStarter: true },
-  { position: 'P', isStarter: true },
-  { position: 'P', isStarter: true },
-  { position: 'P' },
-  { position: 'P' },
-  { position: 'P' },
-  { position: 'P' },
-  { position: 'P' },
+/**
+ * 로스터 구성: 투수 10 (선발 4 · 중간계투 5 · 마무리 1) + 타자 13 = 23명.
+ *
+ * 선발은 항상 정확히 4명이다(ROTATION_SIZE). 불펜에서 선발로 올리려면 기존 선발 하나를
+ * 내려야 하며, 그 검증은 roster.ts가 한다.
+ */
+const ROSTER_PLAN: { position: Position; role?: PitcherRole }[] = [
+  { position: 'P', role: 'SP' },
+  { position: 'P', role: 'SP' },
+  { position: 'P', role: 'SP' },
+  { position: 'P', role: 'SP' },
+  { position: 'P', role: 'RP' },
+  { position: 'P', role: 'RP' },
+  { position: 'P', role: 'RP' },
+  { position: 'P', role: 'RP' },
+  { position: 'P', role: 'RP' },
+  { position: 'P', role: 'CP' },
   { position: 'C' },
   { position: 'C' },
   { position: '1B' },
@@ -290,6 +331,9 @@ const ROSTER_PLAN: { position: Position; isStarter?: boolean }[] = [
   { position: 'DH' },
   { position: '1B' },
 ];
+
+/** 선발 로테이션에 반드시 등록해야 하는 인원 */
+export const ROTATION_SIZE = 4;
 
 export const TEAM_COLOR_PRESETS: { primary: string; secondary: string; accent: string }[] = [
   { primary: '#1d4ed8', secondary: '#f8fafc', accent: '#fbbf24' },
@@ -334,7 +378,7 @@ export function generateTeam(rng: Rng, opt: GenerateTeamOptions): Team {
   const players = ROSTER_PLAN.map((slot, i) =>
     generatePlayer(rng, {
       position: slot.position,
-      isStarter: slot.isStarter,
+      role: slot.role,
       number: numbers[i],
       teamColor: primaryColor,
       accentColor,
@@ -345,6 +389,7 @@ export function generateTeam(rng: Rng, opt: GenerateTeamOptions): Team {
   const now = Date.now();
   const team: Team = {
     id: opt.id ?? `t_${rng.int(0, 0xffffffff).toString(36)}`,
+    schemaVersion: TEAM_SCHEMA_VERSION,
     ownerUid: opt.ownerUid,
     name,
     abbr: opt.abbr ?? abbrFromName(name),
@@ -356,13 +401,28 @@ export function generateTeam(rng: Rng, opt: GenerateTeamOptions): Team {
     players,
     lineup: [],
     rotation: [],
+    rotationIndex: 0,
+    gold: 0,
+    inventory: {},
     createdAt: now,
     updatedAt: now,
   };
 
   team.lineup = autoLineup(team);
-  team.rotation = players.filter((p) => p.position === 'P').slice(0, 5).map((p) => p.id);
+  team.rotation = autoRotation(team);
   return team;
+}
+
+/**
+ * 선발(SP)들을 실력 순으로 로테이션에 배치한다.
+ * 부상자는 빼되, 로테이션 자체는 SP 전원을 담는다 (SP는 정확히 ROTATION_SIZE명이다).
+ */
+export function autoRotation(team: Team): string[] {
+  return team.players
+    .filter((p) => p.kind === 'PITCHER' && p.role === 'SP')
+    .sort((a, b) => pitcherScore(b) - pitcherScore(a))
+    .slice(0, ROTATION_SIZE)
+    .map((p) => p.id);
 }
 
 /**
@@ -371,8 +431,9 @@ export function generateTeam(rng: Rng, opt: GenerateTeamOptions): Team {
  * 세이버메트릭스식 정렬(출루형 -> 중심타선 -> 하위)로 타순을 정한다.
  */
 export function autoLineup(team: Team, useDH = true): string[] {
+  const available = team.players.filter((p) => p.kind === 'BATTER' && !p.injury);
   const byPos = (pos: Position) =>
-    team.players.filter((p) => p.position === pos).sort((a, b) => hitterScore(b) - hitterScore(a));
+    available.filter((p) => p.position === pos).sort((a, b) => hitterScore(b) - hitterScore(a));
 
   const chosen: Player[] = [];
   const taken = new Set<string>();
@@ -386,23 +447,25 @@ export function autoLineup(team: Team, useDH = true): string[] {
     }
   }
 
-  // 9번째 타자: DH 사용 시 최고 타자, 아니면 투수
+  // 9번째 타자: DH 사용 시 최고 타자, 아니면 로테이션 선두 투수
   if (useDH) {
-    const dh = team.players
-      .filter((p) => p.position !== 'P' && !taken.has(p.id))
+    const dh = available
+      .filter((p) => !taken.has(p.id))
       .sort((a, b) => hitterScore(b) - hitterScore(a))[0];
     if (dh) {
       chosen.push(dh);
       taken.add(dh.id);
     }
   } else {
-    const p = team.players.find((x) => x.position === 'P');
+    const starterId = team.rotation[team.rotationIndex % Math.max(1, team.rotation.length)];
+    const p = team.players.find((x) => x.id === starterId)
+      ?? team.players.find((x) => x.kind === 'PITCHER');
     if (p) chosen.push(p);
   }
 
   // 자리가 빈다면 남은 야수로 채운다
   while (chosen.length < 9) {
-    const f = team.players.find((p) => !taken.has(p.id) && p.position !== 'P');
+    const f = available.find((p) => !taken.has(p.id));
     if (!f) break;
     chosen.push(f);
     taken.add(f.id);
@@ -442,8 +505,8 @@ export function pitcherScore(p: Player): number {
 
 /** 팀 전체 전력 지표 (0~100). 매치메이킹/CPU 난이도 표시에 쓴다. */
 export function teamRating(team: Team): number {
-  const hitters = team.players.filter((p) => p.position !== 'P');
-  const pitchers = team.players.filter((p) => p.position === 'P');
+  const hitters = team.players.filter((p) => p.kind === 'BATTER');
+  const pitchers = team.players.filter((p) => p.kind === 'PITCHER');
   const h = hitters.reduce((a, p) => a + hitterScore(p), 0) / Math.max(1, hitters.length);
   const pi = pitchers.reduce((a, p) => a + pitcherScore(p), 0) / Math.max(1, pitchers.length);
   return Math.round(clamp((h / 4.9) * 0.55 + (pi / 2.9) * 0.45, 0, 100));

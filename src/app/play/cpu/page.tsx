@@ -8,8 +8,7 @@ import { useMatchStore } from '@/lib/store/matchStore';
 import { DIFFICULTY_LABELS, type Difficulty } from '@/lib/game/ai';
 import { Rng, seedFromString } from '@/lib/game/rng';
 import { generateTeam, teamRating } from '@/lib/game/generator';
-import { distributeRewards, gameRewardPoints } from '@/lib/game/training';
-import { saveTeam } from '@/lib/firebase/store';
+import { rosterIssues } from '@/lib/game/roster';
 import { TeamLogo } from '@/components/ui/TeamLogo';
 import type { Side, Team } from '@/lib/game/types';
 
@@ -20,16 +19,13 @@ export default function CpuGamePage() {
   const router = useRouter();
   const team = useActiveTeam();
   const settings = useAppStore((s) => s.settings);
-  const upsertTeam = useAppStore((s) => s.upsertTeam);
 
   const initCpuGame = useMatchStore((s) => s.initCpuGame);
   const reset = useMatchStore((s) => s.reset);
-  const state = useMatchStore((s) => s.state);
 
   const [difficulty, setDifficulty] = useState<Difficulty>('NORMAL');
   const [side, setSide] = useState<Side>('home');
   const [started, setStarted] = useState(false);
-  const [rewarded, setRewarded] = useState(false);
 
   const cpuTeam: Team | null = useMemo(() => {
     if (!team) return null;
@@ -43,61 +39,10 @@ export default function CpuGamePage() {
 
   useEffect(() => () => reset(), [reset]);
 
-  // 경기 종료 시 훈련 포인트 지급
-  useEffect(() => {
-    if (!state || state.phase !== 'GAME_OVER' || rewarded || !team) return;
-    setRewarded(true);
-    const mine = state[side];
-    const theirs = state[side === 'away' ? 'home' : 'away'];
-    const pts = gameRewardPoints({
-      won: state.winner === side,
-      runsScored: mine.runs,
-      runsAllowed: theirs.runs,
-      isPlayerTeam: true,
-    });
-
-    // 경기에서 쌓인 시즌 스탯을 원본 팀에 반영하고 포인트를 분배한다
-    const merged: Team = {
-      ...team,
-      players: team.players.map((p) => {
-        const inGame = mine.roster[p.id];
-        if (!inGame) return p;
-        const s = inGame.season;
-        return {
-          ...p,
-          season: {
-            ...p.season,
-            g: p.season.g + s.g,
-            pa: p.season.pa + s.pa,
-            ab: p.season.ab + s.ab,
-            h: p.season.h + s.h,
-            double: p.season.double + s.double,
-            triple: p.season.triple + s.triple,
-            hr: p.season.hr + s.hr,
-            rbi: p.season.rbi + s.rbi,
-            r: p.season.r + s.r,
-            bb: p.season.bb + s.bb,
-            so: p.season.so + s.so,
-            sb: p.season.sb + s.sb,
-            cs: p.season.cs + s.cs,
-            ip3: p.season.ip3 + s.ip3,
-            er: p.season.er + s.er,
-            pk: p.season.pk + s.pk,
-            pbb: p.season.pbb + s.pbb,
-            ph: p.season.ph + s.ph,
-            w: p.season.w + s.w + (state.winner === side && p.id === mine.pitcherId ? 1 : 0),
-            l:
-              p.season.l +
-              s.l +
-              (state.winner !== side && state.winner !== 'TIE' && p.id === mine.pitcherId ? 1 : 0),
-          },
-        };
-      }),
-    };
-    merged.players = distributeRewards(merged.players, pts);
-    upsertTeam(merged);
-    void saveTeam(merged);
-  }, [state, rewarded, team, side, upsertTeam]);
+  const issues = useMemo(
+    () => (team ? rosterIssues(team, settings.useDH) : []),
+    [team, settings.useDH],
+  );
 
   if (!team || !cpuTeam) {
     return <div className="py-20 text-center text-slate-500">팀이 필요합니다.</div>;
@@ -174,8 +119,23 @@ export default function CpuGamePage() {
           </p>
         </section>
 
+        {issues.length > 0 && (
+          <section className="panel border-rose-500/30 bg-rose-500/10 p-4">
+            <h2 className="mb-2 text-sm font-bold text-rose-300">출전할 수 없습니다</h2>
+            <ul className="space-y-1 text-xs text-rose-200/90">
+              {issues.map((m) => (
+                <li key={m}>· {m}</li>
+              ))}
+            </ul>
+            <button className="btn mt-3 !py-1.5 !text-xs" onClick={() => router.push('/roster')}>
+              선수단에서 정리하기
+            </button>
+          </section>
+        )}
+
         <button
           className="btn btn-primary w-full !py-3 text-base"
+          disabled={issues.length > 0}
           onClick={() => {
             initCpuGame({
               playerTeam: team,
@@ -184,7 +144,6 @@ export default function CpuGamePage() {
               settings,
               difficulty,
             });
-            setRewarded(false);
             setStarted(true);
           }}
         >

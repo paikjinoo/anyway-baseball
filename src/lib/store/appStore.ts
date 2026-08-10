@@ -3,8 +3,8 @@
 import { create } from 'zustand';
 import type { GameSettings, League, Team } from '../game/types';
 import { DEFAULT_SETTINGS } from '../game/types';
-import type { AppUser } from '../firebase/auth';
-import { loadSettings, saveSettings } from '../firebase/store';
+import { withNickname, type AppUser } from '../firebase/auth';
+import { loadSettings, normalizeNickname, saveNickname, saveSettings } from '../firebase/store';
 import { configureAudio } from '../audio/sfx';
 
 interface AppState {
@@ -17,6 +17,10 @@ interface AppState {
   settings: GameSettings;
 
   setUser: (u: AppUser | null) => void;
+  /** 감독 닉네임 변경. null이나 빈 문자열이면 계정 이름으로 되돌린다. */
+  setNickname: (raw: string | null) => void;
+  /** 다른 기기에서 정한 닉네임 반영. 값이 같으면 아무것도 하지 않는다. */
+  syncNickname: (uid: string, nickname: string | null) => void;
   setAuthReady: (v: boolean) => void;
   setDataReady: (v: boolean) => void;
   setTeams: (t: Team[]) => void;
@@ -42,6 +46,23 @@ export const useAppStore = create<AppState>((set, get) => ({
   settings: DEFAULT_SETTINGS,
 
   setUser: (user) => set({ user, dataReady: false }),
+
+  setNickname: (raw) => {
+    const { user } = get();
+    if (!user) return;
+    const next = raw === null ? null : normalizeNickname(raw) || null;
+    // 게스트 uid는 Firebase 인증이 없어 원격 쓰기가 규칙에 막힌다. 로컬에만 남긴다.
+    saveNickname(user.uid, next, !user.isGuest);
+    set({ user: withNickname(user, next) });
+  },
+
+  syncNickname: (uid, nickname) => {
+    const { user } = get();
+    // 같은 값이면 사용자 객체를 새로 만들지 않는다 — 화면 전체가 괜히 다시 그려진다.
+    if (!user || user.uid !== uid || user.nickname === (nickname || null)) return;
+    set({ user: withNickname(user, nickname || null) });
+  },
+
   setAuthReady: (authReady) => set({ authReady }),
   setDataReady: (dataReady) => set({ dataReady }),
   setTeams: (teams) => {

@@ -2,6 +2,7 @@ import { Rng, clamp, lerp, norm } from './rng';
 import { BASE_COORDS, BASE_DISTANCE } from './constants';
 import { throwArrivalTime, type FieldPlay } from './fielding';
 import type { Player, Position, Runner, StealResult, Vec3 } from './types';
+import { effSpeed } from './batting';
 
 // ---------------------------------------------------------------------------
 // 주루 시간 모델
@@ -16,25 +17,25 @@ import type { Player, Position, Runner, StealResult, Vec3 } from './types';
  * MLB 실측(최속 3.9 / 평균 4.30 / 최저 4.75)에 그 구간이 맞도록 넓혔다.
  */
 export function homeToFirst(p: Player, bunt: boolean): number {
-  const t = lerp(5.2, 3.35, norm(p.batting.speed));
+  const t = lerp(5.2, 3.35, norm(effSpeed(p)));
   return bunt ? t - 0.18 : t;
 }
 
 /** 이미 달리고 있는 주자가 다음 베이스까지 (s) */
 export function baseToBase(p: Player): number {
-  return lerp(3.75, 2.95, norm(p.batting.speed));
+  return lerp(3.75, 2.95, norm(effSpeed(p)));
 }
 
 /** 정지 상태(리드오프)에서 다음 베이스까지 — 도루 시 */
 export function stealTime(p: Player, from: number): number {
   // 1루->2루 기준 엘리트 3.35초, 느린 선수 4.15초. 3루 도루는 리드가 짧아 조금 더 걸린다.
-  const t = lerp(4.02, 3.26, norm(p.batting.speed));
+  const t = lerp(4.02, 3.26, norm(effSpeed(p)));
   return from === 1 ? t + 0.1 : t;
 }
 
 /** 타구가 잡힌 뒤 태그업해서 진루하는 시간 */
 export function tagUpTime(p: Player): number {
-  return lerp(4.1, 3.25, norm(p.batting.speed));
+  return lerp(4.1, 3.25, norm(effSpeed(p)));
 }
 
 // ---------------------------------------------------------------------------
@@ -77,7 +78,7 @@ export function resolveSteals(
       // 홈 스틸. 성공률이 매우 낮다.
       const runTime = stealTime(p, 2) * 0.86;
       const defTime = delivery + rng.range(-0.05, 0.15);
-      const safe = runTime < defTime && rng.chance(0.35 + norm(p.batting.speed) * 0.25);
+      const safe = runTime < defTime && rng.chance(0.35 + norm(effSpeed(p)) * 0.25);
       results.push({ fromBase: from, playerId: runner.playerId, safe });
       continue;
     }
@@ -114,6 +115,17 @@ export interface AdvanceInput {
 
 /** 스타트를 끊은 주자가 절약하는 시간 (s) */
 const RUNNING_START_BONUS = 1.35;
+
+/**
+ * 주자가 타구를 보고 스타트를 끊기까지 (s). 리드오프로 버는 이득은 이미 뺀 값.
+ * 베이스를 돌 때는 원을 그리며 감속하므로 한 베이스를 지날 때마다 비용이 붙는다.
+ *
+ * 이 둘이 없으면 주자가 타격과 동시에 최고 속도로 출발해 직선으로 달리는 셈이라
+ * 1루 주자가 단타에 3루까지 가는 비율이 79%가 된다 (MLB 29%). 실제로 단타에서
+ * 1루→3루는 7.5초쯤 걸리고, 3루 송구는 6.6초쯤에 도착한다.
+ */
+const RUNNER_READ_DELAY = 0.45;
+const BASE_TURN_COST = 0.25;
 
 export interface AdvanceResult {
   /** 새로운 베이스 상태 */
@@ -213,7 +225,7 @@ export function resolveAdvance(rng: Rng, input: AdvanceInput): AdvanceResult {
       }
       const runTime = play.secureTime + tagUpTime(p);
       const throwTime = throwArrivalTime(play, targetBase === 3 ? 3 : targetBase);
-      const aggressive = norm(p.batting.speed) * 0.25;
+      const aggressive = norm(effSpeed(p)) * 0.25;
       if (runTime + SAFETY_MARGIN - aggressive < throwTime) {
         if (targetBase === 3) scored.push(r);
         else newBases[targetBase] = r;
@@ -423,8 +435,11 @@ function resolveHit(
   for (let target = 1; target <= 3; target++) {
     cum += bSpeed;
     const throwT = throwArrivalTime(play, target);
-    const aggressive = 0.15 + norm(batter.batting.speed) * 0.38;
-    if (cum + SAFETY_MARGIN - aggressive < throwT) {
+    const aggressive = 0.15 + norm(effSpeed(batter)) * 0.38;
+    // 3루는 훨씬 보수적으로 판단한다. "3루에서 아웃되지 마라"는 실제 주루의
+    // 원칙이고, 이 여유가 없으면 2루타가 될 타구가 3루타로 기록된다.
+    const margin = SAFETY_MARGIN + (target >= 2 ? 0.55 : 0);
+    if (cum + margin - aggressive < throwT) {
       batterBase = target;
     } else {
       break;
@@ -444,20 +459,21 @@ function resolveHit(
       continue;
     }
     let pos = i;
-    let time = input.runningStart?.[i] ? -RUNNING_START_BONUS : 0;
+    let time =
+      (input.runningStart?.[i] ? -RUNNING_START_BONUS : 0) + RUNNER_READ_DELAY;
     const rSpeed = baseToBase(p);
     // 주자는 타자보다 최소 1베이스는 더 갈 수 있다 (이미 리드 중)
     for (let step = 1; step <= 3 - i; step++) {
-      time += rSpeed;
+      time += rSpeed + (step > 1 ? BASE_TURN_COST : 0);
       const target = i + step;
       const throwT = throwArrivalTime(play, target);
-      const aggressive = 0.15 + norm(p.batting.speed) * 0.4 + (outsAfter === 2 ? 0.3 : 0);
+      const aggressive = 0.15 + norm(effSpeed(p)) * 0.4 + (outsAfter === 2 ? 0.3 : 0);
       const margin = target === 3 ? SAFETY_MARGIN + 0.1 : SAFETY_MARGIN;
       if (time + margin - aggressive < throwT) {
         pos = target;
       } else {
         // 아슬아슬하면 도박을 걸기도 한다
-        if (target === 3 && time < throwT + 0.35 && rng.chance(0.25 + norm(p.batting.speed) * 0.2)) {
+        if (target === 3 && time < throwT + 0.35 && rng.chance(0.25 + norm(effSpeed(p)) * 0.2)) {
           if (rng.chance(0.55)) {
             pos = target;
           } else {
@@ -474,13 +490,25 @@ function resolveHit(
     else if (pos !== i || true) newBases[Math.min(pos, 2)] = r;
   }
 
-  // 타자 배치 (앞 주자와 겹치면 한 칸 뒤로)
-  let bb = batterBase;
-  while (bb < 3 && newBases[bb]) bb++;
-  if (bb >= 3) bb = 2;
+  // ---- 타자 배치 --------------------------------------------------------
+  // 얻어낸 베이스가 차 있으면 **앞 주자가 포스로 밀려나고** 타자는 자기 자리에
+  // 선다. 예전에는 타자를 한 칸 앞으로 보냈는데, 그러면 막힌 단타가 2루타로,
+  // 2루타가 3루타로 둔갑한다 (베이스가 막혔다고 주자가 승격될 리 없다).
   if (batterBase >= 3) {
     scored.push({ playerId: batter.id, responsiblePitcherId: '', stealing: false });
   } else {
+    const bb = Math.min(batterBase, 2);
+    // 포스는 **연속으로 막힌 만큼만** 이어진다. 타자가 설 자리부터 위로 훑어
+    // 첫 빈 베이스를 찾고, 거기까지만 한 칸씩 밀어낸다. 조건 없이 전부 밀면
+    // 2루에 멈춘 주자가 3루로, 3루 주자가 홈으로 떠밀려 득점이 폭증한다.
+    let firstFree = bb;
+    while (firstFree <= 2 && newBases[firstFree]) firstFree++;
+    for (let i = firstFree - 1; i >= bb; i--) {
+      const r = newBases[i]!;
+      newBases[i] = null;
+      if (i + 1 > 2) scored.push(r);
+      else newBases[i + 1] = r;
+    }
     newBases[bb] = { playerId: batter.id, responsiblePitcherId: '', stealing: false };
     batterBase = bb;
   }

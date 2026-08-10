@@ -1,6 +1,7 @@
 import type {
   AccessoryType,
   BatType,
+  BodyType,
   GloveType,
   PitchType,
   Position,
@@ -338,6 +339,44 @@ export const ACCESSORY_DEFS: { id: AccessoryType; ko: string; desc: string }[] =
   { id: 'EYE_BLACK', ko: '아이블랙', desc: '눈 밑 검은 띠' },
 ];
 
+/**
+ * 타자 체형. 파워와 스피드를 맞바꾼다.
+ *
+ * girth는 3D 실루엣의 몸통·팔다리 두께 배율이다. **키와 머리 비율은 건드리지 않는다** —
+ * 골격 치수는 포즈·IK와 한 세트로 튜닝돼 있고, 키를 바꾸면 스트라이크존 정렬과 카메라가
+ * 함께 깨진다 (PlayerModel.tsx 헤더 참고).
+ */
+export const BODY_DEFS: {
+  id: BodyType;
+  ko: string;
+  powerMod: number;
+  speedMod: number;
+  girth: number;
+  desc: string;
+}[] = [
+  { id: 'NORMAL', ko: '기본', powerMod: 0, speedMod: 0, girth: 1.0, desc: '균형 잡힌 체형' },
+  {
+    id: 'SLIM',
+    ko: '슬림',
+    powerMod: -5,
+    speedMod: 5,
+    girth: 0.9,
+    desc: '가벼워 발이 빠르지만 타구가 덜 뻗는다',
+  },
+  {
+    id: 'BIG',
+    ko: '거구',
+    powerMod: 5,
+    speedMod: -5,
+    girth: 1.14,
+    desc: '타구는 멀리 가지만 발이 느려진다',
+  },
+];
+
+export const BODY_BY_ID: Record<BodyType, (typeof BODY_DEFS)[number]> = Object.fromEntries(
+  BODY_DEFS.map((b) => [b.id, b]),
+) as Record<BodyType, (typeof BODY_DEFS)[number]>;
+
 export const STANCE_NAMES = ['스탠다드', '오픈', '클로즈드', '크라우칭', '레그킥', '노스텝'];
 export const FORM_NAMES = ['오버스로', '스리쿼터', '사이드암', '언더핸드', '토네이도'];
 
@@ -391,4 +430,4 @@ export const DRAG_K = 0.0064;
  * 이 값이 홈런 수를 정한다 (경기당 1.15). 45 m/s에서 양력/중력 비가
  * 0.0019면 0.39g로 실제 백스핀 타구(0.25~0.35g)보다 세다.
  */
-export const LIFT_K = 0.0013;
+export const LIFT_K = 0.0016;

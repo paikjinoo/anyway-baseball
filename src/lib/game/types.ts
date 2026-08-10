@@ -12,6 +12,46 @@ export type Position = 'P' | 'C' | '1B' | '2B' | '3B' | 'SS' | 'LF' | 'CF' | 'RF
 
 export const FIELD_POSITIONS: Position[] = ['P', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF'];
 
+/**
+ * 선수 구분. 생성 시 정해지고 이후 바뀌지 않는다.
+ * 투수는 마운드 역할(PitcherRole) 안에서만, 타자는 야수 포지션 안에서만 이동할 수 있다.
+ */
+export type PlayerKind = 'PITCHER' | 'BATTER';
+
+/** 타자가 맡을 수 있는 포지션. 투수(P)는 제외한다. */
+export type BatterPosition = Exclude<Position, 'P'>;
+
+export const BATTER_POSITIONS: BatterPosition[] = [
+  'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'DH',
+];
+
+/** 투수 역할. 선발 / 중간계투 / 마무리. */
+export type PitcherRole = 'SP' | 'RP' | 'CP';
+
+export const PITCHER_ROLES: PitcherRole[] = ['SP', 'RP', 'CP'];
+
+/** 선수 티어. 위로 갈수록 최대 레벨·능력치 상한·구종 슬롯이 함께 오른다. */
+export type Tier = 'C' | 'B' | 'A' | 'S';
+
+/** 타자 체형. 파워/스피드를 맞바꾸고 3D 실루엣의 두께를 바꾼다. */
+export type BodyType = 'NORMAL' | 'SLIM' | 'BIG';
+
+/** 부상 상태. 경기를 한 판 끝낼 때마다 gamesLeft가 1씩 줄고 0이 되면 해제된다. */
+export interface Injury {
+  gamesLeft: number;
+  reason: string;
+}
+
+/**
+ * 훈련 포인트를 쓰기 전의 원본 능력치.
+ * 능력치초기화권이 여기로 되돌리고, 그동안 쓴 포인트(spentPoints)를 전액 환급한다.
+ */
+export interface PlayerBase {
+  batting: BattingAttr;
+  stamina: number;
+  arsenal: Partial<Record<PitchType, PitchAttr>>;
+}
+
 export type Handedness = 'L' | 'R';
 /** 타석 좌우. S는 스위치 히터. */
 export type BatSide = 'L' | 'R' | 'S';
@@ -78,7 +118,14 @@ export interface Player {
   name: string;
   /** 등번호 */
   number: number;
+  /** 투수/타자 구분. 생성 시 고정되며 플레이어가 바꿀 수 없다. */
+  kind: PlayerKind;
+  /** 투수는 항상 'P'. 타자는 9개 야수 포지션 중 하나이며 플레이어가 바꾼다. */
   position: Position;
+  /** 투수 전용. 선발/중간계투/마무리. */
+  role?: PitcherRole;
+  /** 타자 전용 체형. 파워/스피드 보정이 붙는다. */
+  body: BodyType;
   bats: BatSide;
   throws: Handedness;
   stance: BattingStance;
@@ -87,10 +134,27 @@ export interface Player {
   batting: BattingAttr;
   /** 투수만 보유. position이 'P'가 아니어도 존재할 수 있다(야수 투입 대비). */
   pitching?: PitchingAttr;
-  /** 훈련 성장 한계. 각 능력치가 이 값을 넘을 수 없다. */
+  /** 티어. 최대 레벨·능력치 상한·구종 슬롯을 결정한다. */
+  tier: Tier;
+  /** 현재 티어 안에서의 레벨. 티어가 오르면 1로 돌아간다(능력치는 유지). */
+  level: number;
+  /** 다음 레벨까지 쌓인 경험치 */
+  exp: number;
+  /**
+   * 선수 고유의 성장 한계. 실제 상한은 티어 상한과의 min이다.
+   * @see progression.statCap
+   */
   potential: number;
-  /** 훈련에 사용하는 포인트. 경기 결과로 획득한다. */
+  /** 훈련에 사용하는 포인트. 레벨업으로만 획득한다. */
   trainingPoints: number;
+  /** 지금까지 훈련에 쓴 누적 포인트. 능력치초기화권의 환급액이다. */
+  spentPoints: number;
+  /** 생성 시점의 능력치 스냅샷. 능력치초기화권이 복원하는 지점. */
+  base: PlayerBase;
+  /** 경기 사이에 이월되는 투수 피로도 (0~1). 1이면 완전히 지친 상태. */
+  fatigue: number;
+  /** 부상 중이면 라인업/로테이션에 넣을 수 없다. */
+  injury?: Injury;
   /** 시즌 누적 스탯 */
   season: SeasonStat;
 }
@@ -106,6 +170,8 @@ export interface SeasonStat {
   rbi: number;
   r: number;
   bb: number;
+  /** 몸에 맞는 공. 타자 부상 판정의 근거이기도 하다. */
+  hbp: number;
   so: number;
   sb: number;
   cs: number;
@@ -115,6 +181,11 @@ export interface SeasonStat {
   pk: number; // 탈삼진
   pbb: number;
   ph: number;
+  /**
+   * 던진 공의 수. TeamInGame.pitcherPitches는 투수를 바꾸면 0으로 리셋되므로
+   * "이 투수가 이 경기에서 몇 개 던졌나"는 여기에만 남는다. 경기 간 피로 이월의 입력값.
+   */
+  np: number;
   w: number;
   l: number;
 }
@@ -125,8 +196,31 @@ export interface SeasonStat {
 
 export type UniformType = 'CLASSIC' | 'PINSTRIPE' | 'RAGLAN' | 'VEST' | 'GRADIENT' | 'SASH';
 
+/**
+ * 아이템 종류. 경기 보상으로는 나오지 않고 리그 1~3위 보상으로만 지급된다.
+ * @see items.ts
+ */
+export type ItemId =
+  | 'EXP_S'
+  | 'EXP_M'
+  | 'EXP_L'
+  | 'EXP_XL'
+  | 'RESET_STATS'
+  | 'CURE_INJURY'
+  | 'STAMINA_TONIC';
+
+export type Inventory = Partial<Record<ItemId, number>>;
+
+/**
+ * 팀 문서 스키마 버전. 한 유저는 팀을 하나만 가지며, 이 값이 맞지 않는 문서는
+ * 불러오지 않고 재창단을 유도한다 (티어/레벨 도입으로 구 스키마와 호환되지 않는다).
+ */
+export const TEAM_SCHEMA_VERSION = 2;
+
 export interface Team {
   id: string;
+  /** 스키마 버전. TEAM_SCHEMA_VERSION과 다르면 로드하지 않는다. */
+  schemaVersion: number;
   ownerUid: string;
   name: string;
   /** 3글자 약칭. 스코어보드에 표시. */
@@ -139,8 +233,13 @@ export interface Team {
   players: Player[];
   /** 타순. player id 9개. */
   lineup: string[];
-  /** 선발 로테이션. player id. */
+  /** 선발 로테이션. 정확히 SP 4명의 player id. */
   rotation: string[];
+  /** 다음 경기에 등판할 선발의 rotation 인덱스. 경기가 끝날 때마다 1씩 돈다. */
+  rotationIndex: number;
+  /** 재화. 티어 강화에 쓴다. */
+  gold: number;
+  inventory: Inventory;
   createdAt: number;
   updatedAt: number;
 }
@@ -307,6 +406,8 @@ export interface TeamInGame {
   pitcherPitches: number;
   /** 이 경기에서 이미 등판한 투수. 강판된 투수의 재등판을 막는다. */
   usedPitcherIds: string[];
+  /** 대타/대주자/대수비로 교체돼 나간 야수. 재출전을 막는다. */
+  usedBatterIds: string[];
   /** 수비 위치 배치. position -> playerId */
   defense: Partial<Record<Position, string>>;
   runs: number;
@@ -571,6 +672,8 @@ export interface League {
   roundsPerOpponent: number;
   createdAt: number;
   status: 'DRAFT' | 'ACTIVE' | 'FINISHED';
+  /** 종료 보상(골드·아이템)을 지급한 시각. 두 번 주지 않기 위한 표식. */
+  rewardedAt?: number;
 }
 
 export interface StandingRow {

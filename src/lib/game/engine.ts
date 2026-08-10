@@ -1,10 +1,10 @@
 import { Rng, clamp, norm, seedFromString } from './rng';
-import { computePitch, describeLocation, staminaRemaining } from './pitching';
+import { computePitch, describeLocation, pitchCapacity, staminaRemaining } from './pitching';
 import { judgeSwing, makeBattedBall, effectiveBatting } from './batting';
 import { resolveFielding, type DefenseMap } from './fielding';
 import { resolveAdvance, resolveSteals } from './baserunning';
 import { PITCH_DEFS, POSITION_KO, SWING_DEFS } from './constants';
-import { autoLineup, emptySeason } from './generator';
+import { autoLineup, emptySeason, hitterScore } from './generator';
 import type {
   GameSettings,
   GameState,
@@ -36,17 +36,22 @@ function toTeamInGame(team: Team, settings: GameSettings): TeamInGame {
     roster[p.id] = copy;
   }
 
-  const rotation = team.rotation.filter((id) => roster[id]);
+  // 부상 중인 선수는 등판·출전하지 않는다.
+  const healthy = (id: string) => roster[id] && !roster[id].injury;
+  const rotation = team.rotation.filter(healthy);
+  // 로테이션은 경기마다 한 칸씩 돈다. 피로가 이월되므로 에이스 한 명으로 다 돌릴 수 없다.
   const pitcherId =
-    rotation[0] ?? team.players.find((p) => p.position === 'P')?.id ?? team.players[0].id;
+    (rotation.length ? rotation[team.rotationIndex % rotation.length] : undefined)
+    ?? team.players.find((p) => p.kind === 'PITCHER' && !p.injury)?.id
+    ?? team.players[0].id;
 
-  let lineup = team.lineup.filter((id) => roster[id]);
+  let lineup = team.lineup.filter(healthy);
   const storedLineupIsValid = lineup.length === 9 && new Set(lineup).size === 9;
   if (!storedLineupIsValid || !settings.useDH) lineup = autoLineup(team, settings.useDH);
 
   // DH 미사용 시 자동 타순이 고른 투수가 실제 선발과 다를 수 있으므로 맞춰 준다.
   if (!settings.useDH && !lineup.includes(pitcherId)) {
-    const pitcherSlot = lineup.findIndex((id) => roster[id]?.position === 'P');
+    const pitcherSlot = lineup.findIndex((id) => roster[id]?.kind === 'PITCHER');
     lineup[pitcherSlot >= 0 ? pitcherSlot : lineup.length - 1] = pitcherId;
   }
 
@@ -69,6 +74,7 @@ function toTeamInGame(team: Team, settings: GameSettings): TeamInGame {
     pitcherId,
     pitcherPitches: 0,
     usedPitcherIds: [pitcherId],
+    usedBatterIds: [],
     defense: buildDefense(roster, lineup, pitcherId, settings.useDH),
     runs: 0,
     hits: 0,
@@ -99,7 +105,7 @@ export function buildDefense(
   // 2) 남은 자리는 라인업의 남은 선수로 채운다
   for (const pos of need) {
     if (defense[pos]) continue;
-    const id = lineup.find((x) => !used.has(x) && roster[x]?.position !== 'P');
+    const id = lineup.find((x) => !used.has(x) && roster[x]?.kind === 'BATTER');
     if (id) {
       defense[pos] = id;
       used.add(id);
@@ -108,7 +114,7 @@ export function buildDefense(
   // 3) 그래도 비면 로스터에서 채운다
   for (const pos of need) {
     if (defense[pos]) continue;
-    const id = Object.keys(roster).find((x) => !used.has(x) && roster[x].position !== 'P');
+    const id = Object.keys(roster).find((x) => !used.has(x) && roster[x].kind === 'BATTER');
     if (id) {
       defense[pos] = id;
       used.add(id);
@@ -296,6 +302,9 @@ export function resolvePitch(
 
   const traj = computePitch(rng, pitcher, cmd, def.pitcherPitches);
   def.pitcherPitches += 1;
+  // 투수를 바꾸면 pitcherPitches는 0으로 리셋되므로, 투수별 누적은 여기에만 남는다.
+  // 경기가 끝난 뒤 피로 이월(matchReward)의 입력값이 된다.
+  pitcher.season.np += 1;
 
   const result: PitchResult = {
     pitchNumber: s.pitchCount,
@@ -674,6 +683,7 @@ function finishAtBat(s: GameState, out: PitchResult, opt: { walk?: boolean }) {
     const batter = currentBatter(s);
     if (batter && out.kind === 'HIT_BY_PITCH') {
       batter.season.pa += 1;
+      batter.season.hbp += 1;
     }
   }
   advanceLineup(s);
@@ -939,6 +949,132 @@ export function changePitcher(s: GameState, side: Side, newPitcherId: string): G
   return s;
 }
 
+// ---------------------------------------------------------------------------
+// 야수 교체 (대타 / 대주자 / 대수비)
+//
+// 투수 교체(changePitcher)와 같은 규칙을 따른다: 한 번 빠진 선수는 돌아오지 못한다.
+// 벤치는 로스터 중 타순에도 마운드에도 없는 타자다.
+// ---------------------------------------------------------------------------
+
+/** 교체로 투입할 수 있는 벤치 야수 */
+export function benchCandidates(s: GameState, side: Side): Player[] {
+  const t = s[side];
+  const inLineup = new Set(t.lineup);
+  const usedBatters = new Set(t.usedBatterIds ?? []);
+  const usedPitchers = new Set(t.usedPitcherIds ?? []);
+  return Object.values(t.roster)
+    .filter(
+      (p) =>
+        p.kind === 'BATTER' &&
+        !p.injury &&
+        !inLineup.has(p.id) &&
+        !usedBatters.has(p.id) &&
+        !usedPitchers.has(p.id),
+    )
+    .sort((a, b) => hitterScore(b) - hitterScore(a));
+}
+
+/** 교체 가능 여부를 미리 확인한다. 문제가 없으면 null. */
+function subIssue(s: GameState, side: Side, playerId: string): string | null {
+  const t = s[side];
+  const p = t.roster[playerId];
+  if (!p) return '로스터에 없는 선수입니다.';
+  if (p.kind !== 'BATTER') return '타자만 교체 투입할 수 있습니다.';
+  if (p.injury) return '부상 중인 선수입니다.';
+  if (t.lineup.includes(playerId)) return '이미 경기에 나와 있습니다.';
+  if ((t.usedBatterIds ?? []).includes(playerId)) return '이미 교체돼 나간 선수입니다.';
+  return null;
+}
+
+/** 교체돼 나간 선수를 표시하고 수비 배치에서 새 선수로 갈아 끼운다 */
+function retire(t: TeamInGame, outId: string, inId: string) {
+  t.usedBatterIds = [...(t.usedBatterIds ?? []), outId];
+  for (const [pos, id] of Object.entries(t.defense)) {
+    if (id === outId) t.defense[pos as Position] = inId;
+  }
+}
+
+export interface SubResult {
+  state: GameState;
+  ok: boolean;
+  message: string;
+}
+
+/**
+ * 대타. 지금 타석에 선 선수를 벤치 선수로 바꾼다.
+ * 들어온 선수는 그 타순을 그대로 이어받고, 수비도 물려받는다.
+ */
+export function pinchHit(s: GameState, side: Side, playerId: string): SubResult {
+  const t = s[side];
+  if (battingSide(s) !== side) return { state: s, ok: false, message: '공격 중일 때만 가능합니다.' };
+  const issue = subIssue(s, side, playerId);
+  if (issue) return { state: s, ok: false, message: issue };
+
+  const slot = t.atBatIndex % t.lineup.length;
+  const outId = t.lineup[slot];
+  t.lineup[slot] = playerId;
+  retire(t, outId, playerId);
+  t.roster[playerId].season.g = 1;
+  return {
+    state: s,
+    ok: true,
+    message: `대타 ${t.roster[playerId].name} (${t.roster[outId]?.name ?? ''} 교체)`,
+  };
+}
+
+/**
+ * 대주자. 누상의 주자를 벤치 선수로 바꾼다.
+ * 실점 책임 투수는 바뀌지 않는다 — 그 주자를 내보낸 건 여전히 원래 투수다.
+ */
+export function pinchRun(s: GameState, side: Side, baseIndex: number, playerId: string): SubResult {
+  const t = s[side];
+  if (battingSide(s) !== side) return { state: s, ok: false, message: '공격 중일 때만 가능합니다.' };
+  const runner = s.bases[baseIndex];
+  if (!runner) return { state: s, ok: false, message: '그 베이스에 주자가 없습니다.' };
+  const issue = subIssue(s, side, playerId);
+  if (issue) return { state: s, ok: false, message: issue };
+
+  const outId = runner.playerId;
+  s.bases[baseIndex] = { ...runner, playerId };
+  const slot = t.lineup.indexOf(outId);
+  if (slot >= 0) t.lineup[slot] = playerId;
+  retire(t, outId, playerId);
+  t.roster[playerId].season.g = 1;
+  return {
+    state: s,
+    ok: true,
+    message: `대주자 ${t.roster[playerId].name} (${t.roster[outId]?.name ?? ''} 교체)`,
+  };
+}
+
+/** 대수비. 특정 수비 위치의 선수를 벤치 선수로 바꾼다. 투수 자리는 changePitcher를 쓴다. */
+export function subFielder(
+  s: GameState,
+  side: Side,
+  position: Position,
+  playerId: string,
+): SubResult {
+  const t = s[side];
+  if (fieldingSide(s) !== side) return { state: s, ok: false, message: '수비 중일 때만 가능합니다.' };
+  if (position === 'P') return { state: s, ok: false, message: '투수는 투수 교체로 바꿉니다.' };
+  const outId = t.defense[position];
+  if (!outId) return { state: s, ok: false, message: '그 자리에 수비수가 없습니다.' };
+  const issue = subIssue(s, side, playerId);
+  if (issue) return { state: s, ok: false, message: issue };
+
+  const slot = t.lineup.indexOf(outId);
+  if (slot >= 0) t.lineup[slot] = playerId;
+  retire(t, outId, playerId);
+  t.defense[position] = playerId;
+  t.roster[playerId].position = position;
+  t.roster[playerId].season.g = 1;
+  return {
+    state: s,
+    ok: true,
+    message: `${POSITION_KO[position]} ${t.roster[playerId].name} (${t.roster[outId]?.name ?? ''} 교체)`,
+  };
+}
+
 /** 현재 투수가 지쳤는지 (교체 권장) */
 export function pitcherIsTired(s: GameState, side: Side): boolean {
   const t = s[side];
@@ -947,14 +1083,37 @@ export function pitcherIsTired(s: GameState, side: Side): boolean {
   return staminaRemaining(p, t.pitcherPitches) < 0.15;
 }
 
-/** 불펜에서 다음 투수 후보 */
+/**
+ * 불펜에서 다음 투수 후보.
+ *
+ * 역할 순서로 정렬한다: 중간계투 -> 선발(임시 등판) -> 마무리.
+ * 마무리를 뒤로 미는 건 실제 야구의 용법 그대로다 — 리드를 지킬 마지막 이닝에 남겨 둔다.
+ * 같은 역할 안에서는 남은 스태미나(누적 피로 반영)가 많은 순이다.
+ */
+const RELIEF_ORDER: Record<string, number> = { RP: 0, SP: 1, CP: 2 };
+
 export function bullpenCandidates(s: GameState, side: Side): Player[] {
   const t = s[side];
   const inLineup = new Set(t.lineup);
   const used = new Set(t.usedPitcherIds ?? [t.pitcherId]);
   return Object.values(t.roster)
-    .filter((p) => p.position === 'P' && p.pitching && !used.has(p.id) && !inLineup.has(p.id))
-    .sort((a, b) => (b.pitching?.stamina ?? 0) - (a.pitching?.stamina ?? 0));
+    .filter(
+      (p) =>
+        p.kind === 'PITCHER' && p.pitching && !p.injury && !used.has(p.id) && !inLineup.has(p.id),
+    )
+    .sort((a, b) => {
+      const ra = RELIEF_ORDER[a.role ?? 'RP'] ?? 0;
+      const rb = RELIEF_ORDER[b.role ?? 'RP'] ?? 0;
+      if (ra !== rb) return ra - rb;
+      // 남은 투구 여력 = 총 여력 × 남은 비율.
+      // staminaRemaining만 보면 이월 피로가 없는 투수는 전부 1.0이라 순서가 무의미해진다.
+      return remainingPitches(b) - remainingPitches(a);
+    });
+}
+
+/** 지금 이 투수가 더 던질 수 있는 공의 수 (경기 간 이월 피로 반영) */
+function remainingPitches(p: Player): number {
+  return pitchCapacity(p) * staminaRemaining(p, 0);
 }
 
 /** 스코어보드 표시용 요약 */

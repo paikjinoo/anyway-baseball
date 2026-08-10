@@ -595,6 +595,7 @@ function relayTeamInGame(
     pitcherId: player.id,
     pitcherPitches: role === 'PITCHER' ? pitcherPitches : 0,
     usedPitcherIds: role === 'PITCHER' ? [player.id] : [],
+    usedBatterIds: [],
     defense: role === 'PITCHER' ? { P: player.id } : {},
     runs: 0,
     hits: 0,

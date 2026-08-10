@@ -8,16 +8,34 @@ import {
   type User,
 } from 'firebase/auth';
 import { getFirebaseAuth, firebaseConfigured } from './client';
+import { loadNickname } from './store';
 
 export interface AppUser {
   uid: string;
+  /** 화면과 온라인 대전에 실제로 쓰이는 이름. 닉네임을 정했으면 그 값이다. */
   displayName: string;
+  /** 계정 원래 이름(구글 이름 / 게스트). 닉네임을 지우면 여기로 돌아온다. */
+  accountName: string;
+  /** 사용자가 직접 정한 닉네임. 없으면 null. */
+  nickname: string | null;
   photoURL: string | null;
   isGuest: boolean;
 }
 
 const GUEST_KEY = 'ab:guestUid';
 const GUEST_ACTIVE_KEY = 'ab:guestActive';
+
+/** 계정 이름 위에 닉네임을 덮어쓴 사용자 정보를 만든다. */
+export function withNickname(
+  base: Omit<AppUser, 'displayName' | 'nickname'>,
+  nickname: string | null,
+): AppUser {
+  return {
+    ...base,
+    nickname: nickname || null,
+    displayName: nickname || base.accountName,
+  };
+}
 
 /** 로컬 게스트 계정. Firebase 설정 여부와 무관하게 같은 uid를 유지한다. */
 export function getOrCreateGuest(): AppUser {
@@ -27,17 +45,23 @@ export function getOrCreateGuest(): AppUser {
     if (typeof window !== 'undefined') localStorage.setItem(GUEST_KEY, uid);
   }
   if (typeof window !== 'undefined') localStorage.setItem(GUEST_ACTIVE_KEY, '1');
-  return { uid, displayName: '게스트 감독', photoURL: null, isGuest: true };
+  return withNickname(
+    { uid, accountName: '게스트 감독', photoURL: null, isGuest: true },
+    loadNickname(uid),
+  );
 }
 
 export function toAppUser(u: User): AppUser {
   if (typeof window !== 'undefined') localStorage.removeItem(GUEST_ACTIVE_KEY);
-  return {
-    uid: u.uid,
-    displayName: u.displayName ?? '감독',
-    photoURL: u.photoURL,
-    isGuest: false,
-  };
+  return withNickname(
+    {
+      uid: u.uid,
+      accountName: u.displayName ?? '감독',
+      photoURL: u.photoURL,
+      isGuest: false,
+    },
+    loadNickname(u.uid),
+  );
 }
 
 export async function signInWithGoogle(): Promise<AppUser> {

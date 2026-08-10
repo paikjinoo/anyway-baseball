@@ -146,7 +146,10 @@ export default function PartyLobbyPage() {
       </section>
 
       <p className="text-center text-xs text-slate-600">
-        내 팀: {team.name} (전력 {teamRating(team)})
+        내 팀: {team.name} (전력 {teamRating(team)}) · 감독 이름: {user.displayName}{' '}
+        <Link href="/settings#profile" className="underline hover:text-slate-400">
+          변경
+        </Link>
       </p>
     </div>
   );

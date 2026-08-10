@@ -7,6 +7,9 @@ import { CountDisplay, Scoreboard } from './hud/Scoreboard';
 import { PitchClock } from './hud/PitchClock';
 import { PitchPanel } from './hud/PitchPanel';
 import { BatPanel } from './hud/BatPanel';
+import { SubPanel } from './hud/SubPanel';
+import { RewardNote } from './hud/RewardNote';
+import { useMatchReward } from '@/lib/store/matchReward';
 import {
   controlsBatter,
   controlsPitcher,
@@ -48,6 +51,8 @@ export function GameView({
   // 그 사람의 투구 명령을 아직 교대 중인 호스트가 버리거나(무한 대기 -> 피치 클락 위반),
   // 반대로 호스트가 먼저 넘어가면 남은 사람의 연출이 잘리고 시계만 깎인다.
   const canSkipBreak = useMatchStore((s) => s.mode === 'CPU');
+  // 대타·대주자·대수비는 아직 CPU·리그 전용이다 (온라인은 SUB_* 프로토콜이 필요).
+  const canSubstitute = useMatchStore((s) => s.mode === 'CPU');
   const controllerUid = useMatchStore(currentControllerUid);
   const controllerName = useMatchStore((s) =>
     controllerUid ? (s.seatNames[controllerUid] ?? '상대') : '',
@@ -55,6 +60,8 @@ export function GameView({
   const controllerIsTeammate = useMatchStore(
     (s) => !!controllerUid && controllerUid !== s.myUid && isSameSide(s, controllerUid),
   );
+  // 모든 모드가 이 훅으로 보상을 받는다 (골드 + 선수별 경험치)
+  const reward = useMatchReward();
   const spectating = party && !canBat && !canPitch;
   const [cameraMode, setCameraMode] = useState<CameraMode>('DRAMATIC');
   const [showLog, setShowLog] = useState(true);
@@ -190,14 +197,24 @@ export function GameView({
       {!over && !inningBreak && (
         <div className="game-control-panel absolute bottom-3 right-3 z-20 w-[300px] max-w-[calc(100vw-24px)]">
           {canBat ? (
-            <BatPanel state={hud} batter={batter} />
+            <>
+              <BatPanel state={hud} batter={batter} />
+              {canSubstitute && phase === 'SETUP' && (
+                <SubPanel state={state} playerSide={playerSide as Side} batting />
+              )}
+            </>
           ) : canPitch && phase === 'SETUP' ? (
-            <PitchPanel
-              state={state}
-              pitcher={pitcher}
-              playerSide={playerSide as Side}
-              mirrored={zoneFlippedOnScreen(cameraMode, batting)}
-            />
+            <>
+              <PitchPanel
+                state={state}
+                pitcher={pitcher}
+                playerSide={playerSide as Side}
+                mirrored={zoneFlippedOnScreen(cameraMode, batting)}
+              />
+              {canSubstitute && (
+                <SubPanel state={state} playerSide={playerSide as Side} batting={false} />
+              )}
+            </>
           ) : (
             <div className="panel p-4 text-center text-sm text-slate-400">
               {spectating ? (
@@ -297,6 +314,11 @@ export function GameView({
                 ? '무승부입니다.'
                 : `${state[state.winner as Side].name} 승리!`}
             </p>
+            {reward && (
+              <div className="mb-6">
+                <RewardNote reward={reward} />
+              </div>
+            )}
             <div className="flex gap-2">
               {onExit ? (
                 <button className="btn btn-primary flex-1" onClick={onExit}>

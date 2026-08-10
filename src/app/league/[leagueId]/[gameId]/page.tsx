@@ -5,9 +5,8 @@ import { useParams, useRouter } from 'next/navigation';
 import { useAppStore } from '@/lib/store/appStore';
 import { GameView } from '@/components/GameView';
 import { useMatchStore } from '@/lib/store/matchStore';
-import { getCachedTeam, saveLeague, saveTeam } from '@/lib/firebase/store';
+import { getCachedTeam, saveLeague } from '@/lib/firebase/store';
 import { leagueGameIssue, recordResult } from '@/lib/game/league';
-import { distributeRewards, gameRewardPoints } from '@/lib/game/training';
 import type { Side, Team } from '@/lib/game/types';
 
 /** 리그 일정에 포함된 내 팀 경기를 직접 플레이한다. */
@@ -20,7 +19,6 @@ export default function LeagueGamePage() {
   const teams = useAppStore((s) => s.teams);
   const leagues = useAppStore((s) => s.leagues);
   const upsertLeague = useAppStore((s) => s.upsertLeague);
-  const upsertTeam = useAppStore((s) => s.upsertTeam);
 
   const initCpuGame = useMatchStore((s) => s.initCpuGame);
   const state = useMatchStore((s) => s.state);
@@ -68,88 +66,31 @@ export default function LeagueGamePage() {
       settings: league.settings,
       difficulty: 'NORMAL',
       seed: `${league.id}-${game.id}`,
+      rewardKind: 'LEAGUE',
     });
     setReady(true);
   }, [authReady, dataReady, user, league, game, gameId, playerRef, team, ready, error, initCpuGame]);
 
   useEffect(() => () => reset(), [reset]);
 
-  // 종료 시 리그 결과 기록 + 보상
+  // 종료 시 리그 결과만 기록한다. 선수 보상(경험치·골드)은 useMatchReward가 지급한다.
   useEffect(() => {
     if (!state || state.phase !== 'GAME_OVER' || recorded || !league || !game || !team) return;
     setRecorded(true);
 
-    // 화면을 연 뒤 다른 경로에서 먼저 처리됐더라도 결과·보상을 다시 쓰지 않는다.
+    // 화면을 연 뒤 다른 경로에서 먼저 처리됐더라도 결과를 다시 쓰지 않는다.
     const latestLeague = useAppStore.getState().leagues.find((l) => l.id === league.id);
     const latestGame = latestLeague?.schedule.find((g) => g.id === game.id);
     if (!latestLeague || latestGame?.status !== 'SCHEDULED') {
       reset();
-      setError('이미 처리된 경기라 결과와 보상을 다시 기록하지 않았습니다.');
+      setError('이미 처리된 경기라 결과를 다시 기록하지 않았습니다.');
       return;
     }
 
     const next = recordResult(latestLeague, game.id, state.away.runs, state.home.runs);
     upsertLeague(next);
     void saveLeague(next);
-
-    const playerSide: Side = game.awayTeamId === team.id ? 'away' : 'home';
-    const mine = state[playerSide];
-    const theirs = state[playerSide === 'away' ? 'home' : 'away'];
-    const pts = gameRewardPoints({
-      won: state.winner === playerSide,
-      runsScored: mine.runs,
-      runsAllowed: theirs.runs,
-      isPlayerTeam: true,
-    });
-    const merged: Team = {
-      ...team,
-      players: distributeRewards(
-        team.players.map((p) => {
-          const g = mine.roster[p.id];
-          if (!g) return p;
-          return {
-            ...p,
-            season: {
-              ...p.season,
-              g: p.season.g + g.season.g,
-              pa: p.season.pa + g.season.pa,
-              ab: p.season.ab + g.season.ab,
-              h: p.season.h + g.season.h,
-              double: p.season.double + g.season.double,
-              triple: p.season.triple + g.season.triple,
-              hr: p.season.hr + g.season.hr,
-              rbi: p.season.rbi + g.season.rbi,
-              r: p.season.r + g.season.r,
-              bb: p.season.bb + g.season.bb,
-              so: p.season.so + g.season.so,
-              sb: p.season.sb + g.season.sb,
-              cs: p.season.cs + g.season.cs,
-              ip3: p.season.ip3 + g.season.ip3,
-              er: p.season.er + g.season.er,
-              pk: p.season.pk + g.season.pk,
-              pbb: p.season.pbb + g.season.pbb,
-              ph: p.season.ph + g.season.ph,
-              w:
-                p.season.w +
-                g.season.w +
-                (state.winner === playerSide && p.id === mine.pitcherId ? 1 : 0),
-              l:
-                p.season.l +
-                g.season.l +
-                (state.winner !== playerSide &&
-                state.winner !== 'TIE' &&
-                p.id === mine.pitcherId
-                  ? 1
-                  : 0),
-            },
-          };
-        }),
-        pts,
-      ),
-    };
-    upsertTeam(merged);
-    void saveTeam(merged);
-  }, [state, recorded, league, game, team, upsertLeague, upsertTeam, reset]);
+  }, [state, recorded, league, game, team, upsertLeague, reset]);
 
   if (error) {
     return (

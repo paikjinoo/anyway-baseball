@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { firebaseConfigured } from '@/lib/firebase/client';
 import { teamRating } from '@/lib/game/generator';
@@ -99,7 +100,12 @@ export default function RelayLobbyPage() {
         )}
       </section>
 
-      <p className="text-center text-xs text-slate-600">내 팀: {team.name} (전력 {teamRating(team)})</p>
+      <p className="text-center text-xs text-slate-600">
+        내 팀: {team.name} (전력 {teamRating(team)}) · 감독 이름: {user.displayName}{' '}
+        <Link href="/settings#profile" className="underline hover:text-slate-400">
+          변경
+        </Link>
+      </p>
     </div>
   );
 }

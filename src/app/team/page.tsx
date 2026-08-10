@@ -20,7 +20,6 @@ import { UniformPreview } from '@/components/ui/UniformPreview';
 export default function TeamPage() {
   const user = useAppStore((s) => s.user);
   const teams = useAppStore((s) => s.teams);
-  const activeTeamId = useAppStore((s) => s.activeTeamId);
   const setActiveTeam = useAppStore((s) => s.setActiveTeam);
   const upsertTeam = useAppStore((s) => s.upsertTeam);
   const removeTeam = useAppStore((s) => s.removeTeam);
@@ -39,8 +38,17 @@ export default function TeamPage() {
     [draft, active],
   );
 
+  /**
+   * 팀 창단. **유저당 한 팀만** 가질 수 있다.
+   * 골드와 인벤토리가 팀 문서에 붙어 있어서, 팀을 여러 개 만들 수 있으면 지갑을 늘려
+   * 보상을 중복으로 모을 수 있게 된다.
+   */
   async function createTeam() {
     if (!user) return;
+    if (teams.length > 0) {
+      setMsg('한 계정에는 팀을 하나만 만들 수 있습니다. 새로 시작하려면 기존 팀을 먼저 삭제하세요.');
+      return;
+    }
     const rng = new Rng(seedFromString(`${user.uid}-${Date.now()}`));
     const team = generateTeam(rng, { ownerUid: user.uid });
     setSaving(true);
@@ -76,8 +84,9 @@ export default function TeamPage() {
       <div className="panel mx-auto max-w-md p-8 text-center">
         <h1 className="mb-2 text-2xl font-bold">아직 팀이 없습니다</h1>
         <p className="mb-6 text-sm text-slate-400">
-          팀을 창단하면 23명의 선수가 자동으로 배정됩니다. 능력치는 무작위지만 총량이 균형 있게
-          맞춰집니다.
+          팀을 창단하면 투수 10명(선발 4 · 중간계투 5 · 마무리 1)과 타자 13명이 배정됩니다.
+          전원 C등급 1레벨에서 시작하며, 경기 경험치로 레벨을 올리고 골드로 티어를 강화합니다.
+          한 계정에 팀은 하나입니다.
         </p>
         <button className="btn btn-primary w-full" onClick={() => void createTeam()} disabled={saving}>
           {saving ? '창단 중…' : '팀 창단하기'}
@@ -95,22 +104,9 @@ export default function TeamPage() {
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="text-2xl font-black">팀 설정</h1>
         <div className="flex-1" />
-        {teams.length > 1 && (
-          <select
-            className="max-w-52"
-            value={activeTeamId ?? ''}
-            onChange={(e) => setActiveTeam(e.target.value)}
-          >
-            {teams.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name}
-              </option>
-            ))}
-          </select>
-        )}
-        <button className="btn !py-2 !text-xs" onClick={() => void createTeam()} disabled={saving}>
-          + 새 팀
-        </button>
+        <span className="rounded-lg bg-amber-500/15 px-3 py-1 text-sm font-bold text-amber-300">
+          {draft.gold.toLocaleString()} G
+        </span>
       </div>
 
       {msg && (

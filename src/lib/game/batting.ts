@@ -1,5 +1,5 @@
 import { Rng, clamp, lerp, norm } from './rng';
-import { BAT_DEFS, PITCH_DEFS, SWING_DEFS } from './constants';
+import { BAT_DEFS, BODY_BY_ID, PITCH_DEFS, SWING_DEFS } from './constants';
 import type { BattedBall, PitchTrajectory, Player, SwingCommand, Vec3 } from './types';
 import { GRAVITY, DRAG_K, LIFT_K, FENCE_HEIGHT, fenceDistance } from './constants';
 
@@ -12,18 +12,39 @@ export type SwingOutcome =
   | { kind: 'FOUL_TIP' }
   | { kind: 'CONTACT'; quality: number; timingErr: number; spatialErr: number };
 
-/** 장비 보정을 적용한 실효 능력치 */
+/**
+ * 체형 보정. 파워와 스피드를 맞바꾼다.
+ * 투수는 체형 선택이 없으므로 항상 0이다.
+ */
+export function bodyMod(p: Player): { power: number; speed: number } {
+  const def = BODY_BY_ID[p.body ?? 'NORMAL'];
+  if (!def || p.kind === 'PITCHER') return { power: 0, speed: 0 };
+  return { power: def.powerMod, speed: def.speedMod };
+}
+
+/**
+ * 체형 보정이 들어간 실효 스피드.
+ *
+ * 주루·수비 코드가 `p.batting.speed`를 직접 읽으면 체형 보정이 타격에만 걸리고 발에는
+ * 안 걸리는 반쪽짜리가 된다. 스피드를 보는 곳은 전부 이 함수를 지난다.
+ */
+export function effSpeed(p: Player): number {
+  return clamp(p.batting.speed + bodyMod(p).speed, 1, 99);
+}
+
+/** 장비·자세·체형 보정을 적용한 실효 능력치 */
 export function effectiveBatting(p: Player) {
   const bat = BAT_DEFS.find((b) => b.id === p.gear.bat);
   // 타격 자세 보정: 0 스탠다드 / 1 오픈 / 2 클로즈드 / 3 크라우칭 / 4 레그킥 / 5 노스텝
   const stanceContact = [0, -1, 1, 2, -2, 3][clamp(p.stance, 0, 5)];
   const stancePower = [0, 2, -1, -2, 4, -2][clamp(p.stance, 0, 5)];
   const stanceEye = [0, 1, 0, 2, -2, 1][clamp(p.stance, 0, 5)];
+  const body = bodyMod(p);
   return {
     contact: clamp(p.batting.contact + (bat?.contactMod ?? 0) + stanceContact, 1, 99),
-    power: clamp(p.batting.power + (bat?.powerMod ?? 0) + stancePower, 1, 99),
+    power: clamp(p.batting.power + (bat?.powerMod ?? 0) + stancePower + body.power, 1, 99),
     eye: clamp(p.batting.eye + stanceEye, 1, 99),
-    speed: p.batting.speed,
+    speed: effSpeed(p),
     fielding: p.batting.fielding,
     arm: p.batting.arm,
   };

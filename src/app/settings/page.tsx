@@ -1,7 +1,9 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { useAppStore } from '@/lib/store/appStore';
 import { RuleSettings } from '@/components/settings/RuleSettings';
+import { NICKNAME_MAX, normalizeNickname } from '@/lib/firebase/store';
 import {
   playBatCrack,
   playHomeRunCelebration,
@@ -16,6 +18,8 @@ export default function SettingsPage() {
   return (
     <div className="mx-auto max-w-2xl space-y-5">
       <h1 className="text-2xl font-black">게임 설정</h1>
+
+      <ManagerProfile />
 
       <section className="panel p-5">
         <h2 className="mb-4 font-bold">사운드</h2>
@@ -70,13 +74,18 @@ export default function SettingsPage() {
 
       <section className="panel p-5">
         <h2 className="mb-4 font-bold">연출</h2>
-        <label className="flex items-center justify-between">
-          <span className="text-sm font-semibold">카메라 흔들림</span>
+        <label className="flex items-center justify-between gap-3">
+          <span>
+            <span className="block text-sm font-semibold">카메라 흔들림</span>
+            <span className="block text-[11px] text-slate-500">
+              배트에 잘 맞은 순간 화면이 짧게 흔들립니다. 타구가 셀수록 크게 흔들립니다.
+            </span>
+          </span>
           <input
             type="checkbox"
             checked={settings.cameraShake}
             onChange={(e) => update({ cameraShake: e.target.checked })}
-            className="h-5 w-5 accent-lime-500"
+            className="h-5 w-5 shrink-0 accent-lime-500"
           />
         </label>
       </section>
@@ -85,6 +94,82 @@ export default function SettingsPage() {
         설정은 이 브라우저에 저장되며 새 경기부터 적용됩니다.
       </p>
     </div>
+  );
+}
+
+/**
+ * 감독 닉네임.
+ *
+ * 온라인 대전에서 상대에게 보이는 이름이라 구글 계정 이름을 그대로 쓰면 실명이 노출된다.
+ * 계정 이름 위에 덮어쓰고, 비우면 다시 계정 이름으로 돌아간다.
+ */
+function ManagerProfile() {
+  const user = useAppStore((s) => s.user);
+  const setNickname = useAppStore((s) => s.setNickname);
+  const current = user?.nickname ?? '';
+  const [draft, setDraft] = useState(current);
+
+  // 저장 결과(공백 정리 포함)와 다른 기기에서 온 변경을 입력칸에 되비친다.
+  useEffect(() => {
+    setDraft(current);
+  }, [user?.uid, current]);
+
+  if (!user) return null;
+
+  const trimmed = normalizeNickname(draft);
+  const dirty = trimmed !== current;
+
+  return (
+    <section className="panel p-5" id="profile">
+      <h2 className="mb-1 font-bold">감독 이름</h2>
+      <p className="mb-4 text-[11px] leading-relaxed text-slate-500">
+        온라인 대전의 방 목록과 대기 화면에서 상대에게 보이는 이름입니다.
+        {user.isGuest
+          ? ' 게스트 이름은 이 브라우저에만 저장됩니다.'
+          : ' 비워 두면 계정 이름을 그대로 씁니다.'}
+      </p>
+
+      <label className="field-label">닉네임</label>
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={draft}
+          maxLength={NICKNAME_MAX}
+          placeholder={user.accountName}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && dirty) setNickname(trimmed);
+          }}
+        />
+        <button
+          className="btn btn-primary shrink-0"
+          disabled={!dirty}
+          onClick={() => setNickname(trimmed)}
+        >
+          저장
+        </button>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
+        <span>
+          현재 표시 이름 <b className="text-slate-300">{user.displayName}</b>
+        </span>
+        {user.nickname && (
+          <>
+            <span aria-hidden>·</span>
+            <button
+              className="underline transition hover:text-slate-300"
+              onClick={() => setNickname(null)}
+            >
+              계정 이름({user.accountName})으로 되돌리기
+            </button>
+          </>
+        )}
+        <span className="ml-auto">
+          {trimmed.length}/{NICKNAME_MAX}
+        </span>
+      </div>
+    </section>
   );
 }
 

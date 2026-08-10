@@ -5,8 +5,19 @@ import { useRouter } from 'next/navigation';
 import { useActiveTeam, useAppStore } from '@/lib/store/appStore';
 import { Rng, seedFromString } from '@/lib/game/rng';
 import { generateTeam, teamRating } from '@/lib/game/generator';
-import { computeStandings, createLeague, nextGameFor, recordResult, simulateGame } from '@/lib/game/league';
-import { deleteLeague, getCachedTeam, saveLeague } from '@/lib/firebase/store';
+import {
+  computeStandings,
+  createLeague,
+  isLeagueComplete,
+  leagueFinishReward,
+  nextGameFor,
+  recordResult,
+  simulateGame,
+} from '@/lib/game/league';
+import { applyMatchResult, outcomeOf } from '@/lib/game/matchReward';
+import { addItems, ITEM_DEFS } from '@/lib/game/items';
+import { rosterIssues } from '@/lib/game/roster';
+import { deleteLeague, getCachedTeam, saveLeague, saveTeam } from '@/lib/firebase/store';
 import { TeamLogo } from '@/components/ui/TeamLogo';
 import { baseballRate } from '@/lib/format';
 import type { League, LeagueTeamRef, Team } from '@/lib/game/types';
@@ -20,6 +31,7 @@ export default function LeaguePage() {
   const leagues = useAppStore((s) => s.leagues);
   const upsertLeague = useAppStore((s) => s.upsertLeague);
   const removeLeague = useAppStore((s) => s.removeLeague);
+  const upsertTeam = useAppStore((s) => s.upsertTeam);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [cpuCount, setCpuCount] = useState(5);
@@ -37,6 +49,12 @@ export default function LeaguePage() {
     ? (allTeams.find((t) => t.id === leaguePlayerRef?.teamId) ?? null)
     : activeTeam;
   const standings = useMemo(() => (league ? computeStandings(league) : []), [league]);
+  const issues = useMemo(
+    () => (team ? rosterIssues(team, settings.useDH) : []),
+    [team, settings.useDH],
+  );
+  /** 일정이 모두 끝났는가. 끝난 리그에서는 더 칠 경기가 없다. */
+  const done = !!league && isLeagueComplete(league);
 
   async function create() {
     if (!user || !activeTeam) return;
@@ -128,10 +146,61 @@ export default function LeaguePage() {
       const next = recordResult(withOthers, g.id, r.awayScore, r.homeScore);
       await saveLeague(next);
       upsertLeague(next);
-      setMsg(`${a.abbr} ${r.awayScore} : ${r.homeScore} ${h.abbr} (자동 진행)`);
+
+      // 자동 진행도 직접 플레이와 똑같이 보상과 시즌 기록을 남긴다.
+      const mySide = g.awayTeamId === team.id ? 'away' : 'home';
+      const mine = r.state[mySide];
+      const theirs = r.state[mySide === 'away' ? 'home' : 'away'];
+      const reward = applyMatchResult(team, mine, {
+        kind: 'LEAGUE',
+        difficulty: 'NORMAL',
+        outcome: outcomeOf(r.state.winner, mySide),
+        runsScored: mine.runs,
+        runsAllowed: theirs.runs,
+        seed: r.state.rngState,
+        recordSeason: true,
+        decisionPitcherId: mine.pitcherId,
+      });
+      upsertTeam(reward.team);
+      void saveTeam(reward.team);
+      setMsg(
+        `${a.abbr} ${r.awayScore} : ${r.homeScore} ${h.abbr} (자동 진행) · +${reward.gold.toLocaleString()}G`,
+      );
     }
     setBusy(false);
   }
+
+  /**
+   * 리그가 끝났으면 1~3위에게 골드와 아이템을 지급한다.
+   * League.rewardedAt으로 한 번만 준다. 아이템이 나오는 유일한 경로다.
+   */
+  useEffect(() => {
+    if (!league || !team) return;
+    if (!isLeagueComplete(league) || league.rewardedAt) return;
+    const prize = leagueFinishReward(league, team.id);
+
+    const closed: League = { ...league, status: 'FINISHED', rewardedAt: Date.now() };
+    upsertLeague(closed);
+    void saveLeague(closed);
+
+    if (!prize) {
+      setMsg('리그가 끝났습니다. 3위 안에 들지 못해 종료 보상은 없습니다.');
+      return;
+    }
+    const rewarded: Team = {
+      ...team,
+      gold: team.gold + prize.gold,
+      inventory: addItems(team.inventory, prize.items),
+    };
+    upsertTeam(rewarded);
+    void saveTeam(rewarded);
+    const itemText = Object.entries(prize.items)
+      .map(([id, n]) => `${ITEM_DEFS[id as keyof typeof ITEM_DEFS].ko} ×${n}`)
+      .join(', ');
+    setMsg(
+      `리그 ${prize.rank}위! +${prize.gold.toLocaleString()}G${itemText ? ` · ${itemText}` : ''}`,
+    );
+  }, [league, team, upsertLeague, upsertTeam]);
 
   if (!user || !team) {
     return <div className="py-20 text-center text-slate-500">팀이 필요합니다.</div>;
@@ -209,11 +278,24 @@ export default function LeaguePage() {
               <span className="text-xs text-slate-500">
                 {league.schedule.filter((g) => g.status === 'FINAL').length} / {league.schedule.length}경기 완료
               </span>
+              {done && (
+                <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[11px] font-bold text-amber-300">
+                  종료
+                </span>
+              )}
               <div className="flex-1" />
-              <button className="btn btn-primary !py-1.5 !text-xs" onClick={() => void playNext()} disabled={busy}>
+              <button
+                className="btn btn-primary !py-1.5 !text-xs"
+                onClick={() => void playNext()}
+                disabled={busy || issues.length > 0 || done}
+              >
                 다음 경기 플레이
               </button>
-              <button className="btn !py-1.5 !text-xs" onClick={() => void simulateMyGame()} disabled={busy}>
+              <button
+                className="btn !py-1.5 !text-xs"
+                onClick={() => void simulateMyGame()}
+                disabled={busy || issues.length > 0 || done}
+              >
                 자동 진행
               </button>
               <button
@@ -228,6 +310,20 @@ export default function LeaguePage() {
                 삭제
               </button>
             </div>
+
+            {issues.length > 0 && (
+              <div className="mb-4 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3">
+                <p className="mb-1 text-xs font-bold text-rose-300">선수단 편성을 먼저 마쳐야 합니다</p>
+                <ul className="space-y-0.5 text-[11px] text-rose-200/90">
+                  {issues.map((m) => (
+                    <li key={m}>· {m}</li>
+                  ))}
+                </ul>
+                <button className="btn mt-2 !py-1 !text-[11px]" onClick={() => router.push('/roster')}>
+                  선수단으로 이동
+                </button>
+              </div>
+            )}
 
             <div className="overflow-x-auto">
               <table className="w-full text-sm tabular">

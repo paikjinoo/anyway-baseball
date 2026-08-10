@@ -1,6 +1,7 @@
 import { Rng, clamp, lerp, norm } from './rng';
 import { BASE_COORDS, DEFENSE_SPOTS, GLOVE_DEFS, MOUND_DISTANCE, fenceDistance } from './constants';
 import type { BattedBall, FieldPlay, Player, Position, Vec3 } from './types';
+import { effSpeed } from './batting';
 
 const INFIELD: Position[] = ['P', 'C', '1B', '2B', '3B', 'SS'];
 const OUTFIELD: Position[] = ['LF', 'CF', 'RF'];
@@ -11,7 +12,7 @@ function dist2d(a: Vec3, b: Vec3): number {
 
 /** 야수의 이동 속도 (m/s). 스피드 + 수비 능력치. */
 function rangeSpeed(p: Player): number {
-  const s = norm(p.batting.speed);
+  const s = norm(effSpeed(p));
   const f = norm(p.batting.fielding);
   return lerp(6.2, 9.0, s * 0.6 + f * 0.4);
 }
@@ -34,7 +35,7 @@ function reactionTime(p: Player, pos?: Position): number {
  * 이만큼을 더 커버한다. 이 값이 없으면 타구선에 몸을 정확히 갖다 놓아야만
  * 아웃이 되어 내야 안타가 폭증한다.
  */
-const GLOVE_REACH = 1.45;
+const GLOVE_REACH = 1.25;
 
 /**
  * 정지 상태에서 거리 d(m)를 이동하는 데 걸리는 시간 (s).
@@ -46,7 +47,7 @@ const GLOVE_REACH = 1.45;
 function travelTime(p: Player, d: number): number {
   if (d <= 0) return 0;
   const vmax = rangeSpeed(p);
-  const a = 4.9 + norm(p.batting.speed) * 2.1; // 4.9 ~ 7.0 m/s^2
+  const a = 4.9 + norm(effSpeed(p)) * 2.1; // 4.9 ~ 7.0 m/s^2
   const dAcc = (vmax * vmax) / (2 * a);
   if (d <= dAcc) return Math.sqrt((2 * d) / a);
   return vmax / a + (d - dAcc) / vmax;
@@ -294,9 +295,14 @@ function resolveGrounder(rng: Rng, bb: BattedBall, defense: DefenseMap): FieldPl
 
   const positions = [...INFIELD, ...OUTFIELD] as Position[];
 
-  while (t < 8 && travelled < 130) {
+  // 구르는 공은 담장에서 멈춘다. 이 한계가 없으면 공이 담장 뒤 130m까지 굴러가고
+  // 외야수가 거기까지 쫓아가느라 확보가 6.4초로 늘어져, 2루타가 될 타구가
+  // 전부 3루타가 된다 (경기당 0.70 — MLB는 0.14).
+  const maxRoll = fenceDistance((bb.sprayAngle * Math.PI) / 180);
+
+  while (t < 8 && travelled < maxRoll) {
     speed = Math.max(2.4, speed - 4.4 * dt);
-    travelled += speed * dt;
+    travelled = Math.min(travelled + speed * dt, maxRoll);
     t += dt;
     const point: Vec3 = { x: dir.x * travelled, y: 0, z: dir.z * travelled };
 
@@ -368,19 +374,27 @@ function throwFlight(d: number, v0: number): number {
   return (Math.exp(k * d) - 1) / (k * v0);
 }
 
+/** 커트맨이 공을 받아 다시 던지기까지 (s) */
+const RELAY_TRANSFER = 0.8;
+
 /**
  * 확보 지점에서 특정 베이스로 송구가 도달하는 시각.
- * 거리가 멀면 중계 플레이가 끼어 추가 시간이 든다.
+ *
+ * 먼 거리는 커트맨을 중간에 두고 절반씩 두 번 던진다. 항력이 거리에 지수로
+ * 붙기 때문에(v = v0·e^(-kd)) 아주 먼 송구는 나눠 던지는 쪽이 실제로 더 빠르다.
+ * 야수는 둘 중 빠른 쪽을 고른다.
+ *
+ * 예전에는 "한 번에 던진 시간 + 중계 페널티"로 계산했다. 이건 두 선택지의
+ * 나쁜 쪽만 합친 값이라 담장 앞 타구의 송구가 0.85초씩 늦어졌고, 2루타가 될
+ * 타구가 전부 3루타로 기록됐다 (경기당 0.52 — MLB는 0.14).
  */
 export function throwArrivalTime(play: FieldPlay, baseIndex: number): number {
   const target = BASE_COORDS[baseIndex];
   const d = Math.hypot(play.securePoint.x - target.x, play.securePoint.z - target.z);
-  let time = play.secureTime + play.transferTime + throwFlight(d, play.throwSpeed);
-  if (d > 50) {
-    // 중계 플레이 1회 (커트맨 포구 + 재송구 동작)
-    time += 0.85;
-  }
-  return time;
+  const direct = throwFlight(d, play.throwSpeed);
+  const relay =
+    d > 50 ? throwFlight(d / 2, play.throwSpeed) * 2 + RELAY_TRANSFER : Number.POSITIVE_INFINITY;
+  return play.secureTime + play.transferTime + Math.min(direct, relay);
 }
 
 export { INFIELD, OUTFIELD, rangeSpeed, throwSpeed, effFielding };

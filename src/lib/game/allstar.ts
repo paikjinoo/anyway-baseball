@@ -14,6 +14,7 @@
 import { Rng } from './rng';
 import { hitterScore, pitcherScore } from './generator';
 import type { OwnerMap, PartyPicks } from '../net/protocol';
+import { TEAM_SCHEMA_VERSION } from './types';
 import type { Player, Position, Side, Team } from './types';
 
 /** slot별로 골라야 하는 야수 수. 합쳐서 9명. */
@@ -199,7 +200,7 @@ export function buildAllStarTeam(
     const inLineup = new Set(lineup);
     for (const p of players) {
       if (lineup.length >= 9) break;
-      if (!inLineup.has(p.id) && p.position !== 'P') {
+      if (!inLineup.has(p.id) && p.kind === 'BATTER') {
         lineup.push(p.id);
         inLineup.add(p.id);
       }
@@ -213,6 +214,7 @@ export function buildAllStarTeam(
   const now = Date.now();
   const team: Team = {
     id: `allstar-${side}`,
+    schemaVersion: TEAM_SCHEMA_VERSION,
     ownerUid: first.uid,
     name: `${first.team.name} · ${second.team.name}`,
     abbr: first.team.abbr,
@@ -225,6 +227,10 @@ export function buildAllStarTeam(
     players,
     lineup: lineup.slice(0, 9),
     rotation,
+    rotationIndex: 0,
+    // 올스타 팀은 즉석에서 만들어지는 임시 팀이라 재화를 갖지 않는다.
+    gold: 0,
+    inventory: {},
     createdAt: now,
     updatedAt: now,
   };

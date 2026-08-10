@@ -42,11 +42,29 @@ function attrOf(pitcher: Player, type: PitchCommand['type']) {
   );
 }
 
+/**
+ * 이 투수가 완전히 회복된 상태에서 버틸 수 있는 투구 수.
+ * 스태미나 100이면 약 112구.
+ */
+export function pitchCapacity(pitcher: Player): number {
+  return 34 + (pitcher.pitching?.stamina ?? 40) * 0.78;
+}
+
+/**
+ * 이번 경기 투구 수에 **경기 사이에 이월된 피로**를 더한 유효 투구 수.
+ *
+ * Player.fatigue(0~1)는 지난 경기에서 남은 피로다. 1이면 던지기도 전에 한계에 도달한 상태로
+ * 마운드에 오른다. 이 한 줄로 아래 fatigueOf/staminaRemaining을 쓰는 모든 곳
+ * (HUD 게이지, CPU 교체 판단, pitcherIsTired, 3D 씬)이 함께 따라온다.
+ */
+function effectivePitches(pitcher: Player, pitchesThrown: number): number {
+  return pitchesThrown + (pitcher.fatigue ?? 0) * pitchCapacity(pitcher);
+}
+
 /** 투구 수에 따른 피로도 (0~1). 스태미나 100 기준 약 110구까지 버틴다. */
 function fatigueOf(pitcher: Player, pitchesThrown: number): number {
-  const stamina = pitcher.pitching?.stamina ?? 40;
-  const capacity = 34 + stamina * 0.78;
-  return clamp((pitchesThrown - capacity * 0.6) / capacity, 0, 1);
+  const capacity = pitchCapacity(pitcher);
+  return clamp((effectivePitches(pitcher, pitchesThrown) - capacity * 0.6) / capacity, 0, 1);
 }
 
 /**
@@ -239,11 +257,9 @@ export function arsenalOf(p: Player) {
     .map((k) => ({ type: k!, attr: a[k]!, def: PITCH_DEFS[k!] }));
 }
 
-/** 남은 스태미나 비율 (0~1) */
+/** 남은 스태미나 비율 (0~1). 경기 사이에 이월된 피로가 이미 반영돼 있다. */
 export function staminaRemaining(pitcher: Player, pitches: number): number {
-  const stamina = pitcher.pitching?.stamina ?? 40;
-  const capacity = 34 + stamina * 0.78;
-  return clamp(1 - pitches / capacity, 0, 1);
+  return clamp(1 - effectivePitches(pitcher, pitches) / pitchCapacity(pitcher), 0, 1);
 }
 
 export { ZONE_HALF_WIDTH, ZONE_HALF_HEIGHT, worldToZone };

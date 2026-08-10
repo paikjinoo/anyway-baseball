@@ -35,7 +35,7 @@ export default function PlayIndexPage() {
         <ModeCard
           href="/play/cpu"
           title="CPU 대전"
-          desc="난이도를 골라 컴퓨터 팀과 한 경기를 치릅니다. 승리하면 훈련 포인트를 받습니다."
+          desc="난이도를 골라 컴퓨터 팀과 한 경기를 치릅니다. 난이도가 높을수록 경험치와 골드를 많이 받습니다."
           cta="경기 시작"
         />
         <ModeCard

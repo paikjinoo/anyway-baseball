@@ -1,9 +1,24 @@
 import { Rng, seedFromString } from './rng';
-import { createGame, currentBatter, preparePitch, resolvePitch } from './engine';
-import { cpuOffenseCommand, decidePitch, decideSteal, decideSwing, type Difficulty } from './ai';
+import {
+  bullpenCandidates,
+  changePitcher,
+  createGame,
+  currentBatter,
+  preparePitch,
+  resolvePitch,
+} from './engine';
+import {
+  cpuOffenseCommand,
+  decidePitch,
+  decideSteal,
+  decideSwing,
+  shouldChangePitcher,
+  type Difficulty,
+} from './ai';
 import type {
   GameSettings,
   GameState,
+  Inventory,
   League,
   LeagueGame,
   LeagueTeamRef,
@@ -204,6 +219,14 @@ export function simulateGame(
     guard++;
     if (state.phase === 'INNING_BREAK') state.phase = 'SETUP';
 
+    // 지친 투수는 내린다. 이게 없으면 선발이 9이닝을 완투하며 140구를 던지고,
+    // 후반에 제구가 무너져 볼넷과 득점이 실제보다 크게 부풀려진다.
+    const defSide = state.half === 'TOP' ? 'home' : 'away';
+    if (shouldChangePitcher(state, difficulty)) {
+      const relief = bullpenCandidates(state, defSide)[0];
+      if (relief) state = changePitcher(state, defSide, relief.id);
+    }
+
     const pitchCmd = decidePitch(state, aiRng, difficulty);
     const steal = decideSteal(state, aiRng, difficulty);
     const traj = preparePitch(state, pitchCmd);
@@ -255,12 +278,61 @@ export function recordResult(
   awayScore: number,
   homeScore: number,
 ): League {
-  return {
+  const next: League = {
     ...league,
     schedule: league.schedule.map((g) =>
       g.id === gameId && g.status === 'SCHEDULED'
         ? { ...g, status: 'FINAL' as const, awayScore, homeScore, playedAt: Date.now() }
         : g,
     ),
+  };
+  // 마지막 경기가 끝나면 리그를 닫는다. 지금까지는 status가 영원히 ACTIVE로 남아
+  // 우승도 보상도 없이 일정만 소진됐다.
+  if (next.status === 'ACTIVE' && isLeagueComplete(next)) next.status = 'FINISHED';
+  return next;
+}
+
+// ---------------------------------------------------------------------------
+// 리그 종료 보상
+//
+// 아이템이 나오는 유일한 경로다. 경기 보상은 경험치와 골드뿐이고, 아이템은 리그를
+// 끝까지 마쳐 1~3위 안에 들어야 받는다.
+// ---------------------------------------------------------------------------
+
+export function isLeagueComplete(l: League): boolean {
+  return l.schedule.length > 0 && l.schedule.every((g) => g.status === 'FINAL');
+}
+
+/** 1위 / 2위 / 3위 골드 */
+export const LEAGUE_PLACE_GOLD = [12000, 6000, 3000];
+
+/** 1위 / 2위 / 3위 아이템 */
+export const LEAGUE_PLACE_ITEMS: Inventory[] = [
+  { EXP_XL: 1, EXP_L: 2, RESET_STATS: 1, CURE_INJURY: 2, STAMINA_TONIC: 2 },
+  { EXP_L: 2, EXP_M: 2, CURE_INJURY: 1, STAMINA_TONIC: 1 },
+  { EXP_M: 2, EXP_S: 3, STAMINA_TONIC: 1 },
+];
+
+export interface LeagueFinishReward {
+  rank: number;
+  total: number;
+  gold: number;
+  items: Inventory;
+}
+
+/**
+ * 리그가 끝났을 때 이 팀이 받을 보상. 4위 이하이거나 아직 안 끝났으면 null.
+ * 한 번만 지급하도록 League.rewardedAt으로 막는 건 호출한 쪽의 책임이다.
+ */
+export function leagueFinishReward(league: League, teamId: string): LeagueFinishReward | null {
+  if (!isLeagueComplete(league)) return null;
+  const rows = computeStandings(league);
+  const idx = rows.findIndex((r) => r.teamId === teamId);
+  if (idx < 0 || idx >= LEAGUE_PLACE_GOLD.length) return null;
+  return {
+    rank: idx + 1,
+    total: rows.length,
+    gold: LEAGUE_PLACE_GOLD[idx],
+    items: LEAGUE_PLACE_ITEMS[idx],
   };
 }

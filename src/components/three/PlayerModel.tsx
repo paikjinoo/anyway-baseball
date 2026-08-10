@@ -4,6 +4,7 @@ import { useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { clamp } from '@/lib/game/rng';
+import { BODY_BY_ID } from '@/lib/game/constants';
 import type { AccessoryType, BatType, GloveType, Player, UniformType } from '@/lib/game/types';
 
 export interface UniformSpec {
@@ -1491,7 +1492,16 @@ export function PlayerModel({
   });
 
   /**
-   * 뼈대 JSX는 장비/유니폼이 바뀔 때만 다시 만든다. 부모가 매 프레임 리렌더해도
+   * 체형에 따른 몸통·팔다리 두께 배율.
+   *
+   * 굵기만 바꾸고 **키와 머리 비율은 그대로 둔다.** 골격 상수(THIGH/SHIN/UPPER_ARM/BODY/
+   * HEAD_K)는 포즈·IK와 한 세트로 튜닝돼 있어서, 키를 건드리면 스트라이크존(0.45~1.06m)
+   * 정렬과 카메라가 함께 깨진다.
+   */
+  const girth = player.kind === 'PITCHER' ? 1 : (BODY_BY_ID[player.body ?? 'NORMAL']?.girth ?? 1);
+
+  /**
+   * 뼈대 JSX는 장비/유니폼/체형이 바뀔 때만 다시 만든다. 부모가 매 프레임 리렌더해도
    * 같은 엘리먼트를 돌려주면 React가 하위 트리 재조정을 통째로 건너뛴다.
    * (포즈는 어차피 프레임 루프에서 오브젝트에 직접 쓴다)
    */
@@ -1501,16 +1511,21 @@ export function PlayerModel({
       <group scale={BODY}>
         {/* 골반 */}
         <group ref={setRef.hip}>
-          <Leg refs={j.current.legL} sign={-1} mat={mat} />
-          <Leg refs={j.current.legR} sign={1} mat={mat} />
+          <Leg refs={j.current.legL} sign={-1} mat={mat} girth={girth} />
+          <Leg refs={j.current.legR} sign={1} mat={mat} girth={girth} />
           {/* 엉덩이 볼륨 */}
-          <mesh position={[0, -0.055, 0]} castShadow material={mat.pants} scale={[1, 0.9, 0.9]}>
+          <mesh
+            position={[0, -0.055, 0]}
+            castShadow
+            material={mat.pants}
+            scale={[girth, 0.9, 0.9 * girth]}
+          >
             <sphereGeometry args={[0.163, 14, 10]} />
           </mesh>
 
           {/* 몸통 */}
           <group position={[0, TORSO_Y, 0]} ref={setRef.torso}>
-            <mesh castShadow material={jersey} scale={[1, 1, 0.86]}>
+            <mesh castShadow material={jersey} scale={[girth, 1, 0.86 * girth]}>
               <capsuleGeometry args={[TORSO_R, TORSO_LEN, 6, 20]} />
             </mesh>
             {/* 등번호 */}
@@ -1518,7 +1533,7 @@ export function PlayerModel({
               <mesh
                 position={[0, 0.035, 0]}
                 material={numberMat}
-                scale={[1, 1, 0.86]}
+                scale={[girth, 1, 0.86 * girth]}
                 renderOrder={1}
               >
                 <cylinderGeometry
@@ -1527,11 +1542,11 @@ export function PlayerModel({
               </mesh>
             )}
             {/* 앞섶 */}
-            <mesh position={[0, 0.0, 0.172]} material={mat.accent}>
+            <mesh position={[0, 0.0, 0.172 * girth]} material={mat.accent}>
               <boxGeometry args={[0.028, 0.3, 0.012]} />
             </mesh>
             {/* 벨트 */}
-            <mesh position={[0, -0.165, 0]} material={mat.dark} scale={[1, 1, 0.86]}>
+            <mesh position={[0, -0.165, 0]} material={mat.dark} scale={[girth, 1, 0.86 * girth]}>
               <cylinderGeometry args={[TORSO_R + 0.002, TORSO_R + 0.002, 0.075, 20]} />
             </mesh>
             {/* 옷깃 */}
@@ -1539,13 +1554,13 @@ export function PlayerModel({
               position={[0, 0.185, 0]}
               rotation={[Math.PI / 2, 0, 0]}
               material={mat.accent}
-              scale={[1, 0.86, 1]}
+              scale={[girth, 0.86 * girth, 1]}
             >
               <torusGeometry args={[0.1, 0.021, 6, 18]} />
             </mesh>
 
-            <Arm refs={j.current.armL} sign={-1} mat={mat} accessory={player.gear.accessory} />
-            <Arm refs={j.current.armR} sign={1} mat={mat} accessory={player.gear.accessory} />
+            <Arm refs={j.current.armL} sign={-1} mat={mat} accessory={player.gear.accessory} girth={girth} />
+            <Arm refs={j.current.armR} sign={1} mat={mat} accessory={player.gear.accessory} girth={girth} />
 
             {/* 장비는 몸통에 붙여 두 손이 같은 지점을 잡게 한다.
                 visible은 프레임 루프에서 켜고 끄므로 JSX prop으로 주면 안 된다
@@ -1564,11 +1579,11 @@ export function PlayerModel({
                   position={[0, 0.16, 0.01]}
                   rotation={[Math.PI / 2 + 0.22, 0, 0]}
                   material={mat.accent}
-                  scale={[1, 0.86, 1]}
+                  scale={[girth, 0.86 * girth, 1]}
                 >
                   <torusGeometry args={[0.2, 0.011, 6, 22]} />
                 </mesh>
-                <mesh position={[0, 0.12, 0.178]} material={mat.accent}>
+                <mesh position={[0, 0.12, 0.178 * girth]} material={mat.accent}>
                   <sphereGeometry args={[0.025, 8, 6]} />
                 </mesh>
               </>
@@ -1592,7 +1607,7 @@ export function PlayerModel({
       </group>
     </group>
     ),
-    [setRef, jersey, mat, numberMat, head, player.gear, j],
+    [setRef, jersey, mat, numberMat, head, player.gear, girth, j],
   );
 }
 
@@ -1653,18 +1668,20 @@ function apply(
 }
 
 /** 허벅지 - 무릎 - 정강이 - 발 */
-function Leg({ refs, sign, mat }: { refs: LegRefs; sign: number; mat: Mats }) {
+function Leg({ refs, sign, mat, girth }: { refs: LegRefs; sign: number; mat: Mats; girth: number }) {
+  // 길이(THIGH/SHIN)는 그대로 두고 굵기만 바꾼다. 길이를 건드리면 IK와 포즈가 어긋난다.
+  const w: [number, number, number] = [girth, 1, girth];
   return (
     <group position={[sign * HIP_X, 0, 0]} ref={(g) => void (refs.hip = g)}>
-      <mesh castShadow position={[0, -THIGH / 2 + 0.02, 0]} material={mat.pants}>
+      <mesh castShadow position={[0, -THIGH / 2 + 0.02, 0]} material={mat.pants} scale={w}>
         <capsuleGeometry args={[0.105, THIGH - 0.2, 5, 12]} />
       </mesh>
       <group position={[0, -THIGH, 0]} ref={(g) => void (refs.knee = g)}>
         {/* 무릎 위까지 오는 니커 팬츠 + 스타킹 */}
-        <mesh castShadow position={[0, -0.07, 0]} material={mat.pants}>
+        <mesh castShadow position={[0, -0.07, 0]} material={mat.pants} scale={w}>
           <capsuleGeometry args={[0.093, 0.06, 5, 12]} />
         </mesh>
-        <mesh castShadow position={[0, -SHIN / 2 - 0.03, 0]} material={mat.sock}>
+        <mesh castShadow position={[0, -SHIN / 2 - 0.03, 0]} material={mat.sock} scale={w}>
           <capsuleGeometry args={[0.082, SHIN - 0.19, 5, 12]} />
         </mesh>
         <group position={[0, -SHIN - 0.01, 0.03]} ref={(g) => void (refs.ankle = g)}>
@@ -1687,23 +1704,26 @@ function Arm({
   sign,
   mat,
   accessory,
+  girth,
 }: {
   refs: ArmRefs;
   sign: number;
   mat: Mats;
   accessory: AccessoryType;
+  girth: number;
 }) {
+  const w: [number, number, number] = [girth, 1, girth];
   return (
     <group position={[sign * SHOULDER_X, SHOULDER_Y, 0]} ref={(g) => void (refs.shoulder = g)}>
       {/* 어깨 이음새 */}
-      <mesh castShadow material={mat.sleeve}>
+      <mesh castShadow material={mat.sleeve} scale={girth}>
         <sphereGeometry args={[0.088, 12, 10]} />
       </mesh>
-      <mesh castShadow position={[0, -UPPER_ARM / 2, 0]} material={mat.sleeve}>
+      <mesh castShadow position={[0, -UPPER_ARM / 2, 0]} material={mat.sleeve} scale={w}>
         <capsuleGeometry args={[0.075, UPPER_ARM - 0.15, 5, 12]} />
       </mesh>
       {/* 소매 끝단 */}
-      <mesh position={[0, -UPPER_ARM + 0.035, 0]} material={mat.accent}>
+      <mesh position={[0, -UPPER_ARM + 0.035, 0]} material={mat.accent} scale={w}>
         <cylinderGeometry args={[0.077, 0.074, 0.04, 12]} />
       </mesh>
       <group position={[0, -UPPER_ARM, 0]} ref={(g) => void (refs.elbow = g)}>

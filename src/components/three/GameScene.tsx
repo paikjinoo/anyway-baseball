@@ -43,6 +43,7 @@ import {
   useMatchStore,
   WINDUP_MS,
 } from '@/lib/store/matchStore';
+import { useAppStore } from '@/lib/store/appStore';
 import { currentBatter, currentPitcher, defenseTeam, offense } from '@/lib/game/engine';
 import type { GameState, Player, Position, Vec3 } from '@/lib/game/types';
 
@@ -692,11 +693,28 @@ const BASE_FOV = 42;
 /** 이 가로세로비에서 구장 전체가 딱 들어오도록 스카이뷰를 맞춰 두었다 */
 const SKY_REF_ASPECT = 1.6;
 
+/**
+ * 배트 임팩트 카메라 흔들림.
+ *
+ * 위치가 아니라 **시선을 흔든다.** 카메라를 밀면 스카이뷰처럼 멀리서 잡는 샷에서는
+ * 같은 거리를 밀어도 화면에서 거의 보이지 않는데, 각도로 흔들면 어느 샷에서나
+ * 같은 세기로 전달된다.
+ */
+const SHAKE_MS = 420;
+/** 최대 진폭 (rad). 이보다 키우면 타구를 눈으로 쫓기가 어려워진다. */
+const SHAKE_MAX_RAD = 0.012;
+/** 이 타구속도(km/h)부터 흔들리기 시작해, 여기에 SHAKE_EV_RANGE를 더한 지점에서 최대가 된다 */
+const SHAKE_EV_FLOOR = 95;
+const SHAKE_EV_RANGE = 70;
+
 function CameraRig({ mode }: { mode: CameraMode }) {
   const { camera } = useThree();
   const target = useRef(new THREE.Vector3(0, 1, 18));
   const desired = useRef(new THREE.Vector3(0, 2.2, -6));
   const prevShot = useRef('');
+  /** 흔들림이 시작되는 시각 (= 공이 배트에 닿는 순간). 0이면 대기 중. */
+  const shakeAt = useRef(0);
+  const shakeAmp = useRef(0);
 
   useFrame((rs, delta) => {
     const s = useMatchStore.getState();
@@ -780,6 +798,32 @@ function CameraRig({ mode }: { mode: CameraMode }) {
     }
     camera.position.copy(desired.current);
     camera.lookAt(target.current);
+
+    // --- 타구 임팩트 흔들림 ---------------------------------------------
+    // resultStartAt은 공이 홈플레이트에 닿는 시각이라 그대로 임팩트 순간이다.
+    // (연출을 확정하는 시점보다 뒤일 수 있어, 그때까지는 아래 el이 음수라 쉰다)
+    if (s.phase === 'RESULT' && s.lastResult?.contact && s.resultStartAt !== shakeAt.current) {
+      const ev = s.lastResult.battedBall?.exitVelocity ?? 0;
+      // 빗맞은 공은 흔들리지 않는다. 세기가 결과를 알려 주면 안 되므로
+      // 타구속도만 보고, 안타인지 아웃인지는 보지 않는다.
+      shakeAmp.current = SHAKE_MAX_RAD * clamp((ev - SHAKE_EV_FLOOR) / SHAKE_EV_RANGE, 0, 1);
+      shakeAt.current = s.resultStartAt;
+    }
+    const el = performance.now() - shakeAt.current;
+    if (
+      shakeAmp.current > 0 &&
+      el >= 0 &&
+      el < SHAKE_MS &&
+      useAppStore.getState().settings.cameraShake
+    ) {
+      // 맞는 순간이 가장 세고 빠르게 잦아든다
+      const amp = shakeAmp.current * (1 - el / SHAKE_MS) ** 2;
+      const t = el / 1000;
+      // 주기가 서로 안 맞는 세 파장을 겹쳐 규칙적인 진동으로 보이지 않게 한다
+      camera.rotateX(Math.sin(t * 61) * amp);
+      camera.rotateY(Math.sin(t * 43 + 1.3) * amp * 0.8);
+      camera.rotateZ(Math.sin(t * 37 + 2.1) * amp * 0.6);
+    }
 
     const cam = camera as THREE.PerspectiveCamera;
     if (cam.isPerspectiveCamera && Math.abs(cam.fov - fov) > 0.01) {

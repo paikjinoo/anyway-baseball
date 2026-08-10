@@ -1,18 +1,24 @@
 import { Rng, clamp } from './rng';
 import { LEARNABLE_PITCHES, PITCH_DEFS } from './constants';
+import { TIER_KO, canLearnMorePitches, pitchSlots, pitchSlotsUsed, statCap } from './progression';
 import type { BattingAttr, PitchAttr, PitchType, Player } from './types';
 
 /**
  * 훈련 시스템.
  *
- * 능력치는 잠재력(potential)을 상한으로 하며, 현재 값이 높을수록 1포인트를 올리는
- * 비용이 급격히 증가한다. 덕분에 한 선수에게 몰빵해도 만능이 되지 않고,
- * 여러 선수를 고르게 키우는 편이 효율적이다.
+ * 능력치 상한은 **티어 상한과 선수 고유 잠재력 중 낮은 쪽**(progression.statCap)이며,
+ * 현재 값이 높을수록 1포인트를 올리는 비용이 급격히 증가한다. 덕분에 한 선수에게 몰빵해도
+ * 만능이 되지 않고, 상한에 막히면 티어를 올려야 다시 자란다.
+ *
+ * 훈련 포인트는 이제 경기 보상이 아니라 **레벨업으로만** 들어온다 (progression.grantExp).
  */
 
-/** 능력치를 현재 값에서 1 올리는 데 드는 훈련 포인트 */
-export function statUpgradeCost(current: number, potential: number): number {
-  if (current >= potential) return Infinity;
+/**
+ * 능력치를 현재 값에서 1 올리는 데 드는 훈련 포인트.
+ * `cap`에는 progression.statCap(player)를 넘긴다 (티어 상한 ∧ 잠재력).
+ */
+export function statUpgradeCost(current: number, cap: number): number {
+  if (current >= cap) return Infinity;
   // 40 이하 저렴, 70부터 급증, 90 이상은 매우 비쌈
   const base = 2;
   const curve = Math.pow(Math.max(0, current - 35) / 12, 2.15);
@@ -20,15 +26,15 @@ export function statUpgradeCost(current: number, potential: number): number {
 }
 
 /** 구종 능력치 1 올리는 비용. 난이도가 높은 구종일수록 비싸다. */
-export function pitchUpgradeCost(current: number, potential: number, type: PitchType): number {
-  const c = statUpgradeCost(current, potential);
+export function pitchUpgradeCost(current: number, cap: number, type: PitchType): number {
+  const c = statUpgradeCost(current, cap);
   if (!Number.isFinite(c)) return c;
   return Math.max(2, Math.round(c * (0.85 + PITCH_DEFS[type].difficulty * 0.28)));
 }
 
 /** 새 구종 습득 비용 */
 export function learnPitchCost(type: PitchType, pitcher: Player): number {
-  const owned = Object.keys(pitcher.pitching?.arsenal ?? {}).length;
+  const owned = pitchSlotsUsed(pitcher);
   const base = 90 * PITCH_DEFS[type].difficulty;
   // 이미 많은 구종을 가진 투수는 추가 습득이 비싸다
   return Math.round(base * (1 + (owned - 1) * 0.35));
@@ -93,17 +99,20 @@ export interface TrainResult {
 /** 타자 능력치 훈련 */
 export function trainBatting(player: Player, key: TrainableBattingKey, points = 1): TrainResult {
   const p = structuredClone(player);
+  const cap = statCap(p);
   let spent = 0;
   let gained = 0;
   for (let i = 0; i < points; i++) {
     const cur = p.batting[key];
-    const cost = statUpgradeCost(cur, p.potential);
+    const cost = statUpgradeCost(cur, cap);
     if (!Number.isFinite(cost)) {
+      p.spentPoints += spent;
       return gained > 0
-        ? { ok: true, message: `${BATTING_KEY_KO[key]} +${gained} (잠재력 한계 도달)`, player: p }
-        : { ok: false, message: '이미 잠재력 한계에 도달했습니다.', player };
+        ? { ok: true, message: `${BATTING_KEY_KO[key]} +${gained} (상한 ${cap} 도달)`, player: p }
+        : { ok: false, message: capMessage(player, cap), player };
     }
     if (p.trainingPoints < cost) {
+      p.spentPoints += spent;
       return gained > 0
         ? { ok: true, message: `${BATTING_KEY_KO[key]} +${gained}`, player: p }
         : { ok: false, message: `훈련 포인트가 부족합니다. (필요: ${cost})`, player };
@@ -113,7 +122,15 @@ export function trainBatting(player: Player, key: TrainableBattingKey, points = 
     spent += cost;
     gained += 1;
   }
+  p.spentPoints += spent;
   return { ok: true, message: `${BATTING_KEY_KO[key]} +${gained} (${spent}P 사용)`, player: p };
+}
+
+/** 상한에 막혔을 때, 티어 때문인지 잠재력 때문인지 구분해 알려 준다. */
+function capMessage(p: Player, cap: number): string {
+  return p.potential <= cap
+    ? `잠재력 한계(${p.potential})에 도달했습니다.`
+    : `${TIER_KO[p.tier]} 능력치 상한(${cap})입니다. 티어를 강화하면 더 올릴 수 있습니다.`;
 }
 
 /** 투수 구종 능력치 훈련 */
@@ -127,12 +144,13 @@ export function trainPitch(
   if (!p.pitching?.arsenal[type]) {
     return { ok: false, message: '보유하지 않은 구종입니다.', player };
   }
+  const cap = statCap(p);
   let spent = 0;
   let gained = 0;
   for (let i = 0; i < points; i++) {
     const attr = p.pitching.arsenal[type]!;
     const cur = attr[key];
-    const cost = pitchUpgradeCost(cur, p.potential, type);
+    const cost = pitchUpgradeCost(cur, cap, type);
     if (!Number.isFinite(cost)) break;
     if (p.trainingPoints < cost) break;
     p.trainingPoints -= cost;
@@ -141,8 +159,14 @@ export function trainPitch(
     gained += 1;
   }
   if (gained === 0) {
-    return { ok: false, message: '훈련 포인트가 부족하거나 한계에 도달했습니다.', player };
+    const cur = p.pitching.arsenal[type]![key];
+    return {
+      ok: false,
+      message: cur >= cap ? capMessage(p, cap) : '훈련 포인트가 부족합니다.',
+      player,
+    };
   }
+  p.spentPoints += spent;
   return {
     ok: true,
     message: `${PITCH_DEFS[type].ko} ${PITCH_ATTR_KO[key]} +${gained} (${spent}P 사용)`,
@@ -154,17 +178,25 @@ export function trainPitch(
 export function trainStamina(player: Player, points = 1): TrainResult {
   const p = structuredClone(player);
   if (!p.pitching) return { ok: false, message: '투수가 아닙니다.', player };
+  const cap = statCap(p);
   let spent = 0;
   let gained = 0;
   for (let i = 0; i < points; i++) {
-    const cost = statUpgradeCost(p.pitching.stamina, p.potential);
+    const cost = statUpgradeCost(p.pitching.stamina, cap);
     if (!Number.isFinite(cost) || p.trainingPoints < cost) break;
     p.trainingPoints -= cost;
     p.pitching.stamina += 1;
     spent += cost;
     gained += 1;
   }
-  if (gained === 0) return { ok: false, message: '훈련 포인트가 부족합니다.', player };
+  if (gained === 0) {
+    return {
+      ok: false,
+      message: p.pitching.stamina >= cap ? capMessage(p, cap) : '훈련 포인트가 부족합니다.',
+      player,
+    };
+  }
+  p.spentPoints += spent;
   return { ok: true, message: `스태미나 +${gained} (${spent}P 사용)`, player: p };
 }
 
@@ -183,6 +215,13 @@ export function learnPitch(player: Player, type: PitchType, seed: number): Train
   if (!LEARNABLE_PITCHES.includes(type)) {
     return { ok: false, message: '습득할 수 없는 구종입니다.', player };
   }
+  if (!canLearnMorePitches(p)) {
+    return {
+      ok: false,
+      message: `${TIER_KO[p.tier]} 구종 슬롯을 모두 썼습니다 (${pitchSlots(p)}개). 티어를 강화하세요.`,
+      player,
+    };
+  }
   const cost = learnPitchCost(type, p);
   if (p.trainingPoints < cost) {
     return { ok: false, message: `훈련 포인트가 부족합니다. (필요: ${cost}P)`, player };
@@ -195,6 +234,7 @@ export function learnPitch(player: Player, type: PitchType, seed: number): Train
   const start = clamp(baseline * 0.45, 15, 45);
 
   p.trainingPoints -= cost;
+  p.spentPoints += cost;
   p.pitching.arsenal[type] = {
     velocity: Math.round(clamp(start + rng.range(-5, 8), 12, 60)),
     control: Math.round(clamp(start + rng.range(-8, 5), 10, 55)),
@@ -208,45 +248,4 @@ export function learnPitch(player: Player, type: PitchType, seed: number): Train
 export function learnablePitchesFor(player: Player): PitchType[] {
   const owned = new Set(Object.keys(player.pitching?.arsenal ?? {}) as PitchType[]);
   return LEARNABLE_PITCHES.filter((t) => !owned.has(t));
-}
-
-// ---------------------------------------------------------------------------
-// 경기 결과 -> 훈련 포인트 지급
-// ---------------------------------------------------------------------------
-
-export interface RewardInput {
-  won: boolean;
-  runsScored: number;
-  runsAllowed: number;
-  isPlayerTeam: boolean;
-}
-
-/** 팀 전체가 받는 포인트 */
-export function gameRewardPoints(input: RewardInput): number {
-  if (!input.isPlayerTeam) return 0;
-  let pts = 30;
-  if (input.won) pts += 25;
-  pts += Math.min(20, input.runsScored * 2);
-  if (input.runsAllowed === 0) pts += 15;
-  return pts;
-}
-
-/**
- * 경기 활약도에 따라 선수별로 포인트를 분배한다.
- * 팀 포인트의 절반은 균등 분배, 나머지 절반은 활약도 비례.
- */
-export function distributeRewards(players: Player[], teamPoints: number): Player[] {
-  if (!players.length) return players;
-  const even = Math.floor((teamPoints * 0.5) / players.length);
-  const perf = players.map((p) => {
-    const s = p.season;
-    return s.h * 2 + s.hr * 4 + s.rbi * 1.5 + s.bb + s.sb * 1.5 + s.pk * 1.5 + s.ip3 * 0.7;
-  });
-  const total = perf.reduce((a, b) => a + b, 0) || 1;
-  const pool = teamPoints * 0.5;
-
-  return players.map((p, i) => ({
-    ...p,
-    trainingPoints: p.trainingPoints + even + Math.round((perf[i] / total) * pool),
-  }));
 }

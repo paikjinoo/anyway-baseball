@@ -4,6 +4,7 @@ import { create } from 'zustand';
 import { Rng, clamp, seedFromString } from '../game/rng';
 import {
   bullpenCandidates,
+  benchCandidates,
   changePitcher,
   createGame,
   currentBatter,
@@ -11,11 +12,15 @@ import {
   currentPitcher,
   defenseTeam,
   offense,
+  pinchHit,
+  pinchRun,
   preparePitch,
   resolvePitch,
   resolvePitchClockViolation,
+  subFielder,
 } from '../game/engine';
 import { decidePitch, decideSteal, decideSwing, shouldChangePitcher, type Difficulty } from '../game/ai';
+import type { MatchRewardContext } from '../game/matchReward';
 import { PITCH_CLOCK_MS, PITCH_CLOCK_NET_GRACE_MS } from '../game/constants';
 import { arsenalOf } from '../game/pitching';
 import { buildTimeline, type PlayTimeline } from '../game/playback';
@@ -37,6 +42,7 @@ import type {
   PitchResult,
   PitchTrajectory,
   Player,
+  Position,
   Side,
   SwingType,
   Team,
@@ -64,6 +70,12 @@ export type MatchMode =
   | 'PARTY_GUEST'
   | 'RELAY_HOST'
   | 'RELAY_GUEST';
+
+/** 야수 교체 종류. 대타 / 대주자 / 대수비. */
+export type SubKind = 'HIT' | 'RUN' | 'FIELD';
+
+/** 보상 산정 구분. matchReward가 이 값으로 배수와 시즌 기록 여부를 정한다. */
+export type MatchRewardKind = MatchRewardContext['kind'];
 
 /** 판정 권한을 가진 쪽인가 (호스트 권위 모델) */
 export function isHostMode(m: MatchMode): boolean {
@@ -106,6 +118,8 @@ export interface LogEntry {
 interface MatchStore {
   mode: MatchMode;
   difficulty: Difficulty;
+  /** 보상 산정 구분. CPU와 리그는 같은 엔진 모드를 쓰지만 보상 근거가 다르다. */
+  rewardKind: MatchRewardKind;
   state: GameState | null;
   /** 릴레이 모드의 순환표·점수 원장. 일반 경기에서는 null이다. */
   relayState: RelayState | null;
@@ -201,6 +215,8 @@ interface MatchStore {
     settings: GameSettings;
     difficulty: Difficulty;
     seed?: string;
+    /** 기본값 'CPU'. 리그 일정 경기는 'LEAGUE'를 넘긴다. */
+    rewardKind?: MatchRewardKind;
   }) => void;
   initOnlineGame: (opts: {
     state: GameState;
@@ -250,6 +266,11 @@ interface MatchStore {
   /** 결과 연출이 끝나고 다음 투구로 */
   advance: () => void;
   substitutePitcher: (pitcherId: string) => void;
+  /**
+   * 야수 교체. arg는 대주자면 베이스 인덱스(0=1루), 대수비면 포지션이다.
+   * 대타에는 쓰지 않는다.
+   */
+  substituteFielder: (kind: SubKind, playerId: string, arg?: number | Position) => void;
   reset: () => void;
   pushLog: (text: string, kind?: LogEntry['kind']) => void;
 }
@@ -379,6 +400,7 @@ function cancelReveal() {
 export const useMatchStore = create<MatchStore>((set, get) => ({
   mode: 'CPU',
   difficulty: 'NORMAL',
+  rewardKind: 'CPU',
   state: null,
   relayState: null,
   playerSide: 'away',
@@ -415,7 +437,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
 
   // -------------------------------------------------------------------------
 
-  initCpuGame: ({ playerTeam, cpuTeam, playerSide, settings, difficulty, seed }) => {
+  initCpuGame: ({ playerTeam, cpuTeam, playerSide, settings, difficulty, seed, rewardKind }) => {
     const away = playerSide === 'away' ? playerTeam : cpuTeam;
     const home = playerSide === 'home' ? playerTeam : cpuTeam;
     const seedSource = seed ?? `cpu-${Date.now()}-${playerTeam.id}`;
@@ -427,6 +449,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     set({
       mode: 'CPU',
       difficulty,
+      rewardKind: rewardKind ?? 'CPU',
       state,
       relayState: null,
       playerSide,
@@ -465,6 +488,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     startCrowd();
     set({
       mode,
+      rewardKind: 'ONLINE',
       state,
       relayState: null,
       playerSide,
@@ -504,6 +528,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     startCrowd();
     set({
       mode,
+      rewardKind: 'ONLINE',
       state,
       relayState: null,
       playerSide,
@@ -553,6 +578,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     const control = relayControlState(relayState, state, myUid);
     set({
       mode,
+      rewardKind: 'RELAY',
       state,
       relayState,
       playerSide: control.playerSide,
@@ -863,6 +889,37 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     const p = next[playerSide].roster[pitcherId];
     if (p) get().pushLog(`투수 교체: ${p.name}`, 'info');
     if (mode !== 'CPU') sendFn?.({ t: 'SUB_PITCHER', side: playerSide, pitcherId });
+  },
+
+  /**
+   * 대타 / 대주자 / 대수비.
+   *
+   * 아직 CPU·리그 전용이다 — 온라인은 protocol.ts에 SUB_* 메시지를 추가하고 호스트가
+   * 검증까지 해야 하므로 다음 단계로 미뤘다. 그래서 여기서 CPU가 아니면 아무것도 하지 않는다.
+   */
+  substituteFielder: (kind, playerId, arg) => {
+    const { state, playerSide, mode, phase } = get();
+    if (!state || phase !== 'SETUP') return;
+    if (mode !== 'CPU') {
+      set({ message: '온라인 대전에서는 아직 야수 교체를 지원하지 않습니다.' });
+      return;
+    }
+
+    const draft = structuredClone(state);
+    const res =
+      kind === 'HIT'
+        ? pinchHit(draft, playerSide, playerId)
+        : kind === 'RUN'
+          ? pinchRun(draft, playerSide, arg as number, playerId)
+          : subFielder(draft, playerSide, arg as Position, playerId);
+
+    if (!res.ok) {
+      set({ message: res.message });
+      return;
+    }
+    // 교체하는 동안 피치 클락에 볼을 먹지 않도록 새로 감는다.
+    set({ state: res.state, pitchClockEndsAt: performance.now() + PITCH_CLOCK_MS });
+    get().pushLog(res.message, 'info');
   },
 
   reset: () => {

@@ -30,6 +30,13 @@ service cloud.firestore {
       allow update, delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
     }
 
+    // ---- 감독 프로필 (닉네임) --------------------------------------------
+    // 문서 id가 곧 uid다. 본인만 쓰고, 기기를 옮겨도 같은 닉네임을 쓰기 위해 존재한다.
+    match /profiles/{profileUid} {
+      allow read: if signedIn();
+      allow write: if signedIn() && profileUid == request.auth.uid;
+    }
+
     // ---- 방 (WebRTC 시그널링 전용) ---------------------------------------
     match /rooms/{roomId} {
       allow read: if signedIn();

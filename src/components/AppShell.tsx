@@ -6,7 +6,7 @@ import { useEffect } from 'react';
 import { useAppStore } from '@/lib/store/appStore';
 import { watchAuth, signInWithGoogle, signOut, getOrCreateGuest } from '@/lib/firebase/auth';
 import { firebaseConfigured } from '@/lib/firebase/client';
-import { listLeagues, listTeams } from '@/lib/firebase/store';
+import { fetchNickname, listLeagues, listTeams } from '@/lib/firebase/store';
 import { startMenuBgm, stopMenuBgm, unlockAudio } from '@/lib/audio/sfx';
 import { useMatchStore } from '@/lib/store/matchStore';
 
@@ -24,6 +24,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const user = useAppStore((s) => s.user);
   const authReady = useAppStore((s) => s.authReady);
   const setUser = useAppStore((s) => s.setUser);
+  const syncNickname = useAppStore((s) => s.syncNickname);
   const setAuthReady = useAppStore((s) => s.setAuthReady);
   const setDataReady = useAppStore((s) => s.setDataReady);
   const setTeams = useAppStore((s) => s.setTeams);
@@ -40,10 +41,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return unsub;
   }, [hydrateSettings, setUser, setAuthReady]);
 
-  // 로그인되면 팀/리그를 불러온다
+  // 로그인되면 팀/리그를 불러온다.
+  // uid로만 묶는다 — 닉네임이 바뀌어 사용자 객체가 새로 만들어져도 재조회하지 않는다.
+  const uid = user?.uid ?? null;
+  const isGuest = user?.isGuest ?? true;
+
   useEffect(() => {
     if (!authReady) return;
-    if (!user) {
+    if (!uid) {
       setTeams([]);
       setLeagues([]);
       setDataReady(true);
@@ -53,7 +58,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     let alive = true;
     void (async () => {
       try {
-        const [teams, leagues] = await Promise.all([listTeams(user.uid), listLeagues(user.uid)]);
+        const [teams, leagues] = await Promise.all([listTeams(uid), listLeagues(uid)]);
         if (!alive) return;
         setTeams(teams);
         setLeagues(leagues);
@@ -64,7 +69,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return () => {
       alive = false;
     };
-  }, [authReady, user, setTeams, setLeagues, setDataReady]);
+  }, [authReady, uid, setTeams, setLeagues, setDataReady]);
+
+  // 다른 기기에서 정한 닉네임을 따라온다. 이 기기 값은 이미 적용돼 있어 깜빡이지 않는다.
+  useEffect(() => {
+    if (!uid || isGuest) return;
+    let alive = true;
+    void fetchNickname(uid).then((nickname) => {
+      if (alive) syncNickname(uid, nickname);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [uid, isGuest, syncNickname]);
 
   // 첫 상호작용에 오디오 컨텍스트 활성화
   useEffect(() => {

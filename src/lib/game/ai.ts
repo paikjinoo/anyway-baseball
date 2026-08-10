@@ -17,6 +17,7 @@ import type {
   SwingCommand,
   SwingType,
 } from './types';
+import { effSpeed } from './batting';
 
 export type Difficulty = 'EASY' | 'NORMAL' | 'HARD' | 'PRO';
 
@@ -118,7 +119,7 @@ export function decidePitch(state: GameState, rng: Rng, difficulty: Difficulty):
     const cornerY = rng.chance(0.55) ? -1 : 1;
     // 존 안쪽 깊숙이 노리면 스트라이크 비율이 올라가 볼넷이 마른다.
     // MLB 존 투구 비율은 48.5%다.
-    const edge = lerp(0.58, 1.08, p.pitchIq);
+    const edge = lerp(0.55, 1.02, p.pitchIq);
     targetX = cornerX * rng.range(edge * 0.6, edge);
     targetY = cornerY * rng.range(edge * 0.5, edge);
     // 장타력 있는 타자에게는 더 낮게
@@ -265,7 +266,7 @@ export function decideSteal(state: GameState, rng: Rng, difficulty: Difficulty):
   if (r1 && !state.bases[1]) {
     const p = off.roster[r1.playerId];
     if (p) {
-      const speed = norm(p.batting.speed);
+      const speed = norm(effSpeed(p));
       // 실제 야구에서 도루 시도는 기회당 5~10% 수준이다.
       // 이 값이 크면 CPU가 매 투구마다 뛰어 득점이 비현실적으로 늘어난다.
       let chance = clamp((speed - 0.62) * 0.5, 0, 0.16) * aggression;
@@ -281,7 +282,7 @@ export function decideSteal(state: GameState, rng: Rng, difficulty: Difficulty):
   if (r2 && !state.bases[2] && state.outs < 2 && !steals.length) {
     const p = off.roster[r2.playerId];
     if (p) {
-      const speed = norm(p.batting.speed);
+      const speed = norm(effSpeed(p));
       const chance = clamp((speed - 0.78) * 0.35, 0, 0.08) * aggression;
       if (rng.chance(chance)) steals.push(1);
     }
