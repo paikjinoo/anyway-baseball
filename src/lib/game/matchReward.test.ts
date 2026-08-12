@@ -140,6 +140,15 @@ describe('경험치 산정', () => {
     expect(half).toBeLessThan(full);
     expect(playerMatchExp(batter(), line, ctx({ expScale: 0 }))).toBe(0);
   });
+
+  it('온라인·릴레이는 난이도 배수를 타지 않는다', () => {
+    const line = { ...emptySeason(), pa: 4, ab: 4, h: 2 };
+    for (const kind of ['ONLINE', 'RELAY'] as const) {
+      const normal = playerMatchExp(batter(), line, ctx({ kind, difficulty: 'NORMAL' }));
+      expect(playerMatchExp(batter(), line, ctx({ kind, difficulty: 'PRO' }))).toBe(normal);
+      expect(playerMatchExp(batter(), line, ctx({ kind, difficulty: 'EASY' }))).toBe(normal);
+    }
+  });
 });
 
 describe('골드 산정', () => {
@@ -163,6 +172,26 @@ describe('골드 산정', () => {
     expect(matchGold(ctx({ runsScored: 12, runsAllowed: 0 }))).toBeGreaterThan(
       matchGold(ctx({ runsScored: 0, runsAllowed: 5 })),
     );
+  });
+
+  it('온라인·릴레이는 난이도 배수를 타지 않는다', () => {
+    // difficulty는 CPU 경기에서만 세팅되는데 온라인 경기 시작도 reset()도 지우지 않아,
+    // 프로로 CPU를 한 판 하고 온라인에 가면 그 배수가 그대로 따라붙었다.
+    for (const kind of ['ONLINE', 'RELAY'] as const) {
+      expect(matchGold(ctx({ kind, difficulty: 'PRO' }))).toBe(
+        matchGold(ctx({ kind, difficulty: 'NORMAL' })),
+      );
+      expect(matchGold(ctx({ kind, difficulty: 'EASY' }))).toBe(
+        matchGold(ctx({ kind, difficulty: 'NORMAL' })),
+      );
+    }
+
+    // CPU·리그는 그대로 난이도를 탄다
+    for (const kind of ['CPU', 'LEAGUE'] as const) {
+      expect(matchGold(ctx({ kind, difficulty: 'PRO' }))).toBeGreaterThan(
+        matchGold(ctx({ kind, difficulty: 'NORMAL' })),
+      );
+    }
   });
 });
 

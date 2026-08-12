@@ -1,7 +1,7 @@
 import { Rng, clamp } from './rng';
-import { LEARNABLE_PITCHES, PITCH_DEFS } from './constants';
+import { ALL_PITCH_TYPES, LEARNABLE_PITCHES, PITCH_DEFS } from './constants';
 import { TIER_KO, canLearnMorePitches, pitchSlots, pitchSlotsUsed, statCap } from './progression';
-import type { BattingAttr, PitchAttr, PitchType, Player } from './types';
+import type { BattingAttr, PitchAttr, PitchType, Player, Team } from './types';
 
 /**
  * 훈련 시스템.
@@ -11,6 +11,7 @@ import type { BattingAttr, PitchAttr, PitchType, Player } from './types';
  * 만능이 되지 않고, 상한에 막히면 티어를 올려야 다시 자란다.
  *
  * 훈련 포인트는 이제 경기 보상이 아니라 **레벨업으로만** 들어온다 (progression.grantExp).
+ * 그리고 훈련 포인트는 **능력치 전용**이다 — 새 구종 습득은 골드로 산다 (learnPitch).
  */
 
 /**
@@ -32,10 +33,22 @@ export function pitchUpgradeCost(current: number, cap: number, type: PitchType):
   return Math.max(2, Math.round(c * (0.85 + PITCH_DEFS[type].difficulty * 0.28)));
 }
 
-/** 새 구종 습득 비용 */
-export function learnPitchCost(type: PitchType, pitcher: Player): number {
+/**
+ * 새 구종 습득 비용의 기준값. 실제 비용은 난이도와 보유 구종 수로 배율이 붙는다.
+ * 4번째 구종이 2,550~6,630G, 6번째가 3,600~9,360G 선이다.
+ */
+export const LEARN_PITCH_GOLD_BASE = 1500;
+
+/**
+ * 새 구종 습득 비용 — **훈련 포인트가 아니라 골드다.**
+ *
+ * 훈련 포인트는 레벨업으로만 들어오는 희소 자원이라, 구종 습득까지 거기서 빼면
+ * "능력치를 올릴지 구종을 배울지"가 아니라 "구종은 못 배운다"가 된다. 골드로 옮기면
+ * 경기를 뛰어 모은 돈으로 아스널을 넓힐 수 있고, 훈련 포인트는 능력치 전용이 된다.
+ */
+export function learnPitchGold(type: PitchType, pitcher: Player): number {
   const owned = pitchSlotsUsed(pitcher);
-  const base = 90 * PITCH_DEFS[type].difficulty;
+  const base = LEARN_PITCH_GOLD_BASE * PITCH_DEFS[type].difficulty;
   // 이미 많은 구종을 가진 투수는 추가 습득이 비싸다
   return Math.round(base * (1 + (owned - 1) * 0.35));
 }
@@ -200,31 +213,47 @@ export function trainStamina(player: Player, points = 1): TrainResult {
   return { ok: true, message: `스태미나 +${gained} (${spent}P 사용)`, player: p };
 }
 
+export interface LearnPitchResult {
+  ok: boolean;
+  team: Team;
+  message: string;
+}
+
 /**
- * 새 구종 습득.
- * 습득 직후 능력치는 낮게 시작하며, 이후 훈련으로 끌어올린다.
+ * 새 구종 습득. 비용은 팀 골드에서 나간다.
+ * 습득 직후 능력치는 낮게 시작하며, 이후 훈련 포인트로 끌어올린다.
+ *
+ * 다른 훈련 함수와 달리 Team을 받고 돌려주는 이유는 골드가 팀에 있기 때문이다.
  */
-export function learnPitch(player: Player, type: PitchType, seed: number): TrainResult {
-  const p = structuredClone(player);
+export function learnPitch(
+  team: Team,
+  playerId: string,
+  type: PitchType,
+  seed: number,
+): LearnPitchResult {
+  const target = team.players.find((x) => x.id === playerId);
+  if (!target) return { ok: false, team, message: '선수를 찾을 수 없습니다.' };
+
+  const p = structuredClone(target);
   if (!p.pitching) {
-    return { ok: false, message: '투수가 아닙니다.', player };
+    return { ok: false, team, message: '투수가 아닙니다.' };
   }
   if (p.pitching.arsenal[type]) {
-    return { ok: false, message: '이미 보유한 구종입니다.', player };
+    return { ok: false, team, message: '이미 보유한 구종입니다.' };
   }
   if (!LEARNABLE_PITCHES.includes(type)) {
-    return { ok: false, message: '습득할 수 없는 구종입니다.', player };
+    return { ok: false, team, message: '습득할 수 없는 구종입니다.' };
   }
   if (!canLearnMorePitches(p)) {
     return {
       ok: false,
+      team,
       message: `${TIER_KO[p.tier]} 구종 슬롯을 모두 썼습니다 (${pitchSlots(p)}개). 티어를 강화하세요.`,
-      player,
     };
   }
-  const cost = learnPitchCost(type, p);
-  if (p.trainingPoints < cost) {
-    return { ok: false, message: `훈련 포인트가 부족합니다. (필요: ${cost}P)`, player };
+  const cost = learnPitchGold(type, p);
+  if (team.gold < cost) {
+    return { ok: false, team, message: `골드가 부족합니다. (필요: ${cost.toLocaleString()}G)` };
   }
 
   const rng = new Rng(seed);
@@ -233,19 +262,149 @@ export function learnPitch(player: Player, type: PitchType, seed: number): Train
   const baseline = fastball ? (fastball.velocity + fastball.control + fastball.movement) / 3 : 40;
   const start = clamp(baseline * 0.45, 15, 45);
 
-  p.trainingPoints -= cost;
-  p.spentPoints += cost;
+  // 훈련 포인트는 건드리지 않는다. 습득은 골드로만 한다.
+  p.spentGold = (p.spentGold ?? 0) + cost;
   p.pitching.arsenal[type] = {
     velocity: Math.round(clamp(start + rng.range(-5, 8), 12, 60)),
     control: Math.round(clamp(start + rng.range(-8, 5), 10, 55)),
     movement: Math.round(clamp(start + rng.range(-3, 12), 15, 62)),
   };
 
-  return { ok: true, message: `${PITCH_DEFS[type].ko} 습득! (${cost}P 사용)`, player: p };
+  return {
+    ok: true,
+    team: {
+      ...team,
+      gold: team.gold - cost,
+      players: team.players.map((x) => (x.id === playerId ? p : x)),
+    },
+    message: `${PITCH_DEFS[type].ko} 습득! (${cost.toLocaleString()}G 사용)`,
+  };
 }
 
 /** 습득 가능한 구종 목록 (아직 없는 것) */
 export function learnablePitchesFor(player: Player): PitchType[] {
   const owned = new Set(Object.keys(player.pitching?.arsenal ?? {}) as PitchType[]);
   return LEARNABLE_PITCHES.filter((t) => !owned.has(t));
+}
+
+// ---------------------------------------------------------------------------
+// 자동 훈련
+// ---------------------------------------------------------------------------
+
+/** 자동 투자가 손댈 수 있는 항목 하나 */
+type InvestSlot =
+  | { kind: 'BATTING'; key: TrainableBattingKey }
+  | { kind: 'STAMINA' }
+  | { kind: 'PITCH'; type: PitchType; attr: keyof PitchAttr };
+
+/**
+ * 이 선수에게 훈련 포인트를 부을 항목 목록.
+ *
+ * 투수의 타격 능력치는 넣지 않는다 — 실제로 아무도 거기 훈련하지 않으므로,
+ * 자동 투자가 거기 쓰면 "직접 키운 선수와 같은 수준"이 아니라 그냥 손해다.
+ *
+ * 구종 순회는 arsenal의 키 순서가 아니라 ALL_PITCH_TYPES 순서로 한다.
+ * 삽입 순서에 기대는 순간 같은 시드가 다른 결과를 내기 시작한다.
+ */
+function investSlotsOf(p: Player): InvestSlot[] {
+  if (p.kind === 'BATTER') {
+    return BATTING_KEYS.map((key) => ({ kind: 'BATTING', key }) as InvestSlot);
+  }
+  const slots: InvestSlot[] = [{ kind: 'STAMINA' }];
+  for (const type of ALL_PITCH_TYPES) {
+    if (!p.pitching?.arsenal[type]) continue;
+    for (const attr of ['velocity', 'control', 'movement'] as (keyof PitchAttr)[]) {
+      slots.push({ kind: 'PITCH', type, attr });
+    }
+  }
+  return slots;
+}
+
+function readSlot(p: Player, s: InvestSlot): number {
+  if (s.kind === 'BATTING') return p.batting[s.key];
+  if (s.kind === 'STAMINA') return p.pitching?.stamina ?? 0;
+  return p.pitching?.arsenal[s.type]?.[s.attr] ?? 0;
+}
+
+function writeSlot(p: Player, s: InvestSlot, v: number): void {
+  if (s.kind === 'BATTING') {
+    p.batting[s.key] = v;
+  } else if (s.kind === 'STAMINA') {
+    if (p.pitching) p.pitching.stamina = v;
+  } else {
+    const a = p.pitching?.arsenal[s.type];
+    if (a) a[s.attr] = v;
+  }
+}
+
+/** 그 항목을 현재 값에서 1 올리는 비용. 구종은 난이도 배율이 붙는다. */
+function slotStepCost(p: Player, s: InvestSlot, cap: number): number {
+  const cur = readSlot(p, s);
+  return s.kind === 'PITCH'
+    ? pitchUpgradeCost(cur, cap, s.type)
+    : statUpgradeCost(cur, cap);
+}
+
+export interface AutoInvestResult {
+  player: Player;
+  /** 실제로 쓴 훈련 포인트 */
+  spent: number;
+}
+
+/**
+ * 훈련 포인트 예산을 능력치에 자동으로 배분한다.
+ *
+ * 상점에서 상위 티어 선수를 만들 때 "그 티어까지 직접 키웠다면 받았을 포인트"를 대신 써 주는
+ * 용도다. 그래서 비용은 반드시 실제 훈련과 같은 곡선(statUpgradeCost / pitchUpgradeCost)을 쓴다.
+ *
+ * **모든 항목을 같은 폭으로 올린 뒤 남은 예산으로 약점을 다듬는다.** 싼 항목부터 채우면
+ * 물채우기가 되어 중견수의 발도 1루수의 파워도 지워지고 똑같은 숫자만 남는다. 균등 상승은
+ * 원래의 강약 순서를 지키면서 총량만 끌어올린다.
+ *
+ * trainingPoints / spentPoints는 건드리지 않고 쓴 양만 돌려준다 — 그 포인트가 어디서 왔는지에
+ * 따라 회계가 달라지므로 호출부가 정할 일이다.
+ */
+export function autoInvest(player: Player, budget: number): AutoInvestResult {
+  const p = structuredClone(player);
+  if (budget <= 0) return { player: p, spent: 0 };
+
+  const cap = statCap(p);
+  const slots = investSlotsOf(p);
+  if (!slots.length) return { player: p, spent: 0 };
+
+  let spent = 0;
+
+  // 1) 전 항목을 한 칸씩 올리는 것을 더 이상 감당할 수 없을 때까지 반복
+  for (;;) {
+    let round = 0;
+    for (const s of slots) {
+      const c = slotStepCost(p, s, cap);
+      if (Number.isFinite(c)) round += c;
+    }
+    if (round === 0 || spent + round > budget) break;
+    for (const s of slots) {
+      const c = slotStepCost(p, s, cap);
+      if (!Number.isFinite(c)) continue;
+      writeSlot(p, s, readSlot(p, s) + 1);
+      spent += c;
+    }
+  }
+
+  // 2) 자투리로 가장 싼 항목을 하나씩. 동점이면 앞선 항목이 이겨 결과가 결정적이다.
+  for (;;) {
+    let best: InvestSlot | null = null;
+    let bestCost = Infinity;
+    for (const s of slots) {
+      const c = slotStepCost(p, s, cap);
+      if (c < bestCost) {
+        bestCost = c;
+        best = s;
+      }
+    }
+    if (!best || !Number.isFinite(bestCost) || spent + bestCost > budget) break;
+    writeSlot(p, best, readSlot(p, best) + 1);
+    spent += bestCost;
+  }
+
+  return { player: p, spent };
 }

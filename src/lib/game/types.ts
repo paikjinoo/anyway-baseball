@@ -149,6 +149,13 @@ export interface Player {
   trainingPoints: number;
   /** 지금까지 훈련에 쓴 누적 포인트. 능력치초기화권의 환급액이다. */
   spentPoints: number;
+  /**
+   * 구종 습득에 쓴 누적 골드. 능력치초기화권이 함께 환급한다.
+   *
+   * 선택 필드다 — 이 필드가 생기기 전에 저장된 팀도 그대로 읽혀야 하므로
+   * TEAM_SCHEMA_VERSION을 올리지 않는다. 없으면 0으로 읽는다.
+   */
+  spentGold?: number;
   /** 생성 시점의 능력치 스냅샷. 능력치초기화권이 복원하는 지점. */
   base: PlayerBase;
   /** 경기 사이에 이월되는 투수 피로도 (0~1). 1이면 완전히 지친 상태. */

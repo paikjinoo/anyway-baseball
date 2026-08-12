@@ -32,6 +32,70 @@ export function effSpeed(p: Player): number {
   return clamp(p.batting.speed + bodyMod(p).speed, 1, 99);
 }
 
+// ---------------------------------------------------------------------------
+// 부상 보정 (컨디션 난조)
+// ---------------------------------------------------------------------------
+
+/** 부상 잔여 1경기당 깎이는 능력치 비율 */
+export const INJURY_PENALTY_PER_GAME = 0.05;
+/** 아무리 심해도 여기까지만 깎는다 */
+export const INJURY_PENALTY_MAX = 0.25;
+
+/**
+ * 부상으로 깎이는 능력치 비율 (0~0.25).
+ *
+ * 부상은 출전을 막지 않는다. 몸이 덜 풀린 채로 뛰는 것에 가깝게, **남은 경기 수에 비례해**
+ * 깎는다 — 갓 다쳤을 때가 가장 나쁘고 회복이 가까워질수록 옅어져서, 낫는 중이라는 게
+ * 숫자로 보인다. 사구 타박(1~3경기)은 5~15%, 투구 과부하(2~5경기)는 10~25%로 자연히 갈린다.
+ */
+export function injuryPenalty(p: Player): number {
+  const left = p.injury?.gamesLeft ?? 0;
+  if (left <= 0) return 0;
+  return Math.min(INJURY_PENALTY_MAX, left * INJURY_PENALTY_PER_GAME);
+}
+
+/**
+ * 부상 보정이 들어간 사본. 성한 선수는 원본을 그대로 돌려준다.
+ *
+ * **경기 로스터를 만들 때 딱 한 번 통과시킨다** (engine.toTeamInGame). 그러면 타격·투구·수비·
+ * 주루·AI가 전부 깎인 값을 읽는다. 읽는 쪽마다 보정을 거는 방식은 effSpeed 주석에 적힌 것과
+ * 같은 이유로 반드시 어딘가 새고, 그때는 "타격만 깎이고 발은 멀쩡한" 반쪽이 된다.
+ */
+export function withInjuryPenalty(p: Player): Player {
+  const cut = injuryPenalty(p);
+  if (cut <= 0) return p;
+
+  const k = 1 - cut;
+  const scale = (v: number) => Math.max(1, Math.round(v * k));
+
+  const next: Player = {
+    ...p,
+    batting: {
+      contact: scale(p.batting.contact),
+      power: scale(p.batting.power),
+      eye: scale(p.batting.eye),
+      speed: scale(p.batting.speed),
+      fielding: scale(p.batting.fielding),
+      arm: scale(p.batting.arm),
+    },
+  };
+
+  if (p.pitching) {
+    const arsenal: typeof p.pitching.arsenal = {};
+    for (const [type, a] of Object.entries(p.pitching.arsenal)) {
+      if (!a) continue;
+      arsenal[type as keyof typeof arsenal] = {
+        velocity: scale(a.velocity),
+        control: scale(a.control),
+        movement: scale(a.movement),
+      };
+    }
+    next.pitching = { stamina: scale(p.pitching.stamina), arsenal };
+  }
+
+  return next;
+}
+
 /** 장비·자세·체형 보정을 적용한 실효 능력치 */
 export function effectiveBatting(p: Player) {
   const bat = BAT_DEFS.find((b) => b.id === p.gear.bat);

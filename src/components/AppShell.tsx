@@ -14,6 +14,7 @@ const NAV = [
   { href: '/', label: '홈', mark: '⌂' },
   { href: '/team', label: '구단', mark: '◆' },
   { href: '/roster', label: '선수', mark: '≡' },
+  { href: '/shop', label: '상점', mark: '✦' },
   { href: '/league', label: '리그', mark: '▦' },
   { href: '/play', label: '경기', mark: '▶' },
   { href: '/settings', label: '설정', mark: '●' },

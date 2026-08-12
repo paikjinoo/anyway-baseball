@@ -34,6 +34,23 @@ export const TIER_MAX_LEVEL: Record<Tier, number> = { C: 10, B: 20, A: 30, S: 40
  */
 export const TIER_STAT_CAP: Record<Tier, number> = { C: 65, B: 78, A: 89, S: 99 };
 
+/**
+ * 티어별 잠재력 분포 (평균 · 표준편차 · 하한 · 상한).
+ *
+ * 상점에서 상위 티어를 영입할 때 쓴다. 창단 선수 기준(평균 82)으로 A등급을 만들면
+ * statCap이 89가 아니라 82에서 막혀 티어값이 통째로 헛돈다. 그래서 하한을 그 티어의
+ * 능력치 상한에 맞춘다. S만 예외다 — 하한을 99로 두면 모든 S가 같은 잠재력을 갖게 되고
+ * 최상위에서 개체차가 사라진다.
+ *
+ * C는 창단 선수와 **완전히 같은 식**이어야 한다. 여기가 달라지면 기존 시드 픽스처가 전부 어긋난다.
+ */
+export const TIER_POTENTIAL: Record<Tier, { mu: number; sigma: number; lo: number; hi: number }> = {
+  C: { mu: 82, sigma: 7, lo: 62, hi: 99 },
+  B: { mu: 87, sigma: 6, lo: TIER_STAT_CAP.B, hi: 99 },
+  A: { mu: 93, sigma: 4, lo: TIER_STAT_CAP.A, hi: 99 },
+  S: { mu: 96, sigma: 3, lo: 92, hi: 99 },
+};
+
 /** 티어별 보유 가능한 구종 수 (직구 포함) */
 export const TIER_PITCH_SLOTS: Record<Tier, number> = { C: 3, B: 4, A: 5, S: 6 };
 
@@ -44,8 +61,46 @@ export const TIER_UP_GOLD: Record<Exclude<Tier, 'S'>, number> = {
   A: 25000,
 };
 
-/** 레벨업 1회당 지급되는 훈련 포인트. 높은 티어일수록 한 레벨의 값어치가 크다. */
-export const TP_PER_LEVEL: Record<Tier, number> = { C: 4, B: 6, A: 8, S: 10 };
+/**
+ * 레벨업 1회당 지급되는 훈련 포인트. 높은 티어일수록 한 레벨의 값어치가 크다.
+ *
+ * 능력치 1을 올리는 데 값 50에서 4P, 60에서 7P, 70에서 12P가 든다(training.statUpgradeCost).
+ * 즉 레벨업 한 번이 대략 능력치 3~4포인트다. 이보다 낮게 잡으면 커리어 전체(96레벨)를 돌아도
+ * 티어 능력치 상한(C 65 · B 78 · A 89)에도 잠재력(평균 82)에도 닿지 못해,
+ * "티어를 강화해야 더 오른다"는 규칙 자체가 작동하지 않는다.
+ */
+export const TP_PER_LEVEL: Record<Tier, number> = { C: 12, B: 18, A: 24, S: 30 };
+
+/**
+ * 자연 성장으로 이 티어의 1레벨에 도달했을 때까지 받았을 훈련 포인트 총량.
+ * C 0 · B 108 · A 450 · S 1,146.
+ *
+ * 상점이 "그 티어 1레벨 수준의 능력치"를 만들 때 쓰는 예산이다. 상수로 박아 두면
+ * TP_PER_LEVEL이나 TIER_MAX_LEVEL을 만졌을 때 조용히 어긋나므로 곡선에서 직접 센다.
+ */
+export function naturalTrainingPoints(tier: Tier): number {
+  let sum = 0;
+  for (const t of TIER_ORDER) {
+    if (t === tier) break;
+    // 그 티어 1레벨에서 최대 레벨까지 오르며 받는 포인트
+    sum += (TIER_MAX_LEVEL[t] - 1) * TP_PER_LEVEL[t];
+  }
+  return sum;
+}
+
+/**
+ * 자연 성장으로 이 티어에 도달하기까지 강화에 쓴 골드 총액.
+ * C 0 · B 2,000 · A 10,000 · S 35,000. 방출 환급액의 기준이다.
+ */
+export function naturalTierGold(tier: Tier): number {
+  let sum = 0;
+  for (const t of TIER_ORDER) {
+    if (t === tier) break;
+    // S는 TIER_ORDER의 마지막이라 여기 도달하지 않는다 — TIER_UP_GOLD 인덱싱이 항상 안전하다
+    sum += TIER_UP_GOLD[t as Exclude<Tier, 'S'>];
+  }
+  return sum;
+}
 
 /**
  * 레벨업 경험치 곡선.

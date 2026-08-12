@@ -15,7 +15,7 @@ import { Rng } from './rng';
 import { hitterScore, pitcherScore } from './generator';
 import type { OwnerMap, PartyPicks } from '../net/protocol';
 import { TEAM_SCHEMA_VERSION } from './types';
-import type { Player, Position, Side, Team } from './types';
+import type { Player, Position, Side, Team, TeamInGame } from './types';
 
 /** slot별로 골라야 하는 야수 수. 합쳐서 9명. */
 export const BATTERS_PER_SLOT: [number, number] = [5, 4];
@@ -135,8 +135,35 @@ export function validatePartyPicks(
 // ---------------------------------------------------------------------------
 
 /** 두 사람의 선수 id가 우연히 겹쳐도 섞이지 않도록 붙이는 접두사 */
-function prefixOf(side: Side, slot: 0 | 1): string {
+export function prefixOf(side: Side, slot: 0 | 1): string {
   return `${side === 'away' ? 'a' : 'h'}${slot}~`;
+}
+
+/**
+ * 접두사를 떼고 원래 팀에서의 선수 id를 돌려준다. prefixOf의 역함수.
+ *
+ * 경기가 끝나면 올스타 팀의 기록을 각자의 진짜 팀으로 되돌려야 하는데, 그때 이 변환을
+ * 빠뜨리면 조회가 전부 빗나가 경험치가 0이 된다. 그래서 붙이는 쪽 바로 옆에 둔다.
+ * 선수 id는 `p_<base36>` 형식이라(generator) `~`를 포함하지 않는다.
+ */
+export function originalPlayerId(id: string): string {
+  const i = id.indexOf('~');
+  return i < 0 ? id : id.slice(i + 1);
+}
+
+/**
+ * 올스타 팀의 경기 기록에서 내가 낸 선수만 골라 원래 팀에서의 id로 되돌린다.
+ *
+ * 보상은 각자의 진짜 팀을 기준으로 계산되므로(matchReward.applyMatchResult가
+ * team.players의 id로 roster를 조회한다) 이 변환을 거치지 않으면 조회가 전부 빗나가
+ * 2대2만 항상 경험치 0이 된다.
+ */
+export function myAllStarShare(mine: TeamInGame, owners: OwnerMap, myUid: string): TeamInGame {
+  const roster: Record<string, Player> = {};
+  for (const [id, p] of Object.entries(mine.roster)) {
+    if (owners[id] === myUid) roster[originalPlayerId(id)] = p;
+  }
+  return { ...mine, roster, pitcherId: originalPlayerId(mine.pitcherId) };
 }
 
 function takePlayers(entry: AllStarEntry, ids: string[], side: Side): Player[] {

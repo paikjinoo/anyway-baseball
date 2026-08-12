@@ -23,9 +23,10 @@ import {
   PlayerPreview,
   type PreviewMode,
 } from '@/components/three/PlayerPreview';
+import { TierBadge } from '@/components/ui/TierBadge';
 import { arsenalOf } from '@/lib/game/pitching';
-import { ROTATION_SIZE, hitterScore, pitcherScore } from '@/lib/game/generator';
-import { bodyMod } from '@/lib/game/batting';
+import { ROTATION_SIZE, playerScore } from '@/lib/game/generator';
+import { bodyMod, injuryPenalty } from '@/lib/game/batting';
 import {
   TIER_COLOR,
   TIER_KO,
@@ -61,7 +62,7 @@ import {
   PITCH_ATTR_KO,
   STAMINA_DESC,
   learnPitch,
-  learnPitchCost,
+  learnPitchGold,
   learnablePitchesFor,
   pitchUpgradeCost,
   statUpgradeCost,
@@ -191,7 +192,7 @@ export default function RosterPage() {
         <div className="panel max-h-[70vh] overflow-y-auto p-2">
           {sorted.map((p) => {
             const isP = p.kind === 'PITCHER';
-            const score = Math.round(isP ? pitcherScore(p) / 2.9 : hitterScore(p) / 4.9);
+            const score = playerScore(p);
             return (
               <button
                 key={p.id}
@@ -265,7 +266,9 @@ export default function RosterPage() {
               {tab === 'train' && (
                 <TrainTab
                   player={selected}
+                  team={team}
                   onChange={(p, m) => updatePlayer(p, m)}
+                  onCommit={commit}
                   onMessage={setMsg}
                 />
               )}
@@ -297,18 +300,6 @@ export default function RosterPage() {
 }
 
 // ---------------------------------------------------------------------------
-
-function TierBadge({ player }: { player: Player }) {
-  return (
-    <span
-      className="shrink-0 rounded px-1 py-0.5 text-[10px] font-black leading-none"
-      style={{ background: TIER_COLOR[player.tier] + '30', color: TIER_COLOR[player.tier] }}
-    >
-      {player.tier}
-      <span className="ml-0.5 font-bold opacity-80">{player.level}</span>
-    </span>
-  );
-}
 
 /**
  * 선수 상세 머리말.
@@ -398,8 +389,9 @@ function PlayerHeader({
           </div>
           {player.injury && (
             <p className="mt-2 rounded-lg bg-rose-500/10 px-2.5 py-1.5 text-[11px] text-rose-300">
-              부상 ({player.injury.reason}) · {player.injury.gamesLeft}경기 남음 — 라인업·로테이션에
-              들어갈 수 없습니다. 부상치료제로 즉시 회복할 수 있습니다.
+              컨디션 난조 ({player.injury.reason}) · {player.injury.gamesLeft}경기 남음 — 출전은
+              가능하지만 경기 중 <b>모든 능력치가 {Math.round(injuryPenalty(player) * 100)}% 낮아집니다</b>.
+              회복이 가까워질수록 폭이 줄어듭니다. 부상치료제로 즉시 없앨 수 있습니다.
             </p>
           )}
         </div>
@@ -692,11 +684,16 @@ function TrainRow({
 
 function TrainTab({
   player,
+  team,
   onChange,
+  onCommit,
   onMessage,
 }: {
   player: Player;
+  team: Team;
   onChange: (p: Player, msg?: string) => void;
+  /** 구종 습득은 팀 골드를 쓰므로 팀째로 커밋한다 */
+  onCommit: (next: Team, msg?: string) => Promise<void>;
   onMessage: (m: string) => void;
 }) {
   const arsenal = arsenalOf(player);
@@ -813,19 +810,22 @@ function TrainTab({
             <p className="mb-4 text-xs text-slate-500">
               직구는 모든 투수가 기본 보유합니다. 보유할 수 있는 구종 수는 티어가 정합니다 (C 3 · B 4
               · A 5 · S 6). 습득 직후 능력치는 낮게 시작합니다.
+              <br />
+              <b>구종 습득에는 골드를 씁니다.</b> 훈련 포인트는 능력치에만 쓰입니다. (보유{' '}
+              <span className="tabular text-amber-300">{team.gold.toLocaleString()}G</span>)
             </p>
             <div className="grid gap-2 sm:grid-cols-2">
               {learnable.map((t) => {
                 const def = PITCH_DEFS[t];
-                const cost = learnPitchCost(t, player);
-                const can = player.trainingPoints >= cost && slotsLeft > 0;
+                const cost = learnPitchGold(t, player);
+                const can = team.gold >= cost && slotsLeft > 0;
                 return (
                   <button
                     key={t}
                     disabled={!can}
                     onClick={() => {
-                      const r = learnPitch(player, t, Date.now() >>> 0);
-                      if (r.ok) onChange(r.player, r.message);
+                      const r = learnPitch(team, player.id, t, Date.now() >>> 0);
+                      if (r.ok) void onCommit(r.team, r.message);
                       else onMessage(r.message);
                     }}
                     className={`rounded-xl border p-3 text-left transition ${
@@ -838,7 +838,9 @@ function TrainTab({
                       <span className="font-bold" style={{ color: def.color }}>
                         {def.ko}
                       </span>
-                      <span className="text-xs font-bold text-amber-300">{cost}P</span>
+                      <span className="text-xs font-bold tabular text-amber-300">
+                        {cost.toLocaleString()}G
+                      </span>
                     </div>
                     <div className="mt-1 text-[11px] leading-snug text-slate-500">{def.desc}</div>
                   </button>
@@ -1440,7 +1442,6 @@ function LineupTab({
                       <button
                         key={b.id}
                         className="btn !px-2 !py-1 !text-[11px]"
-                        disabled={!!b.injury}
                         onClick={() => {
                           const r = swapIntoLineup(team, i, b.id);
                           setSwapSlot(null);
@@ -1449,7 +1450,11 @@ function LineupTab({
                         }}
                       >
                         {b.name} · {POSITION_KO[b.position]}
-                        {b.injury && ' (부상)'}
+                        {b.injury && (
+                          <span className="ml-1 text-rose-300">
+                            (−{Math.round(injuryPenalty(b) * 100)}%)
+                          </span>
+                        )}
                       </button>
                     ))}
                   </div>

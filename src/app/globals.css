@@ -1224,6 +1224,138 @@ input[type='checkbox'] {
   }
 }
 
+/* ---------------------------------------------------------------------------
+   상점 — 영입 연출
+
+   등급이 높을수록 뜸을 오래 들인다. 후광은 어느 등급이든 700ms에 뜨고, 그 뒤로 얼마나 더
+   버티느냐가 등급이다. 연출 길이가 결과를 미리 흘리는 셈인데, 그게 이 장르의 재미다.
+
+   길이는 --hold, 색은 --tier / --tier-glow로 인라인에서 받는다. TierBadge와 같은
+   "hex + 알파 접미사" 방식이라 color-mix 없이도 티어 색을 그대로 쓸 수 있다.
+   감속 모션은 파일 맨 아래 전역 규칙이 이미 처리하므로 여기서 따로 막지 않는다.
+   --------------------------------------------------------------------------- */
+.shop-reveal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: radial-gradient(
+    ellipse 46% 38% at 50% 46%,
+    rgba(2, 8, 5, 0.8),
+    rgba(2, 8, 5, 0.95) 76%
+  );
+  backdrop-filter: blur(14px);
+  animation: inning-break-in 0.28s ease-out;
+}
+
+.shop-orb-wrap {
+  position: relative;
+  display: grid;
+  width: 148px;
+  height: 148px;
+  place-items: center;
+}
+
+.shop-orb {
+  position: absolute;
+  display: grid;
+  width: 118px;
+  height: 118px;
+  place-items: center;
+  border: 2px solid var(--border-strong);
+  border-radius: 999px;
+  background: rgba(220, 235, 225, 0.05);
+  color: var(--muted);
+  font-size: 2.2rem;
+  animation: shop-charge var(--hold, 1050ms) cubic-bezier(0.45, 0, 0.9, 0.35) forwards;
+}
+
+@keyframes shop-charge {
+  0% {
+    opacity: 0.5;
+    transform: scale(0.8);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  90% {
+    transform: scale(1.07);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.38);
+  }
+}
+
+/* 티어 색 후광. 700ms 뒤부터 남은 시간 동안 차오른다 — 이게 등급을 흘리는 장치다. */
+.shop-orb-halo {
+  position: absolute;
+  width: 148px;
+  height: 148px;
+  border: 2px solid var(--tier, var(--muted-2));
+  border-radius: 999px;
+  opacity: 0;
+  animation: shop-halo calc(var(--hold, 1050ms) - 700ms) ease-in 700ms forwards;
+}
+
+@keyframes shop-halo {
+  0% {
+    opacity: 0;
+    box-shadow: 0 0 0 var(--tier-glow, transparent);
+    transform: scale(0.86);
+  }
+  70% {
+    opacity: 1;
+    box-shadow: 0 0 42px var(--tier-glow, transparent);
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    box-shadow: 0 0 108px var(--tier-glow, transparent);
+    transform: scale(1.5);
+  }
+}
+
+/* 결과 카드가 뜨는 순간의 파문. A·S에만 붙인다. */
+.shop-burst {
+  position: absolute;
+  inset: 0;
+  border-radius: 26px;
+  pointer-events: none;
+  box-shadow: 0 0 0 0 var(--tier-glow, transparent);
+  animation: shop-burst 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes shop-burst {
+  from {
+    opacity: 0.9;
+    box-shadow: 0 0 0 0 var(--tier, transparent);
+  }
+  to {
+    opacity: 0;
+    box-shadow: 0 0 0 30px transparent;
+  }
+}
+
+/* S등급 카드만 계속 은은하게 숨 쉰다. 다른 등급은 정지 상태로 둔다. */
+.shop-card-s {
+  border-color: var(--tier, var(--accent-2)) !important;
+  animation: shop-shimmer 2.6s ease-in-out infinite;
+}
+
+@keyframes shop-shimmer {
+  0%,
+  100% {
+    box-shadow: 0 16px 42px rgba(0, 0, 0, 0.2), 0 0 22px var(--tier-glow, transparent);
+  }
+  50% {
+    box-shadow: 0 16px 42px rgba(0, 0, 0, 0.2), 0 0 54px var(--tier-glow, transparent);
+  }
+}
+
 @media (max-width: 1024px) {
   .topbar-inner {
     gap: 0.8rem;
@@ -1292,7 +1424,8 @@ input[type='checkbox'] {
     left: 10px;
     z-index: 50;
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
+    /* 홈 · 구단 · 선수 · 상점 · 리그 · 경기 · 설정 */
+    grid-template-columns: repeat(7, 1fr);
     overflow: hidden;
     border: 1px solid rgba(215, 235, 222, 0.15);
     border-radius: 18px;

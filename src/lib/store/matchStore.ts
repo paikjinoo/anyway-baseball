@@ -929,6 +929,8 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       state: null,
       relayState: null,
       phase: 'IDLE',
+      // CPU 경기에서만 세팅되는 값이라 지우지 않으면 다음 경기까지 따라간다.
+      difficulty: 'NORMAL',
       pitchClockEndsAt: 0,
       inningBreakEndsAt: 0,
       trajectory: null,

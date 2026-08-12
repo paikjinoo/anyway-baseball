@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from './appStore';
-import { isRelayMode, useMatchStore } from './matchStore';
+import { isPartyMode, isRelayMode, useMatchStore } from './matchStore';
+import { myAllStarShare } from '../game/allstar';
 import { relayStandings } from '../game/relay';
 import {
   applyMatchResult,
@@ -78,14 +79,16 @@ function rewardBasis(st: Store): Basis | null {
 
   const game = st.state;
   if (!game?.winner) return null;
-  const mine = game[st.playerSide];
+  const side = game[st.playerSide];
   const theirs = game[st.playerSide === 'away' ? 'home' : 'away'];
   const outcome = outcomeOf(game.winner, st.playerSide);
+  // 2대2는 한 편이 두 사람의 선수로 이뤄져 있어 내 몫만 떼어 낸다.
+  const mine = isPartyMode(st.mode) ? myAllStarShare(side, st.owners, st.myUid) : side;
   return {
     outcome,
     reason: outcome === 'WIN' ? '승리' : outcome === 'DRAW' ? '무승부' : '패배',
     mine,
-    runsScored: mine.runs,
+    runsScored: side.runs,
     runsAllowed: theirs.runs,
     seed: game.rngState,
     decisionPitcherId: mine.pitcherId,

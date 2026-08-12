@@ -11,7 +11,14 @@ import type { BatterPosition, PitcherRole, Player, Team } from './types';
  * 뿐이다. 선발은 항상 정확히 4명이고, 마무리는 최대 1명이다.
  */
 
-export const MAX_CLOSERS = 1;
+/**
+ * 마무리로 지정할 수 있는 인원.
+ *
+ * 마무리는 교체 후보 목록의 맨 뒤로 밀리는 역할 표시일 뿐이고(engine.RELIEF_ORDER),
+ * 같은 역할끼리는 남은 투구 여력 순으로 갈린다. 그래서 둘을 두면 스태미나가 넉넉한 쪽이
+ * 알아서 먼저 올라온다 — 경기마다 다른 마무리를 쓰고 싶다는 요구가 이걸로 해결된다.
+ */
+export const MAX_CLOSERS = 2;
 export const LINEUP_SIZE = 9;
 
 export const ROLE_KO: Record<PitcherRole, string> = {
@@ -45,10 +52,16 @@ export function closers(team: Team): Player[] {
 /** 라인업에 들어 있지 않은 타자 (경기 중 대타/대주자/대수비 후보) */
 export function benchBatters(team: Team): Player[] {
   const inLineup = new Set(team.lineup);
-  return battersOf(team).filter((p) => !inLineup.has(p.id) && !p.injury);
+  // 부상자도 후보에 남긴다. 능력치가 깎일 뿐 못 나가는 건 아니다(batting.withInjuryPenalty).
+  return battersOf(team).filter((p) => !inLineup.has(p.id));
 }
 
-/** 부상 중이거나 그 밖의 이유로 출전할 수 없는 선수인가 */
+/**
+ * 온전한 상태인가.
+ *
+ * 부상은 더 이상 출전을 막지 않는다 — 능력치가 남은 경기 수에 비례해 깎일 뿐이다.
+ * 그래서 이 함수는 "못 나간다"가 아니라 "자동 편성에서 뒤로 미룬다"의 기준으로만 쓴다.
+ */
 export function isAvailable(p: Player): boolean {
   return !p.injury;
 }
@@ -72,20 +85,14 @@ export function rosterIssues(team: Team, useDH = true): string[] {
     issues.push(`마무리는 최대 ${MAX_CLOSERS}명입니다.`);
   }
 
-  const healthyStarters = sp.filter(isAvailable);
-  if (healthyStarters.length === 0) {
-    issues.push('등판 가능한 선발 투수가 없습니다. 부상을 치료하거나 역할을 조정하세요.');
-  }
+  // 부상은 경기를 막지 않는다. 막아 버리면 회복이 경기 종료로만 진행되므로
+  // (matchReward의 gamesLeft 감소) 부상 하나로 아무것도 못 하는 상태에 갇힌다.
 
   const lineup = team.lineup;
   if (lineup.length !== LINEUP_SIZE || new Set(lineup).size !== LINEUP_SIZE) {
     issues.push(`타순은 서로 다른 ${LINEUP_SIZE}명이어야 합니다.`);
   } else {
     const byId = new Map(team.players.map((p) => [p.id, p]));
-    const injured = lineup.map((id) => byId.get(id)).filter((p) => p?.injury);
-    if (injured.length) {
-      issues.push(`타순에 부상 선수가 있습니다: ${injured.map((p) => p!.name).join(', ')}`);
-    }
     if (useDH) {
       const pitchers = lineup.map((id) => byId.get(id)).filter((p) => p?.kind === 'PITCHER');
       if (pitchers.length) {
@@ -180,7 +187,6 @@ export function swapIntoLineup(team: Team, slot: number, playerId: string): Rost
   const player = team.players.find((p) => p.id === playerId);
   if (!player) return { ok: false, team, message: '선수를 찾을 수 없습니다.' };
   if (player.kind !== 'BATTER') return { ok: false, team, message: '타자만 타순에 넣을 수 있습니다.' };
-  if (player.injury) return { ok: false, team, message: '부상 중인 선수입니다.' };
   if (slot < 0 || slot >= team.lineup.length) return { ok: false, team, message: '잘못된 타순입니다.' };
   if (team.lineup.includes(playerId)) {
     return { ok: false, team, message: '이미 타순에 있는 선수입니다.' };

@@ -1,6 +1,6 @@
 import { Rng, clamp, norm, seedFromString } from './rng';
 import { computePitch, describeLocation, pitchCapacity, staminaRemaining } from './pitching';
-import { judgeSwing, makeBattedBall, effectiveBatting } from './batting';
+import { judgeSwing, makeBattedBall, effectiveBatting, withInjuryPenalty } from './batting';
 import { resolveFielding, type DefenseMap } from './fielding';
 import { resolveAdvance, resolveSteals } from './baserunning';
 import { PITCH_DEFS, POSITION_KO, SWING_DEFS } from './constants';
@@ -30,22 +30,27 @@ import type {
 function toTeamInGame(team: Team, settings: GameSettings): TeamInGame {
   const roster: Record<string, Player> = {};
   for (const p of team.players) {
-    const copy = structuredClone(p);
+    // 부상 보정은 여기서 딱 한 번 건다. 이후 엔진 전체가 깎인 값을 읽는다.
+    const copy = structuredClone(withInjuryPenalty(p));
     // GameState에는 시즌 누적값이 아니라 이번 경기에서 생긴 델타만 담는다.
     copy.season = emptySeason();
     roster[p.id] = copy;
   }
 
-  // 부상 중인 선수는 등판·출전하지 않는다.
-  const healthy = (id: string) => roster[id] && !roster[id].injury;
-  const rotation = team.rotation.filter(healthy);
+  // 부상 중이어도 뛴다 (능력치가 깎인 상태로). 다만 성한 선수가 있으면 그쪽을 먼저 쓴다.
+  const healthy = (id: string) => !!roster[id] && !roster[id].injury;
+  const rotation = team.rotation.filter((id) => !!roster[id]);
+  const healthyRotation = rotation.filter(healthy);
   // 로테이션은 경기마다 한 칸씩 돈다. 피로가 이월되므로 에이스 한 명으로 다 돌릴 수 없다.
+  const turn = (list: string[]) =>
+    list.length ? list[team.rotationIndex % list.length] : undefined;
   const pitcherId =
-    (rotation.length ? rotation[team.rotationIndex % rotation.length] : undefined)
-    ?? team.players.find((p) => p.kind === 'PITCHER' && !p.injury)?.id
+    turn(healthyRotation)
+    ?? turn(rotation)
+    ?? team.players.find((p) => p.kind === 'PITCHER')?.id
     ?? team.players[0].id;
 
-  let lineup = team.lineup.filter(healthy);
+  let lineup = team.lineup.filter((id) => !!roster[id]);
   const storedLineupIsValid = lineup.length === 9 && new Set(lineup).size === 9;
   if (!storedLineupIsValid || !settings.useDH) lineup = autoLineup(team, settings.useDH);
 
@@ -966,11 +971,11 @@ export function benchCandidates(s: GameState, side: Side): Player[] {
     .filter(
       (p) =>
         p.kind === 'BATTER' &&
-        !p.injury &&
         !inLineup.has(p.id) &&
         !usedBatters.has(p.id) &&
         !usedPitchers.has(p.id),
     )
+    // 로스터의 능력치에는 이미 부상 보정이 걸려 있으므로, 부상자는 자연히 뒤로 밀린다.
     .sort((a, b) => hitterScore(b) - hitterScore(a));
 }
 
@@ -980,7 +985,6 @@ function subIssue(s: GameState, side: Side, playerId: string): string | null {
   const p = t.roster[playerId];
   if (!p) return '로스터에 없는 선수입니다.';
   if (p.kind !== 'BATTER') return '타자만 교체 투입할 수 있습니다.';
-  if (p.injury) return '부상 중인 선수입니다.';
   if (t.lineup.includes(playerId)) return '이미 경기에 나와 있습니다.';
   if ((t.usedBatterIds ?? []).includes(playerId)) return '이미 교체돼 나간 선수입니다.';
   return null;

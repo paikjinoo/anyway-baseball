@@ -59,7 +59,8 @@ export function RewardNote({ reward }: { reward: MatchRewardSummary }) {
 
       {injured.length > 0 && (
         <p className="mt-2 rounded-lg bg-rose-500/10 px-2 py-1.5 text-[11px] text-rose-300">
-          부상: {injured.map((l) => `${l.name}(${l.injured})`).join(', ')}
+          컨디션 난조: {injured.map((l) => `${l.name}(${l.injured})`).join(', ')} — 다음 경기부터
+          회복될 때까지 능력치가 조금 낮아집니다.
         </p>
       )}
 

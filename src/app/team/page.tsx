@@ -50,7 +50,8 @@ export default function TeamPage() {
       return;
     }
     const rng = new Rng(seedFromString(`${user.uid}-${Date.now()}`));
-    const team = generateTeam(rng, { ownerUid: user.uid });
+    // 창단은 경기를 굴릴 최소 인원(17명)만 받는다. 선수를 더 모으는 건 상점에서 한다.
+    const team = generateTeam(rng, { ownerUid: user.uid, plan: 'FOUNDING' });
     setSaving(true);
     await saveTeam(team);
     upsertTeam(team);

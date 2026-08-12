@@ -16,7 +16,13 @@ import {
   statCap,
   upgradeTier,
 } from './progression';
-import { learnPitch, learnablePitchesFor, statUpgradeCost, trainBatting } from './training';
+import {
+  learnPitch,
+  learnPitchGold,
+  learnablePitchesFor,
+  statUpgradeCost,
+  trainBatting,
+} from './training';
 import { useItem } from './items';
 import type { Player, Team, Tier } from './types';
 
@@ -32,6 +38,11 @@ function pitcher(overrides: Partial<Player> = {}): Player {
 
 function team(): Team {
   return generateTeam(new Rng(seedFromString('test-team')), { ownerUid: 'u1' });
+}
+
+/** 선수 한 명만 든 팀. 골드를 쓰는 함수(구종 습득 등)를 단독 검증할 때 쓴다. */
+function teamWith(p: Player, gold = 1_000_000): Team {
+  return { ...team(), gold, players: [p], lineup: [], rotation: [] };
 }
 
 /** 경험치를 부어 최대 레벨까지 올린다 */
@@ -201,24 +212,93 @@ describe('구종 슬롯', () => {
   });
 
   it('슬롯이 가득 차면 새 구종을 익힐 수 없다', () => {
-    let p = pitcher({ tier: 'C', trainingPoints: 100_000 });
+    let t = teamWith(pitcher({ tier: 'C' }));
+    const id = t.players[0].id;
     // C 슬롯(3)을 채운다
     let guard = 0;
-    while (pitchSlotsUsed(p) < TIER_PITCH_SLOTS.C && guard++ < 10) {
-      const next = learnablePitchesFor(p)[0];
+    while (pitchSlotsUsed(t.players[0]) < TIER_PITCH_SLOTS.C && guard++ < 10) {
+      const next = learnablePitchesFor(t.players[0])[0];
       if (!next) break;
-      p = learnPitch(p, next, guard).player;
+      t = learnPitch(t, id, next, guard).team;
     }
-    expect(pitchSlotsUsed(p)).toBe(TIER_PITCH_SLOTS.C);
+    expect(pitchSlotsUsed(t.players[0])).toBe(TIER_PITCH_SLOTS.C);
 
-    const wanted = learnablePitchesFor(p)[0];
-    const blocked = learnPitch(p, wanted, 99);
+    const wanted = learnablePitchesFor(t.players[0])[0];
+    const blocked = learnPitch(t, id, wanted, 99);
     expect(blocked.ok).toBe(false);
     expect(blocked.message).toContain('슬롯');
 
-    const promoted = { ...p, tier: 'B' as Tier, level: 1 };
-    expect(pitchSlots(promoted)).toBe(TIER_PITCH_SLOTS.B);
-    expect(learnPitch(promoted, wanted, 99).ok).toBe(true);
+    const promoted: Team = {
+      ...t,
+      players: [{ ...t.players[0], tier: 'B' as Tier, level: 1 }],
+    };
+    expect(pitchSlots(promoted.players[0])).toBe(TIER_PITCH_SLOTS.B);
+    expect(learnPitch(promoted, id, wanted, 99).ok).toBe(true);
+  });
+});
+
+describe('구종 습득 (골드)', () => {
+  it('골드가 부족하면 배우지 못하고 팀이 그대로다', () => {
+    const t = teamWith(pitcher({ tier: 'B' }), 0);
+    const wanted = learnablePitchesFor(t.players[0])[0];
+    const r = learnPitch(t, t.players[0].id, wanted, 1);
+    expect(r.ok).toBe(false);
+    expect(r.message).toContain('골드');
+    expect(r.team).toBe(t);
+  });
+
+  it('골드만 빠지고 훈련 포인트는 그대로다', () => {
+    const t = teamWith(pitcher({ tier: 'B', trainingPoints: 500 }), 50_000);
+    const p = t.players[0];
+    const wanted = learnablePitchesFor(p)[0];
+    const cost = learnPitchGold(wanted, p);
+
+    const r = learnPitch(t, p.id, wanted, 7);
+    expect(r.ok).toBe(true);
+    expect(r.team.gold).toBe(50_000 - cost);
+    expect(r.team.players[0].trainingPoints).toBe(500);
+    expect(r.team.players[0].spentPoints).toBe(p.spentPoints);
+    expect(pitchSlotsUsed(r.team.players[0])).toBe(pitchSlotsUsed(p) + 1);
+  });
+
+  it('습득 비용이 spentGold에 누적된다', () => {
+    let t = teamWith(pitcher({ tier: 'S' }), 200_000);
+    const id = t.players[0].id;
+    let expected = 0;
+    for (let i = 0; i < 2; i++) {
+      const wanted = learnablePitchesFor(t.players[0])[0];
+      expected += learnPitchGold(wanted, t.players[0]);
+      t = learnPitch(t, id, wanted, i + 1).team;
+    }
+    expect(t.players[0].spentGold).toBe(expected);
+    expect(t.gold).toBe(200_000 - expected);
+  });
+
+  it('능력치초기화권이 구종 습득 골드를 팀에 환급한다', () => {
+    let t = teamWith(pitcher({ tier: 'B' }), 50_000);
+    t = { ...t, inventory: { RESET_STATS: 1 } };
+    const id = t.players[0].id;
+    const before = pitchSlotsUsed(t.players[0]);
+    const wanted = learnablePitchesFor(t.players[0])[0];
+
+    t = learnPitch(t, id, wanted, 3).team;
+    expect(t.gold).toBeLessThan(50_000);
+
+    const r = useItem(t, id, 'RESET_STATS');
+    expect(r.ok).toBe(true);
+    // 골드가 전액 돌아오고, 골드로 배운 구종은 사라진다
+    expect(r.team.gold).toBe(50_000);
+    expect(r.team.players[0].spentGold).toBe(0);
+    expect(pitchSlotsUsed(r.team.players[0])).toBe(before);
+  });
+
+  it('훈련 포인트도 골드도 쓴 적 없으면 초기화권을 쓸 수 없다', () => {
+    const t = {
+      ...teamWith(pitcher({ spentPoints: 0, spentGold: 0 })),
+      inventory: { RESET_STATS: 1 },
+    };
+    const r = useItem(t, t.players[0].id, 'RESET_STATS');
+    expect(r.ok).toBe(false);
   });
 });
 
@@ -255,6 +335,25 @@ describe('아이템', () => {
     const after = r.team.players.find((p) => p.id === target.id)!;
     expect(after.level).toBeGreaterThan(target.level);
     expect(after.trainingPoints).toBeGreaterThan(target.trainingPoints);
+  });
+
+  it('최대 레벨에 막혀 버려진 분량을 메시지에 알린다', () => {
+    // C티어 한 구간(602)보다 특대(1,000)가 크므로 낮은 레벨에 쓰면 일부가 버려진다.
+    const t = team();
+    const target = { ...t.players.find((p) => p.kind === 'BATTER')!, tier: 'C' as Tier, level: 1, exp: 0 };
+    const withItem: Team = {
+      ...t,
+      inventory: { EXP_XL: 1 },
+      players: t.players.map((p) => (p.id === target.id ? target : p)),
+    };
+
+    const r = useItem(withItem, target.id, 'EXP_XL');
+    expect(r.ok).toBe(true);
+    expect(r.team.players.find((p) => p.id === target.id)!.level).toBe(TIER_MAX_LEVEL.C);
+    expect(r.message).toContain('버려짐');
+
+    // 버릴 것이 없으면 군더더기를 붙이지 않는다
+    expect(useItem(withItem, target.id, 'EXP_S').message).not.toContain('버려짐');
   });
 
   it('스테미나회복제는 투수에게만 쓸 수 있다', () => {

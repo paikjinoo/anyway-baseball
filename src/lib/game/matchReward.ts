@@ -51,7 +51,7 @@ const INJURY_MAX_CHANCE = 0.35;
 
 export interface MatchRewardContext {
   kind: 'CPU' | 'LEAGUE' | 'ONLINE' | 'RELAY';
-  /** CPU/리그 난이도. 없으면 NORMAL로 본다. */
+  /** CPU/리그 난이도. 없으면 NORMAL로 본다. 온라인·릴레이에서는 무시된다. */
   difficulty?: Difficulty;
   outcome: MatchOutcome;
   runsScored: number;
@@ -109,6 +109,20 @@ export function mergeSeason(a: SeasonStat, b: SeasonStat): SeasonStat {
 // ---------------------------------------------------------------------------
 
 /**
+ * 보상에 적용할 난이도 배수.
+ *
+ * 온라인·릴레이는 상대가 사람이라 난이도라는 개념 자체가 없으므로 항상 1이다.
+ * 여기서 kind로 가르는 이유는 호출하는 쪽을 믿을 수 없기 때문이다 — difficulty는
+ * CPU 경기를 시작할 때만 세팅되고 온라인 경기 시작이나 reset()이 지우지 않아서,
+ * 프로 난이도로 CPU를 한 판 하고 온라인에 가면 그 배수가 그대로 따라붙었다.
+ * 득점·완봉 보너스를 kind로 가르는 것과 같은 자리, 같은 방식이다.
+ */
+function rewardDifficultyMult(ctx: MatchRewardContext): number {
+  if (ctx.kind === 'ONLINE' || ctx.kind === 'RELAY') return 1;
+  return DIFFICULTY_REWARD_MULT[ctx.difficulty ?? 'NORMAL'];
+}
+
+/**
  * 이 경기에서 선수 한 명이 받는 경험치.
  *
  * 출전하지 않은 선수는 0이다 (요구사항: "경기에 참가시킨 선수들은 경기 종료 후 경험치 획득").
@@ -120,9 +134,7 @@ export function playerMatchExp(
   ctx: MatchRewardContext,
 ): number {
   const mult =
-    DIFFICULTY_REWARD_MULT[ctx.difficulty ?? 'NORMAL'] *
-    OUTCOME_MULT[ctx.outcome] *
-    clamp(ctx.expScale ?? 1, 0, 1);
+    rewardDifficultyMult(ctx) * OUTCOME_MULT[ctx.outcome] * clamp(ctx.expScale ?? 1, 0, 1);
 
   if (player.kind === 'PITCHER') {
     if (line.np <= 0) return 0;
@@ -148,11 +160,11 @@ export function playerMatchExp(
  * 팀이 받는 골드.
  *
  * 온라인·릴레이는 득점과 완봉에 값을 매기지 않는다. 상대와 짜고 치면 점수는 얼마든지 만들 수
- * 있어서, 득점에 값을 걸면 그게 곧 승부조작의 대가가 되기 때문이다. 승패라는 결과 하나만 본다.
+ * 있어서, 득점에 값을 걸면 그게 곧 승부조작의 대가가 되기 때문이다. 난이도 배수도 붙지 않으므로
+ * (rewardDifficultyMult) 온라인 보상은 승패라는 결과 하나만 본다.
  */
 export function matchGold(ctx: MatchRewardContext): number {
-  const mult =
-    DIFFICULTY_REWARD_MULT[ctx.difficulty ?? 'NORMAL'] * OUTCOME_MULT[ctx.outcome];
+  const mult = rewardDifficultyMult(ctx) * OUTCOME_MULT[ctx.outcome];
   let gold = BASE_GAME_GOLD * mult;
   if (ctx.kind === 'CPU' || ctx.kind === 'LEAGUE') {
     gold += Math.min(200, ctx.runsScored * 10);

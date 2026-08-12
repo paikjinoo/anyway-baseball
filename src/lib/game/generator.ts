@@ -1,6 +1,7 @@
 import { Rng, clamp } from './rng';
 import { LEARNABLE_PITCHES, PITCH_DEFS } from './constants';
-import { TIER_PITCH_SLOTS } from './progression';
+import { withInjuryPenalty } from './batting';
+import { TIER_PITCH_SLOTS, TIER_POTENTIAL } from './progression';
 import { TEAM_SCHEMA_VERSION } from './types';
 import type {
   BatSide,
@@ -15,9 +16,11 @@ import type {
   PitchingAttr,
   PitchingForm,
   Player,
+  PlayerBase,
   Position,
   SeasonStat,
   Team,
+  Tier,
   UniformType,
 } from './types';
 
@@ -169,26 +172,36 @@ function makeGear(rng: Rng, pos: Position, teamColor: string, accent: string): G
 /**
  * 투수 아스널 생성. 직구는 반드시 포함한다.
  *
- * 신규 선수는 전원 C등급이고 C등급 구종 슬롯은 3개이므로, 직구를 뺀 변화구는 최대 2개다.
+ * 보유 구종 수는 티어가 정한다(TIER_PITCH_SLOTS). 창단 선수는 전원 C등급이라 직구를 뺀
+ * 변화구가 최대 2개고, 상점에서 영입한 상위 티어는 그만큼 더 갖고 나온다.
  * 선발이 상한을 채우고 불펜은 하나 적게 시작한다.
  */
-function makeArsenal(rng: Rng, budget: number, isStarter: boolean): PitchingAttr {
+function makeArsenal(rng: Rng, budget: number, isStarter: boolean, tier: Tier): PitchingAttr {
   const arsenal: Partial<Record<PitchType, PitchAttr>> = {};
 
   // 직구 능력치
   const fourseam = distribute(rng, ['v', 'c', 'm'], [1.15, 1.0, 0.85], budget, 25, 95);
   arsenal.FOURSEAM = { velocity: fourseam[0], control: fourseam[1], movement: fourseam[2] };
 
-  // 직구를 뺀 나머지 슬롯. C등급 상한(3개)을 절대 넘지 않는다.
-  const breakingSlots = TIER_PITCH_SLOTS.C - 1;
+  // 직구를 뺀 나머지 슬롯. 티어 상한을 절대 넘지 않는다.
+  const breakingSlots = TIER_PITCH_SLOTS[tier] - 1;
   const count = Math.min(breakingSlots, isStarter ? breakingSlots : rng.int(1, breakingSlots));
   const pool = rng.shuffle(LEARNABLE_PITCHES.slice());
   for (let i = 0; i < count; i++) {
     const t = pool[i];
     if (!t) break;
     const def = PITCH_DEFS[t];
-    // 난이도가 높은 구종일수록 초기 숙련도가 낮다
-    const b = budget * clamp(rng.range(0.72, 0.98) - (def.difficulty - 1) * 0.06, 0.42, 1.0);
+    // 난이도가 높은 구종일수록 초기 숙련도가 낮다.
+    // 세 번째 변화구부터는 추가로 깎는다 — 훈련(골드)으로 배운 구종도 낮게 시작하므로,
+    // 티어 덕에 공짜로 받은 확장 슬롯이 그보다 좋게 나오면 안 된다.
+    // i가 0·1이면 감쇠항이 정확히 0이라 C등급 생성 결과는 한 톨도 달라지지 않는다.
+    const b =
+      budget *
+      clamp(
+        rng.range(0.72, 0.98) - (def.difficulty - 1) * 0.06 - Math.max(0, i - 1) * 0.11,
+        0.42,
+        1.0,
+      );
     const v = distribute(rng, ['v', 'c', 'm'], [0.9, 1.0, 1.15], b, 20, 92);
     arsenal[t] = { velocity: v[0], control: v[1], movement: v[2] };
   }
@@ -196,6 +209,26 @@ function makeArsenal(rng: Rng, budget: number, isStarter: boolean): PitchingAttr
   return {
     stamina: Math.round(isStarter ? rng.normal(72, 10, 2) : rng.normal(46, 9, 2)),
     arsenal,
+  };
+}
+
+/** 티어별 잠재력 추첨. C는 창단 선수와 완전히 같은 식이다(같은 호출, 같은 난수 소비). */
+function rollPotential(rng: Rng, tier: Tier): number {
+  const t = TIER_POTENTIAL[tier];
+  return Math.round(clamp(rng.normal(t.mu, t.sigma, 2), t.lo, t.hi));
+}
+
+/**
+ * 능력치초기화권이 되돌릴 지점. 훈련으로 바뀔 값만 복사해 둔다.
+ *
+ * 선수를 만드는 곳이 둘(창단 생성 · 상점 영입)이라 반드시 같은 함수를 써야 한다.
+ * 두 벌로 갈라지면 초기화권이 한쪽에서만 제대로 동작한다.
+ */
+export function snapshotBase(p: Player): PlayerBase {
+  return {
+    batting: { ...p.batting },
+    stamina: p.pitching?.stamina ?? 0,
+    arsenal: structuredClone(p.pitching?.arsenal ?? {}),
   };
 }
 
@@ -209,6 +242,12 @@ export interface GeneratePlayerOptions {
   name?: string;
   /** 팀 전체 전력 보정. 1.0이 기본. */
   strength?: number;
+  /**
+   * 티어. 능력치 상한·잠재력 분포·구종 슬롯 수를 함께 정한다. 기본값은 C.
+   * 능력치 자체는 티어와 무관하게 뽑히므로, 상위 티어로 만들려면 생성 후
+   * training.autoInvest로 그 티어까지의 성장분을 채워 넣어야 한다.
+   */
+  tier?: Tier;
 }
 
 /** 체형 추첨. 기본형이 절반이고 슬림/거구가 나머지를 반씩 나눈다. */
@@ -221,6 +260,7 @@ function rollBody(rng: Rng): BodyType {
 export function generatePlayer(rng: Rng, opt: GeneratePlayerOptions): Player {
   const pos = opt.position;
   const strength = opt.strength ?? 1.0;
+  const tier = opt.tier ?? 'C';
   const isPitcher = pos === 'P';
   const role: PitcherRole | undefined = isPitcher ? (opt.role ?? 'RP') : undefined;
   const isStarter = role === 'SP';
@@ -256,11 +296,11 @@ export function generatePlayer(rng: Rng, opt: GeneratePlayerOptions): Player {
     form: (isPitcher ? rng.int(0, 4) : rng.int(0, 1)) as PitchingForm,
     gear: makeGear(rng, pos, opt.teamColor ?? '#2563eb', opt.accentColor ?? '#f59e0b'),
     batting,
-    // 기본 지급 선수는 전원 C등급 1레벨에서 시작한다.
-    tier: 'C',
+    // 창단 선수는 전원 C등급 1레벨에서 시작한다. 상점 영입만 tier를 넘긴다.
+    tier,
     level: 1,
     exp: 0,
-    potential: Math.round(clamp(rng.normal(82, 7, 2), 62, 99)),
+    potential: rollPotential(rng, tier),
     // 훈련 포인트는 레벨업으로만 들어온다. 창단 직후엔 비어 있다.
     trainingPoints: 0,
     spentPoints: 0,
@@ -271,7 +311,7 @@ export function generatePlayer(rng: Rng, opt: GeneratePlayerOptions): Player {
 
   if (isPitcher) {
     const pbudget = clamp(rng.normal(PITCHER_BUDGET_MEAN, PITCHER_BUDGET_SD) * strength, 120, 240);
-    player.pitching = makeArsenal(rng, pbudget, isStarter);
+    player.pitching = makeArsenal(rng, pbudget, isStarter, tier);
   } else {
     // 야수도 비상시 등판할 수 있도록 아주 낮은 직구 하나만 부여
     player.pitching = {
@@ -286,12 +326,7 @@ export function generatePlayer(rng: Rng, opt: GeneratePlayerOptions): Player {
     };
   }
 
-  // 능력치초기화권이 되돌릴 지점. 훈련으로 바뀔 값만 복사해 둔다.
-  player.base = {
-    batting: { ...batting },
-    stamina: player.pitching.stamina,
-    arsenal: structuredClone(player.pitching.arsenal),
-  };
+  player.base = snapshotBase(player);
 
   return player;
 }
@@ -332,8 +367,68 @@ const ROSTER_PLAN: { position: Position; role?: PitcherRole }[] = [
   { position: '1B' },
 ];
 
+/**
+ * 창단 시 지급하는 로스터: 투수 7 (선발 4 · 중간계투 1 · 마무리 2) + 타자 10 = 17명.
+ *
+ * 경기를 굴릴 최소 인원에 여유 한 겹만 얹은 구성이다. 불펜이 3명뿐이라 선발이 지치면
+ * 바로 아쉬워지고, 벤치 타자도 한 명뿐이라 부상 하나에 라인업이 흔들린다 — 상점에서
+ * 선수를 더 데려올 이유가 여기서 나온다. C등급이 뽑혀도 쓸 자리가 있다는 게 핵심이다.
+ *
+ * 선발은 4명을 유지한다. 3명으로 줄이면 등판 간격이 2경기가 되는데, 피로 회복이 쉬는
+ * 경기당 1/3이라 항상 3분의 2쯤 지친 상태로 나가게 된다(영구 핸디캡).
+ *
+ * 벤치 한 자리는 중견수로 둔다. 대타보다 대주자·대수비로 쓸 일이 많고, 한 장뿐인 교체
+ * 카드로는 그쪽이 훨씬 자주 쓸모 있다.
+ */
+const FOUNDING_PLAN: { position: Position; role?: PitcherRole }[] = [
+  { position: 'P', role: 'SP' },
+  { position: 'P', role: 'SP' },
+  { position: 'P', role: 'SP' },
+  { position: 'P', role: 'SP' },
+  { position: 'P', role: 'RP' },
+  { position: 'P', role: 'CP' },
+  { position: 'P', role: 'CP' },
+  { position: 'C' },
+  { position: '1B' },
+  { position: '2B' },
+  { position: '3B' },
+  { position: 'SS' },
+  { position: 'LF' },
+  { position: 'CF' },
+  { position: 'RF' },
+  { position: 'DH' },
+  { position: 'CF' },
+];
+
+/**
+ * 로스터 구성 방식.
+ * FULL은 CPU·리그 상대팀용 23명, FOUNDING은 플레이어 창단용 17명이다.
+ * CPU까지 같이 줄이면 상대 불펜이 얇아져 후반에 무너지므로 난이도가 조용히 내려간다.
+ */
+export type RosterPlanKind = 'FULL' | 'FOUNDING';
+
 /** 선발 로테이션에 반드시 등록해야 하는 인원 */
 export const ROTATION_SIZE = 4;
+
+/** 창단 때 나눠 주는 등번호 범위. 상점 영입도 같은 범위에서 빈 번호를 찾는다. */
+export const JERSEY_POOL = 70;
+
+/**
+ * 이 팀에서 아직 쓰지 않은 등번호 하나.
+ *
+ * 무작위로 고른다 — 새로 들어온 선수가 늘 가장 작은 빈 번호를 받으면 티가 난다.
+ */
+export function freeJerseyNumber(team: Team, rng: Rng): number {
+  const used = new Set(team.players.map((p) => p.number));
+  const free: number[] = [];
+  for (let n = 1; n <= JERSEY_POOL; n++) if (!used.has(n)) free.push(n);
+  // rng.pick은 빈 배열에서 undefined를 돌려주므로 반드시 먼저 막는다
+  if (free.length) return rng.pick(free);
+
+  let n = JERSEY_POOL + 1;
+  while (used.has(n)) n++;
+  return n;
+}
 
 export const TEAM_COLOR_PRESETS: { primary: string; secondary: string; accent: string }[] = [
   { primary: '#1d4ed8', secondary: '#f8fafc', accent: '#fbbf24' },
@@ -365,6 +460,8 @@ export interface GenerateTeamOptions {
   /** 전력 배율. CPU 난이도 조절에 사용. */
   strength?: number;
   id?: string;
+  /** 로스터 구성. 기본은 CPU·리그용 23명. 플레이어 창단은 'FOUNDING'을 넘긴다. */
+  plan?: RosterPlanKind;
 }
 
 export function generateTeam(rng: Rng, opt: GenerateTeamOptions): Team {
@@ -374,8 +471,9 @@ export function generateTeam(rng: Rng, opt: GenerateTeamOptions): Team {
   const secondaryColor = opt.secondaryColor ?? preset.secondary;
   const accentColor = opt.accentColor ?? preset.accent;
 
-  const numbers = rng.shuffle(Array.from({ length: 70 }, (_, i) => i + 1));
-  const players = ROSTER_PLAN.map((slot, i) =>
+  const numbers = rng.shuffle(Array.from({ length: JERSEY_POOL }, (_, i) => i + 1));
+  const plan = opt.plan === 'FOUNDING' ? FOUNDING_PLAN : ROSTER_PLAN;
+  const players = plan.map((slot, i) =>
     generatePlayer(rng, {
       position: slot.position,
       role: slot.role,
@@ -431,9 +529,13 @@ export function autoRotation(team: Team): string[] {
  * 세이버메트릭스식 정렬(출루형 -> 중심타선 -> 하위)로 타순을 정한다.
  */
 export function autoLineup(team: Team, useDH = true): string[] {
-  const available = team.players.filter((p) => p.kind === 'BATTER' && !p.injury);
+  // 부상자도 후보에 넣는다 — 능력치가 깎일 뿐 못 나가는 게 아니다. 대신 깎인 값으로 줄을
+  // 세우므로, 성한 선수가 있으면 자연히 그쪽이 앞선다. 아예 빼면 타자가 빠듯한 로스터에서
+  // 9명을 못 채워 경기 편성이 막힌다.
+  const score = (p: Player) => hitterScore(withInjuryPenalty(p));
+  const available = team.players.filter((p) => p.kind === 'BATTER');
   const byPos = (pos: Position) =>
-    available.filter((p) => p.position === pos).sort((a, b) => hitterScore(b) - hitterScore(a));
+    available.filter((p) => p.position === pos).sort((a, b) => score(b) - score(a));
 
   const chosen: Player[] = [];
   const taken = new Set<string>();
@@ -451,7 +553,7 @@ export function autoLineup(team: Team, useDH = true): string[] {
   if (useDH) {
     const dh = available
       .filter((p) => !taken.has(p.id))
-      .sort((a, b) => hitterScore(b) - hitterScore(a))[0];
+      .sort((a, b) => score(b) - score(a))[0];
     if (dh) {
       chosen.push(dh);
       taken.add(dh.id);
@@ -471,7 +573,7 @@ export function autoLineup(team: Team, useDH = true): string[] {
     taken.add(f.id);
   }
 
-  const sorted = chosen.slice().sort((a, b) => hitterScore(b) - hitterScore(a));
+  const sorted = chosen.slice().sort((a, b) => score(b) - score(a));
   // 1번 발 빠르고 눈 좋은 선수, 3~4번 장타자, 2번 정확도
   const leadoff = sorted
     .slice()
@@ -501,6 +603,17 @@ export function pitcherScore(p: Player): number {
     0,
   );
   return best / arr.length + arr.length * 12 + p.pitching.stamina * 0.4;
+}
+
+/**
+ * 목록·카드에 쓰는 선수 종합 지표 (0~100).
+ *
+ * pitcherScore는 구종 하나당 +12를 얹으므로 슬롯을 꽉 채운 S등급 투수는 100을 넘긴다.
+ * teamRating과 같은 방식으로 잘라 낸다 — 화면에 101이 뜨면 그건 지표가 아니라 버그로 읽힌다.
+ */
+export function playerScore(p: Player): number {
+  const raw = p.kind === 'PITCHER' ? pitcherScore(p) / 2.9 : hitterScore(p) / 4.9;
+  return Math.round(clamp(raw, 0, 100));
 }
 
 /** 팀 전체 전력 지표 (0~100). 매치메이킹/CPU 난이도 표시에 쓴다. */
