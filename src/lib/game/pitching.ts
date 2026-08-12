@@ -6,10 +6,12 @@ import {
   PITCH_DEFS,
   ZONE_HALF_HEIGHT,
   ZONE_HALF_WIDTH,
+  ZONE_STRIKE_LIMIT,
+  ZONE_THIRD,
   worldToZone,
   zoneToWorld,
 } from './constants';
-import type { PitchCommand, PitchTrajectory, Player, Vec3 } from './types';
+import type { BatSide, PitchCommand, PitchTrajectory, Player, Vec3 } from './types';
 
 /**
  * 릴리스 포인트. 폼(사이드암/언더핸드 등)과 좌우 투수에 따라 달라진다.
@@ -140,7 +142,8 @@ export function computePitch(
   const dist = Math.hypot(release.x - plate.x, release.y - plate.y, release.z - plate.z);
   const flightTime = dist / (mps * 0.92);
 
-  const isStrikeZone = Math.abs(zoneX) <= 1.06 && Math.abs(zoneY) <= 1.06;
+  const isStrikeZone =
+    Math.abs(zoneX) <= ZONE_STRIKE_LIMIT && Math.abs(zoneY) <= ZONE_STRIKE_LIMIT;
 
   return {
     type: cmd.type,
@@ -234,20 +237,85 @@ export function pitchPositionExtended(traj: PitchTrajectory, t: number): Vec3 {
   };
 }
 
-/** 존 좌표 -> 화면 표시용 문자열 (실황 텍스트) */
+/**
+ * 존 좌표 -> 화면 표시용 문자열 (실황 텍스트)
+ *
+ * **몸쪽/바깥쪽 표기는 우타자 기준이다.** 좌타 타석에서는 실제로 반대편이므로
+ * 코스별 기록에는 이 함수를 쓰지 않는다 (@see zoneCell).
+ */
 export function describeLocation(zx: number, zy: number): string {
-  if (Math.abs(zx) > 1.06 || Math.abs(zy) > 1.06) {
+  if (Math.abs(zx) > ZONE_STRIKE_LIMIT || Math.abs(zy) > ZONE_STRIKE_LIMIT) {
     const parts: string[] = [];
-    if (zy > 1.06) parts.push('높은');
-    else if (zy < -1.06) parts.push('낮은');
-    if (zx > 1.06) parts.push('바깥쪽');
-    else if (zx < -1.06) parts.push('몸쪽');
+    if (zy > ZONE_STRIKE_LIMIT) parts.push('높은');
+    else if (zy < -ZONE_STRIKE_LIMIT) parts.push('낮은');
+    if (zx > ZONE_STRIKE_LIMIT) parts.push('바깥쪽');
+    else if (zx < -ZONE_STRIKE_LIMIT) parts.push('몸쪽');
     return `${parts.join(' ')} 코스`;
   }
-  const v = zy > 0.35 ? '높은' : zy < -0.35 ? '낮은' : '가운데';
-  const h = zx > 0.35 ? '바깥쪽' : zx < -0.35 ? '몸쪽' : '한복판';
+  const v = zy > ZONE_THIRD ? '높은' : zy < -ZONE_THIRD ? '낮은' : '가운데';
+  const h = zx > ZONE_THIRD ? '바깥쪽' : zx < -ZONE_THIRD ? '몸쪽' : '한복판';
   return v === '가운데' && h === '한복판' ? '한복판' : `${v} ${h}`;
 }
+
+/**
+ * 투구 위치를 3×3 코스 칸(0~8)으로 나눈다.
+ *
+ * **타자 기준이다** — 같은 zoneX가 우타에게는 바깥쪽, 좌타에게는 몸쪽이므로 좌타는
+ * 좌우를 접어 넣는다. 스위치히터가 매 타석 반대편에 서도 약점이 한 칸에 모이려면
+ * 이 기준이어야 한다. 호출하는 쪽은 batter.bats가 아니라 반드시
+ * batting.effectiveBatSide()를 넘겨야 한다 ('S'가 그대로 오면 우타로 처리된다).
+ *
+ * 존 밖 공도 버리지 않고 가장 가까운 가장자리 칸에 넣는다. 낮은 바깥쪽 유인구에
+ * 속아 삼진당한 것도 그 코스의 약점이고, 그래야 **9칸 타수 합 = 실제 타수**라는
+ * 불변식이 성립해 집계 누락을 테스트로 잡을 수 있다.
+ *
+ * ```
+ *   0 높은 몸쪽   1 높은 한복판   2 높은 바깥쪽
+ *   3 몸쪽        4 한복판        5 바깥쪽
+ *   6 낮은 몸쪽   7 낮은 한복판   8 낮은 바깥쪽
+ * ```
+ */
+export function zoneCell(zoneX: number, zoneY: number, batSide: BatSide): number {
+  // rx < 0 이 늘 몸쪽이 되도록 좌타에서 뒤집는다.
+  const rx = batSide === 'L' ? -zoneX : zoneX;
+  const col = rx > ZONE_THIRD ? 2 : rx < -ZONE_THIRD ? 0 : 1;
+  const row = zoneY > ZONE_THIRD ? 0 : zoneY < -ZONE_THIRD ? 2 : 1;
+  return row * 3 + col;
+}
+
+/**
+ * 화면의 3×3 그리드 칸(0~8, 좌상단부터) -> 기록된 코스 칸 번호.
+ *
+ * 좌우를 **두 번** 뒤집는다. 하나만 적용하면 절반의 경우에만 맞아서 눈으로도 잘 안 잡힌다.
+ *   - mirrored: 카메라가 존을 좌우 반전해 보여주는가 (PitchPanel의 목표 마커와 같은 부호)
+ *   - batSide: zoneCell이 타자 기준으로 접어 저장했으므로 화면 기준으로 되돌린다
+ *
+ * 세로는 어느 쪽도 뒤집지 않는다 — 패널 위쪽은 늘 높은 공이다.
+ */
+export function screenCellToZoneCell(i: number, batSide: BatSide, mirrored: boolean): number {
+  const sb = batSide === 'L' ? -1 : 1;
+  const sx = mirrored ? -1 : 1;
+  return Math.floor(i / 3) * 3 + (1 + sb * sx * ((i % 3) - 1));
+}
+
+/**
+ * 칸 번호 -> 한글 이름. 툴팁과 스크린리더용.
+ *
+ * 우타 기준 describeLocation이 내놓는 문구와 **한 글자까지 같다.** 실황이 "가운데 바깥쪽"이라
+ * 말한 공이 히트맵 툴팁에서는 "바깥쪽"이면 같은 것을 가리키는지 알 수 없기 때문이다.
+ * zone.test.ts가 둘을 맞대어 고정한다.
+ */
+export const ZONE_CELL_KO: readonly string[] = [
+  '높은 몸쪽',
+  '높은 한복판',
+  '높은 바깥쪽',
+  '가운데 몸쪽',
+  '한복판',
+  '가운데 바깥쪽',
+  '낮은 몸쪽',
+  '낮은 한복판',
+  '낮은 바깥쪽',
+];
 
 /** 투수의 보유 구종 목록 */
 export function arsenalOf(p: Player) {

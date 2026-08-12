@@ -24,9 +24,10 @@ import {
   type PreviewMode,
 } from '@/components/three/PlayerPreview';
 import { TierBadge } from '@/components/ui/TierBadge';
-import { arsenalOf } from '@/lib/game/pitching';
+import { ZONE_CELL_KO, arsenalOf } from '@/lib/game/pitching';
 import { ROTATION_SIZE, playerScore } from '@/lib/game/generator';
 import { bodyMod, injuryPenalty } from '@/lib/game/batting';
+import { careerWithCurrent } from '@/lib/game/season';
 import {
   TIER_COLOR,
   TIER_KO,
@@ -64,7 +65,10 @@ import {
   learnPitch,
   learnPitchGold,
   learnablePitchesFor,
+  pitchTrainingRefund,
   pitchUpgradeCost,
+  replaceablePitchesOf,
+  replacePitch,
   statUpgradeCost,
   trainBatting,
   trainPitch,
@@ -83,9 +87,26 @@ import type {
   Team,
 } from '@/lib/game/types';
 import { BATTER_POSITIONS, PITCHER_ROLES } from '@/lib/game/types';
-import { baseballRate } from '@/lib/format';
+import { baseballRate, zoneHeatColor } from '@/lib/format';
 
 type Tab = 'stats' | 'train' | 'grow' | 'gear' | 'lineup';
+
+const TAB_LABEL: Record<Tab, string> = {
+  stats: '능력 분석',
+  train: '훈련',
+  grow: '성장',
+  gear: '커스터마이징',
+  lineup: '타순·로테이션',
+};
+
+/** 선수 명단을 투수/타자로 갈라 보는 필터 */
+type RosterFilter = 'ALL' | 'PITCHER' | 'BATTER';
+
+const FILTER_LABEL: Record<RosterFilter, string> = {
+  ALL: '전체',
+  PITCHER: '투수',
+  BATTER: '타자',
+};
 
 export default function RosterPage() {
   const router = useRouter();
@@ -95,6 +116,7 @@ export default function RosterPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('stats');
+  const [filter, setFilter] = useState<RosterFilter>('ALL');
 
   useEffect(() => {
     if (team && (!selectedId || !team.players.some((p) => p.id === selectedId))) {
@@ -151,85 +173,186 @@ export default function RosterPage() {
     );
   }
 
+  const pitchers = sorted.filter((p) => p.kind === 'PITCHER');
+  const batters = sorted.filter((p) => p.kind !== 'PITCHER');
+  const pitcherCount = pitchers.length;
+  const batterCount = batters.length;
+
+  const PITCHER_GROUP = { key: 'PITCHER', label: '투수', sub: 'PITCHING STAFF', players: pitchers };
+  const BATTER_GROUP = { key: 'BATTER', label: '타자', sub: 'POSITION PLAYERS', players: batters };
+  const groups =
+    filter === 'PITCHER'
+      ? [PITCHER_GROUP]
+      : filter === 'BATTER'
+        ? [BATTER_GROUP]
+        : [PITCHER_GROUP, BATTER_GROUP];
+
+  /**
+   * 필터를 바꿨을 때 선택된 선수가 목록에서 사라지면 보이는 첫 선수로 옮긴다.
+   * 안 그러면 «투수»를 눌렀는데 오른쪽에는 타자 카드가 그대로 남는다.
+   */
+  function pickFilter(next: RosterFilter) {
+    setFilter(next);
+    const list =
+      next === 'ALL' ? sorted : next === 'PITCHER' ? pitchers : batters;
+    if (list.length > 0 && !list.some((p) => p.id === selectedId)) setSelectedId(list[0].id);
+  }
+
+  const teamPower = Math.round(
+    team.players.reduce((total, player) => total + playerScore(player), 0) /
+      Math.max(1, team.players.length),
+  );
+
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-2xl font-black">{team.name} 선수단</h1>
-        <span className="rounded-lg bg-amber-500/15 px-3 py-1 text-sm font-bold text-amber-300">
-          {team.gold.toLocaleString()} G
-        </span>
-        <span className="rounded-lg bg-white/5 px-3 py-1 text-xs font-semibold text-slate-300">
-          아이템 {totalItems(team.inventory)}개
-        </span>
-        <OnlineDailyChip uid={team.ownerUid} />
-      </div>
+    <div className="roster-page">
+      <section className="roster-hero" aria-labelledby="roster-title">
+        <div className="roster-hero-copy">
+          <span className="roster-eyebrow">CLUBHOUSE · PERFORMANCE LAB</span>
+          <h1 id="roster-title">{team.name} 선수단</h1>
+          <p>선수의 현재 전력과 성장 경로를 분석하고, 시즌을 완성할 최적의 역할을 설계하세요.</p>
+          <OnlineDailyChip uid={team.ownerUid} />
+        </div>
+        <dl className="roster-hero-ledger" aria-label="선수단 현황">
+          <div>
+            <dt>CLUB FUNDS</dt>
+            <dd className="tabular">{team.gold.toLocaleString()} G</dd>
+          </div>
+          <div>
+            <dt>TEAM RATING</dt>
+            <dd className="tabular">{teamPower}</dd>
+          </div>
+          <div>
+            <dt>ACTIVE ROSTER</dt>
+            <dd className="tabular">{team.players.length}</dd>
+          </div>
+          <div>
+            <dt>CLUB ITEMS</dt>
+            <dd className="tabular">{totalItems(team.inventory)}</dd>
+          </div>
+        </dl>
+      </section>
 
       {msg && (
-        <div className="rounded-xl border border-lime-500/30 bg-lime-500/10 px-4 py-2 text-sm text-lime-200">
+        <div className="roster-notice" role="status" aria-live="polite">
           {msg}
         </div>
       )}
 
       {issues.length > 0 && (
-        <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3">
-          <p className="mb-1 text-sm font-bold text-rose-300">경기에 나가려면 정리해야 합니다</p>
-          <ul className="space-y-0.5 text-xs text-rose-200/90">
-            {issues.map((m) => (
-              <li key={m}>· {m}</li>
-            ))}
-          </ul>
+        <div className="roster-alert">
+          <div>
+            <span>LINEUP CHECK</span>
+            <p>경기에 나가기 전 선수단 정리가 필요합니다</p>
+            <ul>
+              {issues.map((m) => (
+                <li key={m}>{m}</li>
+              ))}
+            </ul>
+          </div>
           <button
-            className="btn mt-2 !py-1 !text-[11px]"
+            className="btn"
             onClick={() => void commit(resetAssignments(team, settings.useDH), '자동 편성했습니다.')}
           >
-            자동 편성으로 정리
+            자동 편성 실행
           </button>
         </div>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-[300px_1fr]">
+      <div className="roster-workspace">
         {/* 선수 목록 */}
-        <div className="panel max-h-[70vh] overflow-y-auto p-2">
-          {sorted.map((p) => {
-            const isP = p.kind === 'PITCHER';
-            const score = playerScore(p);
-            return (
+        <aside className="roster-directory" aria-label="선수 명단">
+          <div className="roster-directory-head">
+            <div>
+              <span>ACTIVE ROSTER</span>
+              <h2>선수 명단</h2>
+            </div>
+            <span className="roster-counts tabular">{team.players.length}명</span>
+          </div>
+          <div className="roster-filter" role="tablist" aria-label="선수 구분">
+            {(
+              [
+                ['ALL', team.players.length],
+                ['PITCHER', pitcherCount],
+                ['BATTER', batterCount],
+              ] as const
+            ).map(([key, count]) => (
               <button
-                key={p.id}
-                onClick={() => setSelectedId(p.id)}
-                className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition ${
-                  selectedId === p.id ? 'bg-lime-500/20' : 'hover:bg-white/5'
-                }`}
+                key={key}
+                role="tab"
+                aria-selected={filter === key}
+                onClick={() => pickFilter(key)}
               >
-                <span
-                  className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-xs font-black"
-                  style={{ background: team.primaryColor, color: team.secondaryColor }}
-                >
-                  {p.number}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="flex items-center gap-1.5">
-                    <TierBadge player={p} />
-                    <span className="truncate text-sm font-semibold">{p.name}</span>
-                    {p.injury && <span className="text-[11px] text-rose-400">🩹</span>}
-                  </span>
-                  <span className="block text-[11px] text-slate-500">
-                    {isP ? ROLE_KO[p.role ?? 'RP'] : POSITION_KO[p.position]} · {p.bats}/{p.throws}
-                  </span>
-                </span>
-                <span className="text-sm font-bold tabular text-slate-300">{score}</span>
-                {p.trainingPoints > 0 && (
-                  <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-300">
-                    {p.trainingPoints}P
-                  </span>
-                )}
+                {FILTER_LABEL[key]}
+                <b className="tabular">{count}</b>
               </button>
-            );
-          })}
-        </div>
+            ))}
+          </div>
+          <div className="roster-directory-columns" aria-hidden>
+            <span>PLAYER</span>
+            <span>OVR</span>
+          </div>
+          <div className="roster-directory-list">
+            {groups.map((group) => (
+              <div key={group.key} className="roster-group">
+                {filter === 'ALL' && (
+                  <div className="roster-group-head">
+                    <span>
+                      {group.label} <small>{group.sub}</small>
+                    </span>
+                    <b className="tabular">{group.players.length}</b>
+                  </div>
+                )}
+                {group.players.map((p) => {
+                  const isP = p.kind === 'PITCHER';
+                  const score = playerScore(p);
+                  const active = selectedId === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      onClick={() => setSelectedId(p.id)}
+                      aria-pressed={active}
+                      className={`roster-player-row ${active ? 'is-active' : ''}`}
+                    >
+                      <span
+                        className="roster-player-number"
+                        style={{ background: team.primaryColor, color: team.secondaryColor }}
+                      >
+                        {p.number}
+                      </span>
+                      <span className="roster-player-copy">
+                        <span className="roster-player-name">
+                          <TierBadge player={p} />
+                          <span>{p.name}</span>
+                          {p.injury && <span className="roster-injury">INJ</span>}
+                        </span>
+                        <span className="roster-player-meta">
+                          {isP ? ROLE_KO[p.role ?? 'RP'] : POSITION_KO[p.position]} · {p.bats}/
+                          {p.throws}
+                        </span>
+                      </span>
+                      <span className="roster-player-score tabular">
+                        <small>OVR</small>
+                        {score}
+                      </span>
+                      {p.trainingPoints > 0 && (
+                        <span
+                          className="roster-point-dot"
+                          title={`훈련 포인트 ${p.trainingPoints}`}
+                        />
+                      )}
+                    </button>
+                  );
+                })}
+                {group.players.length === 0 && (
+                  <p className="roster-group-empty">해당하는 선수가 없습니다.</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </aside>
 
         {/* 상세 */}
-        <div className="space-y-4">
+        <div className="roster-detail">
           {selected && (
             <>
               <PlayerHeader
@@ -240,57 +363,60 @@ export default function RosterPage() {
                 onMessage={setMsg}
               />
 
-              <div className="flex gap-1 rounded-xl bg-white/5 p-1">
+              <div className="roster-tabs" role="tablist" aria-label="선수 관리 메뉴">
                 {(
                   [
-                    ['stats', '능력치'],
-                    ['train', '훈련'],
-                    ['grow', '성장'],
-                    ['gear', '커스터마이징'],
-                    ['lineup', '타순·로테이션'],
+                    ['stats', '능력 분석', 'REPORT'],
+                    ['train', '훈련', 'TRAINING'],
+                    ['grow', '성장', 'CAREER'],
+                    ['gear', '커스터마이징', 'GEAR'],
+                    ['lineup', '타순·로테이션', 'LINEUP'],
                   ] as const
-                ).map(([k, label]) => (
+                ).map(([k, label, sub]) => (
                   <button
                     key={k}
+                    role="tab"
                     onClick={() => setTab(k)}
-                    className={`flex-1 rounded-lg px-2 py-2 text-sm font-semibold transition ${
-                      tab === k ? 'bg-lime-500/25 text-lime-200' : 'text-slate-400 hover:text-slate-200'
-                    }`}
+                    aria-selected={tab === k}
+                    className={tab === k ? 'is-active' : ''}
                   >
-                    {label}
+                    <span>{label}</span>
+                    <small>{sub}</small>
                   </button>
                 ))}
               </div>
 
-              {tab === 'stats' && <StatsTab player={selected} />}
-              {tab === 'train' && (
-                <TrainTab
-                  player={selected}
-                  team={team}
-                  onChange={(p, m) => updatePlayer(p, m)}
-                  onCommit={commit}
-                  onMessage={setMsg}
-                />
-              )}
-              {tab === 'grow' && (
-                <GrowTab
-                  player={selected}
-                  team={team}
-                  onCommit={commit}
-                  onMessage={setMsg}
-                />
-              )}
-              {tab === 'gear' && (
-                <GearTab player={selected} team={team} onChange={(p) => updatePlayer(p)} />
-              )}
-              {tab === 'lineup' && (
-                <LineupTab
-                  team={team}
-                  useDH={settings.useDH}
-                  onChange={(t, m) => void commit(t, m)}
-                  onMessage={setMsg}
-                />
-              )}
+              <div className="roster-tab-content" role="tabpanel" aria-label={TAB_LABEL[tab]}>
+                {tab === 'stats' && <StatsTab player={selected} />}
+                {tab === 'train' && (
+                  <TrainTab
+                    player={selected}
+                    team={team}
+                    onChange={(p, m) => updatePlayer(p, m)}
+                    onCommit={commit}
+                    onMessage={setMsg}
+                  />
+                )}
+                {tab === 'grow' && (
+                  <GrowTab
+                    player={selected}
+                    team={team}
+                    onCommit={commit}
+                    onMessage={setMsg}
+                  />
+                )}
+                {tab === 'gear' && (
+                  <GearTab player={selected} team={team} onChange={(p) => updatePlayer(p)} />
+                )}
+                {tab === 'lineup' && (
+                  <LineupTab
+                    team={team}
+                    useDH={settings.useDH}
+                    onChange={(t, m) => void commit(t, m)}
+                    onMessage={setMsg}
+                  />
+                )}
+              </div>
             </>
           )}
         </div>
@@ -322,34 +448,45 @@ function PlayerHeader({
 }) {
   const isP = player.kind === 'PITCHER';
   const cap = statCap(player);
+  const score = playerScore(player);
+  const dossierStyle = {
+    '--team-primary': team.primaryColor,
+    '--team-secondary': team.secondaryColor,
+    '--player-tier': TIER_COLOR[player.tier],
+    '--player-tier-soft': TIER_COLOR[player.tier] + '2b',
+  } as React.CSSProperties;
 
   return (
-    <div className="panel p-5">
-      <div className="flex flex-wrap items-start gap-4">
-        <div
-          className="grid h-16 w-16 place-items-center rounded-xl text-2xl font-black"
-          style={{ background: team.primaryColor, color: team.secondaryColor }}
-        >
-          {player.number}
+    <section className="player-dossier" style={dossierStyle} aria-label={`${player.name} 선수 프로필`}>
+      <div className="player-dossier-topline">
+        <span>PLAYER PERFORMANCE DOSSIER</span>
+        <span className="tabular">ROSTER NO. {String(player.number).padStart(2, '0')}</span>
+      </div>
+
+      <div className="player-dossier-main">
+        <div className="player-jersey-number" aria-label={`등번호 ${player.number}`}>
+          <span>{player.number}</span>
+          <small>{team.abbr}</small>
         </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+
+        <div className="player-identity">
+          <span className="player-role-kicker">{isP ? 'PITCHING STAFF' : 'POSITION PLAYER'}</span>
+          <div className="player-name-row">
             <TierBadge player={player} />
             <input
+              id="player-name"
               type="text"
-              className="!w-auto !bg-transparent !border-transparent !px-0 !text-2xl !font-black"
+              aria-label="선수 이름"
               value={player.name}
               maxLength={12}
               onChange={(e) => onRename(e.target.value)}
             />
           </div>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-400">
-            <span className="rounded bg-white/5 px-2 py-1 font-semibold">
-              {isP ? '투수' : '타자'}
-            </span>
+          <div className="player-identity-meta">
+            <span className="player-kind-chip">{isP ? '투수' : '타자'}</span>
             {isP ? (
               <select
-                className="!w-auto !py-1 !text-xs"
+                aria-label="투수 역할"
                 value={player.role ?? 'RP'}
                 onChange={(e) => {
                   const r = setPitcherRole(team, player.id, e.target.value as PitcherRole);
@@ -365,7 +502,7 @@ function PlayerHeader({
               </select>
             ) : (
               <select
-                className="!w-auto !py-1 !text-xs"
+                aria-label="수비 포지션"
                 value={player.position}
                 onChange={(e) => {
                   const r = setBatterPosition(team, player.id, e.target.value as BatterPosition);
@@ -380,31 +517,47 @@ function PlayerHeader({
                 ))}
               </select>
             )}
-            <span>타석 {player.bats}</span>
-            <span>투구 {player.throws}</span>
-            <span title={`티어 상한 ${TIER_STAT_CAP[player.tier]} / 잠재력 ${player.potential}`}>
-              능력치 상한 {cap}
-            </span>
+            <span>BATS {player.bats}</span>
+            <span>THROWS {player.throws}</span>
             {isP && <FatigueChip player={player} />}
           </div>
           {player.injury && (
-            <p className="mt-2 rounded-lg bg-rose-500/10 px-2.5 py-1.5 text-[11px] text-rose-300">
+            <p className="player-injury-note">
               컨디션 난조 ({player.injury.reason}) · {player.injury.gamesLeft}경기 남음 — 출전은
               가능하지만 경기 중 <b>모든 능력치가 {Math.round(injuryPenalty(player) * 100)}% 낮아집니다</b>.
               회복이 가까워질수록 폭이 줄어듭니다. 부상치료제로 즉시 없앨 수 있습니다.
             </p>
           )}
         </div>
-        <div className="rounded-xl bg-amber-500/15 px-4 py-2 text-center">
-          <div className="text-[11px] text-amber-200/70">훈련 포인트</div>
-          <div className="text-xl font-black text-amber-300">{player.trainingPoints}</div>
-        </div>
+
+        <dl className="player-dossier-metrics">
+          <div className="is-primary">
+            <dt>OVERALL</dt>
+            <dd className="tabular">{score}</dd>
+          </div>
+          <div>
+            <dt>POTENTIAL</dt>
+            <dd className="tabular">{player.potential}</dd>
+          </div>
+          <div title={`티어 상한 ${TIER_STAT_CAP[player.tier]} / 잠재력 ${player.potential}`}>
+            <dt>STAT CAP</dt>
+            <dd className="tabular">{cap}</dd>
+          </div>
+          <div className="is-points">
+            <dt>TRAINING PT</dt>
+            <dd className="tabular">{player.trainingPoints}</dd>
+          </div>
+        </dl>
       </div>
 
-      <div className="mt-4">
+      <div className="player-dossier-progress">
+        <div className="player-tier-stamp">
+          <span>{TIER_KO[player.tier]}</span>
+          <b>{player.tier}</b>
+        </div>
         <ExpBar player={player} />
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -413,7 +566,7 @@ function FatigueChip({ player }: { player: Player }) {
   const tone = pct >= 70 ? 'text-lime-300' : pct >= 35 ? 'text-amber-300' : 'text-rose-300';
   return (
     <span
-      className={tone}
+      className={`player-fatigue ${tone}`}
       title="경기 사이에 이월되는 스태미나입니다. 등판하지 않은 경기마다 1/3씩 회복해 3경기를 쉬면 가득 찹니다."
     >
       스태미나 {pct}%
@@ -425,19 +578,19 @@ function ExpBar({ player }: { player: Player }) {
   const max = isMaxLevel(player);
   const need = expToNext(player.level);
   return (
-    <div>
-      <div className="mb-1 flex items-baseline justify-between text-[11px]">
-        <span className="text-slate-400">
+    <div className="player-exp">
+      <div className="player-exp-copy">
+        <span>
           {TIER_KO[player.tier]} Lv.{player.level}
-          <span className="ml-1 text-slate-600">/ {TIER_MAX_LEVEL[player.tier]}</span>
+          <small>/ {TIER_MAX_LEVEL[player.tier]}</small>
         </span>
-        <span className="tabular text-slate-500">
+        <span className="tabular">
           {max ? '최대 레벨 — 티어 강화가 필요합니다' : `${player.exp} / ${need} EXP`}
         </span>
       </div>
-      <div className="h-2 overflow-hidden rounded-full bg-white/8">
+      <div className="player-exp-track">
         <div
-          className="h-full rounded-full transition-all"
+          className="player-exp-fill"
           style={{
             width: `${levelProgress(player) * 100}%`,
             background: TIER_COLOR[player.tier],
@@ -461,9 +614,7 @@ function OnlineDailyChip({ uid }: { uid: string }) {
   return (
     <span
       title="온라인 대전(1:1 · 2대2 · 릴레이)으로 하루에 받을 수 있는 보상입니다. 매일 자정에 다시 채워집니다."
-      className={`rounded-lg px-3 py-1 text-xs font-semibold ${
-        full ? 'bg-white/5 text-slate-500' : 'bg-sky-500/15 text-sky-300'
-      }`}
+      className={`roster-online-chip ${full ? 'is-full' : ''}`}
     >
       온라인 오늘 {used.gold.toLocaleString()}/{ONLINE_DAILY_GOLD_CAP.toLocaleString()}G ·{' '}
       {used.exp.toLocaleString()}/{ONLINE_DAILY_EXP_CAP.toLocaleString()}EXP
@@ -493,23 +644,23 @@ function Bar({
   const color = value >= 80 ? '#f43f5e' : value >= 65 ? '#f59e0b' : value >= 50 ? '#38bdf8' : '#64748b';
   const modTone = !mod ? '' : mod.value > 0 ? 'text-lime-300' : 'text-rose-300';
   return (
-    <div className="flex items-center gap-3">
-      <span className="flex w-20 shrink-0 items-center gap-1 text-xs text-slate-400">
+    <div className="player-stat-row">
+      <span className="player-stat-label">
         {label}
         {marker && <span className="text-[11px] leading-none text-slate-500">{marker}</span>}
       </span>
-      <div className="relative h-2.5 flex-1 overflow-hidden rounded-full bg-white/8">
-        <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+      <div className="player-stat-track">
+        <div className="player-stat-fill" style={{ width: `${pct}%`, background: color }} />
         {cap != null && cap < max && (
           <span
             title={`성장 상한 ${cap}`}
-            className="absolute top-0 h-full w-px bg-white/50"
+            className="player-stat-cap"
             style={{ left: `${(cap / max) * 100}%` }}
           />
         )}
       </div>
-      <span className="flex w-20 shrink-0 items-baseline justify-end gap-1">
-        <span className="text-sm font-bold tabular">{value}</span>
+      <span className="player-stat-value">
+        <span className="tabular">{value}</span>
         {mod && mod.value !== 0 && (
           <span className={`text-[10px] font-bold tabular ${modTone}`} title={mod.label}>
             {mod.value > 0 ? '+' : ''}
@@ -535,14 +686,20 @@ function StatsTab({ player }: { player: Player }) {
         : undefined;
 
   return (
-    <div className="grid gap-4 md:grid-cols-2">
-      <section className="panel p-5">
-        <h3 className="mb-1 font-bold">타자 능력치</h3>
-        <p className="mb-3 text-[11px] text-slate-500">
+    <div className={`player-report-grid ${isP || arsenal.length > 1 ? '' : 'is-single'}`}>
+      <section className="panel player-report-panel">
+        <div className="player-report-heading">
+          <div>
+            <span>BAT TOOL REPORT</span>
+            <h3>타자 능력치</h3>
+          </div>
+          <b className="tabular">CAP {cap}</b>
+        </div>
+        <p className="player-report-description">
           막대 위 흰 눈금이 성장 상한({cap})입니다.
           {!isP && ` 체형 «${bodyDef.ko}» — ${bodyDef.desc}.`}
         </p>
-        <div className="space-y-2.5">
+        <div className="player-stat-stack">
           {BATTING_KEYS.map((k) => (
             <Bar
               key={k}
@@ -564,14 +721,17 @@ function StatsTab({ player }: { player: Player }) {
       </section>
 
       {(isP || arsenal.length > 1) && (
-        <section className="panel p-5">
-          <h3 className="mb-3 font-bold">
-            투수 능력치
-            <span className="ml-2 text-xs font-normal text-slate-500">
+        <section className="panel player-report-panel">
+          <div className="player-report-heading">
+            <div>
+              <span>PITCH ARSENAL</span>
+              <h3>투수 능력치</h3>
+            </div>
+            <b>
               스태미나 {player.pitching?.stamina ?? 0} · 구종 {pitchSlotsUsed(player)}/
               {pitchSlots(player)}
-            </span>
-          </h3>
+            </b>
+          </div>
           <div className="space-y-4">
             {arsenal.map(({ type, attr, def }) => (
               <div key={type}>
@@ -597,9 +757,15 @@ function StatsTab({ player }: { player: Player }) {
         </section>
       )}
 
-      <section className="panel p-5 md:col-span-2">
-        <h3 className="mb-3 font-bold">시즌 성적</h3>
-        <div className="grid grid-cols-3 gap-2 text-center sm:grid-cols-6">
+      <section className="panel player-season-panel">
+        <div className="player-report-heading">
+          <div>
+            <span>SEASON PERFORMANCE</span>
+            <h3>시즌 성적</h3>
+          </div>
+          <b>{isP ? 'PITCHER RECORD' : 'BATTER RECORD'}</b>
+        </div>
+        <div className="player-season-grid">
           <Mini label="경기" v={player.season.g} />
           <Mini label="타율" v={player.season.ab ? baseballRate(player.season.h / player.season.ab) : '-'} />
           <Mini label="안타" v={player.season.h} />
@@ -616,16 +782,202 @@ function StatsTab({ player }: { player: Player }) {
             </>
           )}
         </div>
+        {!isP && <SplitLine player={player} />}
       </section>
+
+      {!isP && <ZonePanel player={player} />}
+
+      <CareerPanel player={player} isP={isP} />
     </div>
+  );
+}
+
+/**
+ * 좌우 스플릿. 상대 투수의 손별 타율이다.
+ *
+ * 대타를 고를 때 능력치 말고 볼 것이 생긴다 — 좌투수에게 약한 타자를 좌완 마무리
+ * 상대로 올리지 않게 된다. 스위치히터는 늘 반대편에 서므로 둘이 거의 같게 나온다.
+ */
+function SplitLine({ player }: { player: Player }) {
+  const s = player.splits;
+  if (!s?.vsL && !s?.vsR) return null;
+
+  const cell = (label: string, v: [number, number] | undefined) => {
+    if (!v || v[0] === 0) return `${label} -`;
+    return `${label} ${baseballRate(v[1] / v[0])} (${v[1]}/${v[0]})`;
+  };
+
+  return (
+    <p className="mt-3 text-[11px] text-slate-500">
+      좌우 스플릿 · {cell('좌투', s.vsL)} · {cell('우투', s.vsR)}
+    </p>
+  );
+}
+
+/**
+ * 이 칸을 믿기 시작하는 타수. 축소추정에서 전체 타율 쪽으로 끌어당기는 세기다.
+ * 0으로 두면 3타수 2안타짜리 칸이 최고 등급으로 시뻘겋게 타오른다.
+ */
+const ZONE_PRIOR_AB = 8;
+/** 색과 타율을 함께 보여 주기 시작하는 칸 타수 */
+const ZONE_MIN_CELL_AB = 5;
+/** 패널 자체를 띄우기 시작하는 전체 타수. 9칸이라 칸당 표본은 이것의 1/9이다. */
+const ZONE_MIN_TOTAL_AB = 30;
+
+/**
+ * 코스별 약점. 3×3 히트맵이다.
+ *
+ * 좌우 스플릿이 "누구에게 약한가"라면 이건 "어디에 약한가"다. 대타를 고를 때, 그리고
+ * 상대가 어디로 던질지 예상할 때 볼 것이 생긴다.
+ *
+ * 칸은 **타자 기준**이라 왼쪽 열이 늘 몸쪽이다. 스위치히터가 매 타석 반대편에 서도
+ * pitching.zoneCell이 타자 기준으로 접어 넣으므로 약점이 두 칸으로 흩어지지 않는다.
+ *
+ * 표본이 적은 칸에 타율을 띄우면 히트맵이 거짓말을 한다 — 1타수 1안타가 10할이다.
+ * 그래서 세 단계로 나눠 그린다: 0타수는 빈 칸, 5타수 미만은 타수만, 그 위는 색과 타율.
+ * 색은 원시 타율이 아니라 축소추정치로 정하고 **표시되는 숫자는 원시값 그대로** 둔다 —
+ * 표본이 충분한지는 보는 사람이 직접 판단할 수 있어야 한다.
+ */
+function ZonePanel({ player }: { player: Player }) {
+  const z = player.zoneSplits;
+  const total = z ? z.ab.reduce((a, b) => a + b, 0) : 0;
+  if (!z || total < ZONE_MIN_TOTAL_AB) return null;
+
+  const base = z.h.reduce((a, b) => a + b, 0) / total;
+  const worst = z.ab
+    .map((ab, i) => ({ i, ab, rate: (z.h[i] + base * ZONE_PRIOR_AB) / (ab + ZONE_PRIOR_AB) }))
+    .filter((c) => c.ab >= ZONE_MIN_CELL_AB)
+    .sort((a, b) => a.rate - b.rate)[0];
+
+  return (
+    <section className="panel player-season-panel">
+      <div className="player-report-heading">
+        <div>
+          <span>ZONE PROFILE</span>
+          <h3>코스별 약점</h3>
+        </div>
+        <b>{total}타수</b>
+      </div>
+
+      <div className="zone-heat-frame">
+        <div className="zone-heat-rowlabels" aria-hidden>
+          <span>높은</span>
+          <span>가운데</span>
+          <span>낮은</span>
+        </div>
+        <div className="zone-heat" role="img" aria-label={`코스별 타율 ${total}타수 기준`}>
+          {z.ab.map((ab, i) => {
+            const h = z.h[i];
+            const enough = ab >= ZONE_MIN_CELL_AB;
+            const shrunk = (h + base * ZONE_PRIOR_AB) / (ab + ZONE_PRIOR_AB);
+            return (
+              <div
+                key={i}
+                className="zone-heat-cell"
+                style={enough ? { background: zoneHeatColor(shrunk) } : undefined}
+                title={`${ZONE_CELL_KO[i]} ${ab ? `${h}/${ab}` : '기록 없음'}`}
+              >
+                {ab === 0 ? (
+                  <span className="zone-heat-empty">·</span>
+                ) : enough ? (
+                  <>
+                    <b>{baseballRate(h / ab)}</b>
+                    <span>
+                      {h}/{ab}
+                    </span>
+                  </>
+                ) : (
+                  <span>{ab}타수</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div className="zone-heat-collabels" aria-hidden>
+          <span>몸쪽</span>
+          <span>한복판</span>
+          <span>바깥쪽</span>
+        </div>
+      </div>
+
+      <p className="mt-3 text-[11px] text-slate-500">
+        타자 기준 · 왼쪽이 몸쪽입니다. {ZONE_MIN_CELL_AB}타수 미만인 칸은 색을 칠하지 않습니다.
+        {worst && ` 지금 가장 약한 코스는 ${ZONE_CELL_KO[worst.i]}입니다.`}
+      </p>
+    </section>
+  );
+}
+
+/**
+ * 통산 기록과 시즌별 성적.
+ *
+ * 시즌을 한 번도 마감하지 않았으면 통산이 곧 이번 시즌이라 보여 줄 것이 없다.
+ * @see season.closeSeason
+ */
+function CareerPanel({ player, isP }: { player: Player; isP: boolean }) {
+  const log = player.seasonLog ?? [];
+  if (!log.length) return null;
+
+  const career = careerWithCurrent(player);
+  return (
+    <section className="panel player-season-panel">
+      <div className="player-report-heading">
+        <div>
+          <span>CAREER</span>
+          <h3>통산 기록</h3>
+        </div>
+        <b>{log.length}개 시즌</b>
+      </div>
+      <div className="player-season-grid">
+        <Mini label="경기" v={career.g} />
+        <Mini label="타율" v={career.ab ? baseballRate(career.h / career.ab) : '-'} />
+        <Mini label="안타" v={career.h} />
+        <Mini label="홈런" v={career.hr} />
+        <Mini label="타점" v={career.rbi} />
+        <Mini label="도루" v={career.sb} />
+        {isP && (
+          <>
+            <Mini label="이닝" v={(career.ip3 / 3).toFixed(1)} />
+            <Mini label="탈삼진" v={career.pk} />
+            <Mini label="승" v={career.w} />
+            <Mini label="패" v={career.l} />
+          </>
+        )}
+      </div>
+
+      <table className="box-table mt-3">
+        <thead>
+          <tr>
+            <th className="box-th-name">시즌</th>
+            <th>경기</th>
+            <th>{isP ? '이닝' : '타율'}</th>
+            <th>{isP ? '탈삼진' : '안타'}</th>
+            <th>{isP ? '승' : '홈런'}</th>
+            <th>{isP ? '패' : '타점'}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {[...log].reverse().map((s) => (
+            <tr key={s.seasonNo}>
+              <td className="box-th-name">시즌 {s.seasonNo}</td>
+              <td>{s.stat.g}</td>
+              <td>{isP ? (s.stat.ip3 / 3).toFixed(1) : s.stat.ab ? baseballRate(s.stat.h / s.stat.ab) : '-'}</td>
+              <td>{isP ? s.stat.pk : s.stat.h}</td>
+              <td>{isP ? s.stat.w : s.stat.hr}</td>
+              <td>{isP ? s.stat.l : s.stat.rbi}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
   );
 }
 
 function Mini({ label, v }: { label: string; v: string | number }) {
   return (
-    <div className="rounded-lg bg-white/5 px-2 py-2">
-      <div className="text-[11px] text-slate-500">{label}</div>
-      <div className="font-bold tabular">{v}</div>
+    <div className="player-season-stat">
+      <div>{label}</div>
+      <strong className="tabular">{v}</strong>
     </div>
   );
 }
@@ -698,11 +1050,31 @@ function TrainTab({
 }) {
   const arsenal = arsenalOf(player);
   const learnable = learnablePitchesFor(player);
+  const replaceable = replaceablePitchesOf(player);
   const cap = statCap(player);
   const slotsLeft = pitchSlots(player) - pitchSlotsUsed(player);
   /** 설명을 펼친 항목. 같은 항목을 다시 누르면 접힌다. */
   const [openKey, setOpenKey] = useState<string | null>(null);
   const toggle = (k: string) => setOpenKey((cur) => (cur === k ? null : k));
+
+  /** 버릴 구종. null이면 빈 슬롯에 새로 배운다. */
+  const [replacing, setReplacing] = useState<PitchType | null>(null);
+  // 다른 선수로 넘어가면 교체 대상 선택을 놓는다
+  useEffect(() => setReplacing(null), [player.id]);
+  // 교체가 끝나 그 구종이 사라졌으면 선택도 함께 풀린 것으로 본다
+  const replaceFrom = replacing && player.pitching?.arsenal[replacing] ? replacing : null;
+  const losing = replaceFrom ? player.pitching?.arsenal[replaceFrom] : undefined;
+  /** 버릴 구종에 부은 훈련 포인트. 교체하면 그대로 돌아온다. */
+  const refund = replaceFrom ? pitchTrainingRefund(player, replaceFrom) : 0;
+  /** 지금 고른 자리에 구종을 넣을 수 있는가 (골드는 구종마다 따로 본다) */
+  const hasSlot = replaceFrom !== null || slotsLeft > 0;
+
+  const targetChip = (on: boolean) =>
+    `rounded-lg border px-2.5 py-1.5 text-[11px] font-bold transition ${
+      on
+        ? 'border-lime-400/60 bg-lime-500/15 text-lime-100'
+        : 'border-white/10 bg-white/[0.03] text-slate-400 hover:border-white/25 hover:text-slate-200'
+    } disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-white/10`;
 
   return (
     <div className="space-y-4">
@@ -798,7 +1170,7 @@ function TrainTab({
 
           <section className="panel p-5">
             <h3 className="mb-1 flex items-center gap-2 font-bold">
-              새 구종 습득
+              구종 습득 · 교체
               <span
                 className={`rounded px-2 py-0.5 text-[11px] font-bold ${
                   slotsLeft > 0 ? 'bg-lime-500/20 text-lime-300' : 'bg-white/10 text-slate-400'
@@ -814,17 +1186,77 @@ function TrainTab({
               <b>구종 습득에는 골드를 씁니다.</b> 훈련 포인트는 능력치에만 쓰입니다. (보유{' '}
               <span className="tabular text-amber-300">{team.gold.toLocaleString()}G</span>)
             </p>
+
+            {/* 어느 자리에 넣을지 먼저 고른다 — 빈 슬롯이거나, 버릴 구종이거나 */}
+            <div className="mb-3">
+              <div className="field-label">배울 자리</div>
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  disabled={slotsLeft <= 0}
+                  onClick={() => setReplacing(null)}
+                  className={targetChip(replaceFrom === null && slotsLeft > 0)}
+                >
+                  빈 슬롯 {slotsLeft > 0 ? `${slotsLeft}칸` : '없음'}
+                </button>
+                {replaceable.map((t) => {
+                  const def = PITCH_DEFS[t];
+                  const on = replaceFrom === t;
+                  return (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setReplacing(on ? null : t)}
+                      className={targetChip(on)}
+                      style={on ? undefined : { color: def.color }}
+                    >
+                      {def.ko} 버리기
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {replaceFrom && losing && (
+              <p className="mb-3 rounded-lg border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200/90">
+                «{PITCH_DEFS[replaceFrom].ko}» (구속 {losing.velocity} · 제구 {losing.control} ·
+                무브먼트 {losing.movement}) 자리에 새 구종을 익힙니다. 슬롯은 그대로입니다.
+                <br />
+                {refund > 0 ? (
+                  <>
+                    지금까지 이 구종 훈련에 쓴 <b className="tabular">{refund.toLocaleString()}P</b>는
+                    전액 돌려받습니다 — 새 구종은 낮게 시작하지만 그 포인트로 같은 수준까지 다시
+                    올릴 수 있습니다.
+                  </>
+                ) : (
+                  <>
+                    이 구종은 훈련한 적이 없어 돌려받을 훈련 포인트가 없습니다. 창단 때 받은 능력치는
+                    사라지고 새 구종은 낮게 시작합니다.
+                  </>
+                )}
+              </p>
+            )}
+            {!replaceFrom && slotsLeft <= 0 && learnable.length > 0 && (
+              <p className="mb-3 text-[11px] text-amber-300/80">
+                {TIER_KO[player.tier]} 구종 슬롯이 가득 찼습니다. 티어를 강화하거나, 위에서 버릴
+                구종을 골라 다른 구종으로 바꾸세요.
+              </p>
+            )}
+
             <div className="grid gap-2 sm:grid-cols-2">
               {learnable.map((t) => {
                 const def = PITCH_DEFS[t];
                 const cost = learnPitchGold(t, player);
-                const can = team.gold >= cost && slotsLeft > 0;
+                const can = team.gold >= cost && hasSlot;
                 return (
                   <button
                     key={t}
                     disabled={!can}
                     onClick={() => {
-                      const r = learnPitch(team, player.id, t, Date.now() >>> 0);
+                      const seed = Date.now() >>> 0;
+                      const r = replaceFrom
+                        ? replacePitch(team, player.id, replaceFrom, t, seed)
+                        : learnPitch(team, player.id, t, seed);
                       if (r.ok) void onCommit(r.team, r.message);
                       else onMessage(r.message);
                     }}
@@ -836,6 +1268,11 @@ function TrainTab({
                   >
                     <div className="flex items-center justify-between">
                       <span className="font-bold" style={{ color: def.color }}>
+                        {replaceFrom && (
+                          <span className="mr-1 text-[11px] font-bold text-slate-500">
+                            {PITCH_DEFS[replaceFrom].ko} →
+                          </span>
+                        )}
                         {def.ko}
                       </span>
                       <span className="text-xs font-bold tabular text-amber-300">
@@ -850,12 +1287,6 @@ function TrainTab({
                 <p className="text-sm text-slate-500">모든 구종을 보유하고 있습니다.</p>
               )}
             </div>
-            {slotsLeft <= 0 && learnable.length > 0 && (
-              <p className="mt-3 text-[11px] text-amber-300/80">
-                {TIER_KO[player.tier]} 구종 슬롯이 가득 찼습니다. 티어를 강화하면 하나 더 익힐 수
-                있습니다.
-              </p>
-            )}
           </section>
         </>
       )}

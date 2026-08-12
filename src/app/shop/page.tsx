@@ -87,15 +87,49 @@ export default function ShopPage() {
   }
 
   return (
-    <div className="space-y-5">
-      <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-2xl font-black">상점</h1>
-        <span className="rounded-lg bg-amber-500/15 px-3 py-1 text-sm font-bold tabular text-amber-300">
-          {team.gold.toLocaleString()} G
-        </span>
-        <span className="rounded-lg bg-white/5 px-3 py-1 text-xs font-semibold text-slate-300">
-          선수 {team.players.length}명
-        </span>
+    <div className="shop-page">
+      <section className="shop-hero" aria-labelledby="shop-title">
+        <div className="shop-hero-copy">
+          <span className="shop-eyebrow">FRONT OFFICE · SCOUTING</span>
+          <h1 id="shop-title">스카우트 마켓</h1>
+          <p>
+            다음 시즌의 판도를 바꿀 한 명을 찾으세요. 포지션을 선택하고 스카우팅 패키지를
+            열면 선수 리포트가 공개됩니다.
+          </p>
+        </div>
+        <dl className="shop-ledger" aria-label="구단 자산 현황">
+          <div>
+            <dt>AVAILABLE FUNDS</dt>
+            <dd className="tabular">{team.gold.toLocaleString()} G</dd>
+          </div>
+          <div>
+            <dt>ACTIVE ROSTER</dt>
+            <dd className="tabular">{team.players.length} PLAYERS</dd>
+          </div>
+        </dl>
+      </section>
+
+      <div className="shop-tabs" role="tablist" aria-label="상점 메뉴">
+        {(
+          [
+            ['gacha', '선수 영입', 'SCOUT MARKET'],
+            ['release', '선수 방출', 'TRANSFER DESK'],
+          ] as const
+        ).map(([k, label, sub]) => (
+          <button
+            key={k}
+            role="tab"
+            onClick={() => {
+              setTab(k);
+              setMsg(null);
+            }}
+            aria-selected={tab === k}
+            className={tab === k ? 'is-active' : ''}
+          >
+            <span>{label}</span>
+            <small>{sub}</small>
+          </button>
+        ))}
       </div>
 
       {msg && (
@@ -112,31 +146,10 @@ export default function ShopPage() {
         </div>
       )}
 
-      <div className="flex gap-1 rounded-xl bg-white/5 p-1 sm:max-w-md">
-        {(
-          [
-            ['gacha', '선수 뽑기'],
-            ['release', '선수 방출'],
-          ] as const
-        ).map(([k, label]) => (
-          <button
-            key={k}
-            onClick={() => {
-              setTab(k);
-              setMsg(null);
-            }}
-            aria-pressed={tab === k}
-            className={`flex-1 rounded-lg px-2 py-2 text-sm font-semibold transition ${
-              tab === k ? 'bg-lime-500/25 text-lime-200' : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            {label}
-          </button>
-        ))}
+      <div role="tabpanel" aria-label={tab === 'gacha' ? '선수 영입' : '선수 방출'}>
+        {tab === 'gacha' && <GachaTab team={team} onCommit={commit} onMessage={setMsg} />}
+        {tab === 'release' && <ReleaseTab team={team} onCommit={commit} onMessage={setMsg} />}
       </div>
-
-      {tab === 'gacha' && <GachaTab team={team} onCommit={commit} onMessage={setMsg} />}
-      {tab === 'release' && <ReleaseTab team={team} onCommit={commit} onMessage={setMsg} />}
     </div>
   );
 }
@@ -200,16 +213,20 @@ function GachaTab({
   }
 
   return (
-    <div className="space-y-4">
-      <section className="panel space-y-3 p-5">
-        <h2 className="font-bold">뽑을 선수 종류</h2>
-        <div className="flex gap-1 rounded-xl bg-white/5 p-1 sm:max-w-xs" role="group">
+    <div className="shop-gacha">
+      <section className="scout-briefing">
+        <div className="scout-briefing-copy">
+          <span className="shop-section-kicker">RECRUITMENT BRIEF</span>
+          <h2>영입할 선수 유형</h2>
+          <p>영입 포지션을 먼저 지정하면 두 패키지 모두 같은 조건으로 선수를 탐색합니다.</p>
+        </div>
+        <div className="shop-role-picker" role="group" aria-label="영입 선수 유형">
           {(
             [
-              ['BATTER', '타자'],
-              ['PITCHER', '투수'],
+              ['BATTER', '타자', 'BATTER'],
+              ['PITCHER', '투수', 'PITCHER'],
             ] as const
-          ).map(([k, label]) => (
+          ).map(([k, label, sub]) => (
             <button
               key={k}
               onClick={() => {
@@ -217,59 +234,79 @@ function GachaTab({
                 setKind(k);
               }}
               aria-pressed={kind === k}
-              className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold transition ${
-                kind === k ? 'bg-lime-500/25 text-lime-200' : 'text-slate-400 hover:text-slate-200'
-              }`}
+              className={kind === k ? 'is-active' : ''}
             >
-              {label}
+              <span>{label}</span>
+              <small>{sub}</small>
             </button>
           ))}
         </div>
-        <p className="text-[11px] leading-relaxed text-slate-500">
+        <p className="scout-briefing-note">
           투수·타자 구분은 영입한 뒤에는 바꿀 수 없습니다. 영입한 투수는 중간계투로 들어오며,
           선발로 올리려면 선수단에서 기존 선발을 먼저 내려야 합니다.
         </p>
       </section>
 
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="scout-package-grid">
         {BANNER_ORDER.map((id) => {
           const def = BANNERS[id];
           const issue = drawIssue(team, id);
           const short = def.gold - team.gold;
+          const premium = id === 'PREMIUM';
+          const packageStyle = {
+            '--package': def.accent,
+            '--package-soft': def.accent + '1f',
+            '--package-line': def.accent + '66',
+          } as React.CSSProperties;
           return (
             <section
               key={id}
-              className="panel flex flex-col p-5"
-              style={{ borderColor: def.accent + '55' }}
+              className={`scout-package ${premium ? 'scout-package-premium' : 'scout-package-normal'} ${
+                issue ? 'is-unavailable' : ''
+              }`}
+              style={packageStyle}
             >
-              <div className="mb-1 flex items-baseline justify-between gap-2">
-                <h2 className="text-lg font-bold" style={{ color: def.accent }}>
-                  {def.ko}
-                </h2>
-                <span className="text-sm font-black tabular text-amber-300">
-                  {def.gold.toLocaleString()}G
-                </span>
+              <div className="scout-package-topline">
+                <span>{premium ? 'ELITE ACCESS' : 'OPEN SCOUTING'}</span>
+                <span>{premium ? 'S TIER AVAILABLE' : 'C · B · A POOL'}</span>
               </div>
-              <p className="mb-4 text-xs leading-relaxed text-slate-400">{def.desc}</p>
+
+              <div className="scout-package-heading">
+                <div>
+                  <span className="scout-package-index">{premium ? '02' : '01'}</span>
+                  <h2>{premium ? '프리미엄 스카우팅' : '프로 스카우팅'}</h2>
+                  <p>{def.ko}</p>
+                </div>
+                <div className="scout-package-seal" aria-hidden>
+                  <span>A/B</span>
+                </div>
+              </div>
+
+              <p className="scout-package-description">{def.desc}</p>
 
               <RateTable id={id} />
 
-              <button
-                ref={(el) => {
-                  openerRef.current[id] = el;
-                }}
-                className="btn btn-primary mt-4 w-full !py-2.5"
-                disabled={!!issue}
-                onClick={() => {
-                  playClick();
-                  setPhase({ step: 'CONFIRM', banner: id });
-                }}
-              >
-                {kind === 'PITCHER' ? '투수' : '타자'} 뽑기
-                {issue ? ' (골드 부족)' : ''}
-              </button>
+              <div className="scout-package-purchase">
+                <div>
+                  <span>CONTRACT FEE</span>
+                  <strong className="tabular">{def.gold.toLocaleString()} G</strong>
+                </div>
+                <button
+                  ref={(el) => {
+                    openerRef.current[id] = el;
+                  }}
+                  className={`btn ${premium ? 'btn-warn' : 'btn-primary'}`}
+                  disabled={!!issue}
+                  onClick={() => {
+                    playClick();
+                    setPhase({ step: 'CONFIRM', banner: id });
+                  }}
+                >
+                  {issue ? '골드가 부족합니다' : `${kind === 'PITCHER' ? '투수' : '타자'} 리포트 열기`}
+                </button>
+              </div>
               {issue && (
-                <p className="mt-1.5 text-center text-[11px] tabular text-rose-300">
+                <p className="scout-package-shortage tabular">
                   {short.toLocaleString()}G 더 필요합니다
                 </p>
               )}
@@ -278,10 +315,11 @@ function GachaTab({
         })}
       </div>
 
-      <p className="text-[11px] leading-relaxed text-slate-500">
-        골드는 경기 보상과 리그 순위 보상, 그리고 선수 방출로 모읍니다.{' '}
+      <p className="shop-funding-note">
+        <span>CLUB FINANCE</span>
+        골드는 경기 보상과 리그 순위 보상, 선수 방출로 모을 수 있습니다.{' '}
         <Link href="/play" className="text-lime-300 underline">
-          경기하러 가기 ›
+          경기 일정으로 이동 ›
         </Link>
       </p>
 
@@ -318,27 +356,32 @@ function GachaTab({
 function RateTable({ id }: { id: BannerId }) {
   const def = BANNERS[id];
   return (
-    <div>
-      <ul className="space-y-1.5">
+    <div className="scout-rates">
+      <div className="scout-rates-heading">
+        <span>등급별 영입 확률</span>
+        <span>ODDS</span>
+      </div>
+      <ul>
         {def.rates.map(({ tier, rate }) => (
-          <li key={tier} className="flex items-center gap-2">
-            <span className="w-5 text-xs font-black" style={{ color: TIER_COLOR[tier] }}>
+          <li key={tier} aria-label={`${TIER_KO[tier]} 영입 확률 ${Math.round(rate * 100)}퍼센트`}>
+            <span className="scout-rate-tier" style={{ color: TIER_COLOR[tier] }}>
               {tier}
+              <small>{TIER_KO[tier]}</small>
             </span>
-            <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10" aria-hidden>
+            <span className="scout-rate-track" aria-hidden>
               <span
-                className="block h-full rounded-full"
+                className="scout-rate-fill"
                 style={{ width: `${rate * 100}%`, background: TIER_COLOR[tier] }}
               />
             </span>
-            <span className="w-10 text-right text-xs font-bold tabular text-slate-300">
+            <span className="scout-rate-value tabular">
               {Math.round(rate * 100)}%
             </span>
           </li>
         ))}
       </ul>
-      <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
-        확률은 뽑기마다 독립입니다 — 여러 번 뽑아도 높은 등급이 나올 확률은 올라가지 않습니다.
+      <p className="scout-rate-disclosure">
+        각 영입은 독립 시행이며, 누적 시도 횟수에 따라 상위 등급 확률이 오르지 않습니다.
       </p>
     </div>
   );
@@ -370,38 +413,45 @@ function ConfirmDialog({
   }, [onCancel]);
 
   return (
-    <div
-      className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4 backdrop-blur-sm"
-      onClick={onCancel}
-    >
+    <div className="shop-dialog-backdrop" onClick={onCancel}>
       <div
-        className="panel pop-in w-[min(92vw,420px)] p-6"
+        className="shop-confirm pop-in"
         role="dialog"
         aria-modal="true"
         aria-labelledby="shop-confirm-title"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 id="shop-confirm-title" className="text-xl font-black" style={{ color: def.accent }}>
-          {def.ko}
-        </h2>
-        <p className="mt-1 text-sm text-slate-400">
-          {kind === 'PITCHER' ? '투수' : '타자'} 1명 · {def.gold.toLocaleString()}G
+        <span className="shop-section-kicker">FINAL AUTHORIZATION</span>
+        <h2 id="shop-confirm-title">영입을 승인할까요?</h2>
+        <p className="shop-confirm-summary">
+          <b style={{ color: def.accent }}>{def.ko}</b> · {kind === 'PITCHER' ? '투수' : '타자'} 1명
         </p>
 
-        <div className="my-4">
+        <div className="shop-confirm-rates">
           <RateTable id={banner} />
         </div>
 
-        <p className="mb-4 rounded-lg bg-white/5 px-3 py-2 text-center text-xs tabular text-slate-300">
-          보유 {team.gold.toLocaleString()}G → 뽑은 뒤 {(team.gold - def.gold).toLocaleString()}G
-        </p>
+        <dl className="shop-confirm-balance tabular">
+          <div>
+            <dt>현재 보유</dt>
+            <dd>{team.gold.toLocaleString()} G</dd>
+          </div>
+          <div>
+            <dt>계약 비용</dt>
+            <dd>- {def.gold.toLocaleString()} G</dd>
+          </div>
+          <div>
+            <dt>계약 후 잔액</dt>
+            <dd>{(team.gold - def.gold).toLocaleString()} G</dd>
+          </div>
+        </dl>
 
-        <div className="flex gap-2">
+        <div className="shop-confirm-actions">
           <button className="btn flex-1" onClick={onCancel}>
             취소
           </button>
           <button ref={confirmRef} className="btn btn-primary flex-1" onClick={onConfirm}>
-            뽑기
+            영입 승인
           </button>
         </div>
       </div>
@@ -501,15 +551,19 @@ function RevealOverlay({
       </div>
 
       {revealing ? (
-        <div className="text-center">
-          <div className="inning-break-kicker">SCOUTING</div>
-          <div className="shop-orb-wrap mx-auto mt-4">
-            <span className="shop-orb" aria-hidden>
-              ⚾
+        <div className="shop-reveal-stage">
+          <div className="inning-break-kicker">LIVE SCOUT REPORT</div>
+          <div className="shop-contract" aria-hidden>
+            <span className="shop-contract-ring" />
+            <span className="shop-contract-card">
+              <i className="shop-contract-stripe" />
+              <b>A/B</b>
+              <i className="shop-contract-lines" />
             </span>
             <span className="shop-orb-halo" aria-hidden />
           </div>
-          <div className="mt-4 text-base font-bold text-amber-300 flash">계약서 확인 중…</div>
+          <h2 className="shop-reveal-title flash">선수 리포트 개봉 중</h2>
+          <p className="shop-reveal-subtitle">계약 데이터와 메디컬 리포트를 확인하고 있습니다</p>
           <div className="inning-break-progress">
             <i style={{ animationDuration: `${hold}ms` }} />
           </div>
@@ -519,16 +573,20 @@ function RevealOverlay({
         </div>
       ) : (
         <div
-          className={`panel pop-in relative w-[min(94vw,520px)] max-h-[88vh] overflow-y-auto p-6 ${
+          className={`shop-result-card pop-in ${
             tier === 'S' ? 'shop-card-s' : ''
           }`}
           onClick={(e) => e.stopPropagation()}
         >
           {(tier === 'A' || tier === 'S') && <span className="shop-burst" aria-hidden />}
 
-          <div className="text-center">
-            <div className="inning-break-kicker">영입 완료</div>
-            <div className="inning-break-title" style={{ color: TIER_COLOR[tier] }}>
+          <div className="shop-result-heading">
+            <div>
+              <div className="inning-break-kicker">SIGNING COMPLETE</div>
+              <p>스카우팅 리포트가 구단에 등록되었습니다</p>
+            </div>
+            <div className="shop-result-tier" style={{ color: TIER_COLOR[tier] }}>
+              <span>{TIER_KO[tier]}</span>
               {tier}
             </div>
           </div>

@@ -1,10 +1,22 @@
 import { Rng, clamp, norm, seedFromString } from './rng';
-import { computePitch, describeLocation, pitchCapacity, staminaRemaining } from './pitching';
-import { judgeSwing, makeBattedBall, effectiveBatting, withInjuryPenalty } from './batting';
+import {
+  computePitch,
+  describeLocation,
+  pitchCapacity,
+  staminaRemaining,
+  zoneCell,
+} from './pitching';
+import {
+  effectiveBatSide,
+  effectiveBatting,
+  judgeSwing,
+  makeBattedBall,
+  withInjuryPenalty,
+} from './batting';
 import { resolveFielding, type DefenseMap } from './fielding';
 import { resolveAdvance, resolveSteals } from './baserunning';
 import { PITCH_DEFS, POSITION_KO, SWING_DEFS } from './constants';
-import { autoLineup, emptySeason, hitterScore } from './generator';
+import { autoLineup, emptySeason, emptyZoneSplits, hitterScore } from './generator';
 import type {
   GameSettings,
   GameState,
@@ -12,6 +24,7 @@ import type {
   PitchClockViolation,
   PitchCommand,
   PitchResult,
+  PitchTrajectory,
   PlayResultKind,
   Player,
   Position,
@@ -21,6 +34,7 @@ import type {
   StealResult,
   Team,
   TeamInGame,
+  ZoneSplits,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -29,11 +43,26 @@ import type {
 
 function toTeamInGame(team: Team, settings: GameSettings): TeamInGame {
   const roster: Record<string, Player> = {};
+  const scoutZones: Record<string, ZoneSplits> = {};
   for (const p of team.players) {
     // 부상 보정은 여기서 딱 한 번 건다. 이후 엔진 전체가 깎인 값을 읽는다.
     const copy = structuredClone(withInjuryPenalty(p));
+
+    // 상대 타자 스카우팅용 통산 스냅샷. **반드시 아래에서 지우기 전에 뜬다.**
+    // 순서가 뒤집히면 예외 없이 조용히 빈 스냅샷이 나가고 오버레이만 안 보인다.
+    if (copy.zoneSplits?.ab.some((n) => n > 0)) scoutZones[p.id] = copy.zoneSplits;
+
     // GameState에는 시즌 누적값이 아니라 이번 경기에서 생긴 델타만 담는다.
+    //
+    // **경기 후 merge의 입력이 되는 필드는 여기서 빠짐없이 비운다.** 하나라도 남기면
+    // matchReward가 (저장된 누적 + 이번 경기)를 저장분에 또 더해 매 경기 두 배로 부푼다.
+    // splits가 실제로 그랬다 — 3경기 만에 타수가 100에서 833이 됐다.
+    //
+    // 기준은 "누적인가"가 아니라 "merge의 입력인가"다. career와 seasonLog도 누적이지만
+    // applyMatchResult가 team.players 쪽을 읽으므로 지우면 안 된다.
     copy.season = emptySeason();
+    delete copy.splits;
+    delete copy.zoneSplits;
     roster[p.id] = copy;
   }
 
@@ -85,6 +114,8 @@ function toTeamInGame(team: Team, settings: GameSettings): TeamInGame {
     hits: 0,
     errors: 0,
     lob: 0,
+    // 기록이 있는 타자가 하나도 없으면 키 자체를 넣지 않는다 (신생 팀 페이로드 증가 0).
+    ...(Object.keys(scoutZones).length ? { scoutZones } : {}),
   };
 }
 
@@ -347,9 +378,11 @@ export function resolvePitch(
   }
 
   // ---- 몸에 맞는 공 ------------------------------------------------------
-  const insideEdge = batter.bats === 'L' ? 2.6 : -2.6;
+  // 몸쪽은 타자가 실제로 선 쪽으로 정해진다 (스위치히터는 투수에 따라 바뀐다)
+  const batSide = effectiveBatSide(batter, pitcher);
+  const insideEdge = batSide === 'L' ? 2.6 : -2.6;
   const hbp =
-    (batter.bats === 'L' ? traj.zoneX > insideEdge : traj.zoneX < insideEdge) &&
+    (batSide === 'L' ? traj.zoneX > insideEdge : traj.zoneX < insideEdge) &&
     Math.abs(traj.zoneY) < 1.6 &&
     rng.chance(0.3);
 
@@ -413,7 +446,7 @@ export function resolvePitch(
 
   // ---- 인플레이 ---------------------------------------------------------
   result.contact = true;
-  const bb = makeBattedBall(rng, batter, swing, traj, judged.quality, judged.timingErr);
+  const bb = makeBattedBall(rng, batter, pitcher, swing, traj, judged.quality, judged.timingErr);
   result.battedBall = bb;
 
   const play = resolveFielding(rng, bb, defenseMap(s), s.outs, runnersOnBase(s));
@@ -667,6 +700,7 @@ function resolveCount(s: GameState, batter: Player, pitcher: Player, out: PitchR
     batter.season.pa += 1;
     batter.season.ab += 1;
     batter.season.so += 1;
+    recordSplit(batter, pitcher, false, out.trajectory);
     if (pitcher.pitching) pitcher.season.pk += 1;
     finishAtBat(s, out, {});
     return;
@@ -766,7 +800,8 @@ function recordBatterStat(batter: Player, pitcher: Player, r: PitchResult, runs:
   const st = batter.season;
   st.pa += 1;
   const noAb: PlayResultKind[] = ['SAC_FLY', 'SAC_BUNT'];
-  if (!noAb.includes(r.kind)) st.ab += 1;
+  const countsAsAb = !noAb.includes(r.kind);
+  if (countsAsAb) st.ab += 1;
   st.rbi += r.rbi;
   if (isHit(r.kind)) {
     st.h += 1;
@@ -775,6 +810,42 @@ function recordBatterStat(batter: Player, pitcher: Player, r: PitchResult, runs:
     if (r.kind === 'TRIPLE') st.triple += 1;
     if (r.kind === 'HOME_RUN') st.hr += 1;
   }
+  if (countsAsAb) recordSplit(batter, pitcher, isHit(r.kind), r.trajectory);
+}
+
+/**
+ * 타수 하나가 끝날 때마다 좌우 스플릿과 코스별 기록을 **함께** 센다.
+ *
+ * 대타를 고를 때 "능력치 높은 놈" 말고 볼 것이 생기려면 이 기록이 있어야 한다.
+ * 삼진도 타수이므로 여기와 resolveCount 두 곳에서만 부른다 — 결과 종류마다
+ * 흩어 놓으면 반드시 어딘가 빠진다 (@see matchReward.mergeSeason의 같은 교훈).
+ *
+ * 둘을 한 함수 안에 둔 것도 같은 이유다. 따로 부르게 하면 언젠가 한쪽만 부르는
+ * 호출부가 생기고, 화면에 나란히 놓인 두 패널의 타수가 조용히 어긋난다.
+ *
+ * traj가 없는 경우는 피치 클락 위반뿐이다 — 던진 공이 없으니 코스도 없다. 타수는
+ * 세고 칸은 비우므로 불변식은 등호가 아니라 `9칸 합 ≤ 타수`다.
+ */
+function recordSplit(
+  batter: Player,
+  pitcher: Player,
+  hit: boolean,
+  traj: PitchTrajectory | undefined,
+) {
+  const key = pitcher.throws === 'L' ? 'vsL' : 'vsR';
+  const cur = batter.splits?.[key] ?? [0, 0];
+  batter.splits = {
+    ...batter.splits,
+    [key]: [cur[0] + 1, cur[1] + (hit ? 1 : 0)],
+  };
+
+  if (!traj) return;
+  // 스위치히터가 매 타석 반대편에 서도 약점이 한 칸에 모이도록 effectiveBatSide를 쓴다.
+  const cell = zoneCell(traj.zoneX, traj.zoneY, effectiveBatSide(batter, pitcher));
+  const z = batter.zoneSplits ?? emptyZoneSplits();
+  z.ab[cell] += 1;
+  if (hit) z.h[cell] += 1;
+  batter.zoneSplits = z;
 }
 
 const KIND_KO: Partial<Record<PlayResultKind, string>> = {

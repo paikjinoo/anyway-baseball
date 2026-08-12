@@ -45,6 +45,7 @@ import {
 } from '@/lib/store/matchStore';
 import { useAppStore } from '@/lib/store/appStore';
 import { currentBatter, currentPitcher, defenseTeam, offense } from '@/lib/game/engine';
+import { effectiveBatSide } from '@/lib/game/batting';
 import type { GameState, Player, Position, Vec3 } from '@/lib/game/types';
 
 export type CameraMode = 'PITCHER' | 'BATTER' | 'FIELD' | 'DRAMATIC';
@@ -247,7 +248,9 @@ function Batter() {
 
   const batter = currentBatter(scene);
   const uni = uniformOf(offense(scene));
-  const lefty = batter.bats === 'L';
+  // 판정과 같은 함수로 좌우를 정한다. 스위치히터는 상대 투수에 따라 타석을 바꾼다.
+  const batSide = effectiveBatSide(batter, currentPitcher(scene));
+  const lefty = batSide === 'L';
   // 좌타자는 1루 쪽(-X), 우타자는 3루 쪽(+X)
   const x = lefty ? -0.82 : 0.82;
 
@@ -263,6 +266,7 @@ function Batter() {
     <PlayerModel
       player={batter}
       uniform={uni}
+      batSide={batSide}
       pose={swinging ? (bunting ? 'BATTING_BUNT' : 'BATTING_SWING') : 'BATTING'}
       headwear="HELMET"
       animT={swinging ? swingT : load}

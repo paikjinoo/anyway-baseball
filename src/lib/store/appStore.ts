@@ -4,7 +4,13 @@ import { create } from 'zustand';
 import type { GameSettings, League, Team } from '../game/types';
 import { DEFAULT_SETTINGS } from '../game/types';
 import { withNickname, type AppUser } from '../firebase/auth';
-import { loadSettings, normalizeNickname, saveNickname, saveSettings } from '../firebase/store';
+import {
+  loadSettings,
+  normalizeNickname,
+  saveNickname,
+  saveSettings,
+  type SkippedDoc,
+} from '../firebase/store';
 import { configureAudio } from '../audio/sfx';
 
 interface AppState {
@@ -15,6 +21,11 @@ interface AppState {
   activeTeamId: string | null;
   leagues: League[];
   settings: GameSettings;
+  /**
+   * 스키마가 안 맞아 불러오지 못한 문서들.
+   * 지금까지는 아무 설명 없이 사라져 사용자에게는 데이터가 없어진 것처럼 보였다.
+   */
+  dataIssues: SkippedDoc[];
 
   setUser: (u: AppUser | null) => void;
   /** 감독 닉네임 변경. null이나 빈 문자열이면 계정 이름으로 되돌린다. */
@@ -32,6 +43,7 @@ interface AppState {
   removeLeague: (id: string) => void;
   updateSettings: (patch: Partial<GameSettings>) => void;
   hydrateSettings: () => void;
+  setDataIssues: (issues: SkippedDoc[]) => void;
 }
 
 const ACTIVE_KEY = 'ab:activeTeam';
@@ -44,8 +56,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeTeamId: typeof window !== 'undefined' ? localStorage.getItem(ACTIVE_KEY) : null,
   leagues: [],
   settings: DEFAULT_SETTINGS,
+  dataIssues: [],
 
-  setUser: (user) => set({ user, dataReady: false }),
+  setUser: (user) => set({ user, dataReady: false, dataIssues: [] }),
 
   setNickname: (raw) => {
     const { user } = get();
@@ -122,6 +135,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
       return { settings };
     }),
+
+  setDataIssues: (dataIssues) => set({ dataIssues }),
 
   hydrateSettings: () => {
     const settings = loadSettings();

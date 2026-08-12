@@ -118,6 +118,8 @@ function resetStats(p: Player): { player: Player; goldRefund: number } {
     next.pitching.stamina = p.base.stamina;
     next.pitching.arsenal = structuredClone(p.base.arsenal);
   }
+  // 골드로 익힌 구종이 통째로 사라졌으니 그 습득 시점 기록도 남길 이유가 없다
+  delete next.base.learned;
   next.trainingPoints += p.spentPoints;
   next.spentPoints = 0;
   const goldRefund = p.spentGold ?? 0;

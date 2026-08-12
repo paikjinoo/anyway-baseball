@@ -1,8 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { Rng, seedFromString } from './rng';
 import { emptySeason, generatePlayer, generateTeam } from './generator';
+import { createGame } from './engine';
+import { simulateGame } from './league';
 import { pitchCapacity } from './pitching';
-import { LEAGUE_PLACE_GOLD, LEAGUE_PLACE_ITEMS } from './league';
+import {
+  LEAGUE_PLACE_GOLD,
+  LEAGUE_PLACE_ITEMS,
+  POSTSEASON_GOLD,
+  POSTSEASON_ITEMS,
+} from './league';
 import {
   DIFFICULTY_REWARD_MULT,
   OUTCOME_MULT,
@@ -16,7 +23,7 @@ import {
   relayOutcome,
   type MatchRewardContext,
 } from './matchReward';
-import type { Player, SeasonStat, Team, TeamInGame } from './types';
+import { DEFAULT_SETTINGS, type Player, type SeasonStat, type Team, type TeamInGame } from './types';
 
 function ctx(over: Partial<MatchRewardContext> = {}): MatchRewardContext {
   return {
@@ -332,8 +339,132 @@ describe('리그 종료 보상', () => {
     for (const items of LEAGUE_PLACE_ITEMS) {
       expect(Object.keys(items).length).toBeGreaterThan(0);
     }
-    // 1등만 받는 아이템이 있다
-    expect(LEAGUE_PLACE_ITEMS[0].EXP_XL).toBeGreaterThan(0);
-    expect(LEAGUE_PLACE_ITEMS[1].EXP_XL).toBeUndefined();
+    // 정규 1위만 받는 아이템이 있다
+    expect(LEAGUE_PLACE_ITEMS[0].EXP_L).toBeGreaterThan(0);
+    expect(LEAGUE_PLACE_ITEMS[1].EXP_L).toBeUndefined();
+  });
+
+  it('가장 좋은 아이템은 정규 1위가 아니라 우승에서 나온다', () => {
+    // 포스트시즌이 생기면서 "정규 1위"와 "우승"이 갈렸다. 단기전을 치를 이유가
+    // 있으려면 최상위 아이템이 우승 쪽에 있어야 한다.
+    expect(POSTSEASON_ITEMS.champion.EXP_XL).toBeGreaterThan(0);
+    expect(POSTSEASON_ITEMS.champion.RESET_STATS).toBeGreaterThan(0);
+    for (const items of LEAGUE_PLACE_ITEMS) {
+      expect(items.EXP_XL).toBeUndefined();
+      expect(items.RESET_STATS).toBeUndefined();
+    }
+    expect(POSTSEASON_GOLD.champion).toBeGreaterThan(LEAGUE_PLACE_GOLD[0]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 저장 -> 경기 -> 병합 왕복
+// ---------------------------------------------------------------------------
+
+/**
+ * 위쪽 테스트들이 쓰는 inGame() 헬퍼는 저장된 선수를 그대로 복사할 뿐 engine.toTeamInGame을
+ * 거치지 않는다. 그래서 "경기에 들어갈 때 무엇을 비우는가"에 생긴 회귀를 한 번도 잡지 못했다.
+ * 여기서는 진짜 경기를 돌려 저장된 팀으로 되돌아오는 한 바퀴를 잰다.
+ */
+
+/** 심어 둘 통산 타수. 병합이 이 값을 한 번 더 세는지 보려는 것이다. */
+const SEED_AB = 100;
+
+function seededTeam(seed: string, ownerUid: string): Team {
+  const t = generateTeam(new Rng(seedFromString(seed)), { ownerUid });
+  return {
+    ...t,
+    players: t.players.map((p) => ({
+      ...p,
+      splits: { vsL: [40, 12] as [number, number], vsR: [SEED_AB - 40, 18] as [number, number] },
+      // 9칸에 고르게 나눠 심는다. 합은 splits와 같은 SEED_AB.
+      zoneSplits: {
+        ab: Array(9).fill(0).map((_, i) => (i < SEED_AB % 9 ? 1 : 0) + Math.floor(SEED_AB / 9)),
+        h: Array(9).fill(0).map(() => 2),
+      },
+    })),
+  };
+}
+
+function zoneAbOf(t: Team, id: string): number {
+  return t.players.find((p) => p.id === id)?.zoneSplits?.ab.reduce((a, b) => a + b, 0) ?? 0;
+}
+
+function splitAb(t: Team, id: string): number {
+  const s = t.players.find((p) => p.id === id)?.splits;
+  return (s?.vsL?.[0] ?? 0) + (s?.vsR?.[0] ?? 0);
+}
+
+describe('경기 기록 왕복', () => {
+  it('경기 시작 시 GameState 로스터에 통산 기록이 남지 않는다', () => {
+    const state = createGame(
+      seededTeam('rt-mine', 'u1'),
+      seededTeam('rt-foe', 'u2'),
+      DEFAULT_SETTINGS,
+      'rt-init',
+    );
+    for (const p of Object.values(state.away.roster)) {
+      // season은 예전부터 비웠다. splits는 남아 있었고, 그게 병합에서 두 번 세이는 원인이었다.
+      expect(p.season.ab).toBe(0);
+      expect(p.splits).toBeUndefined();
+      expect(p.zoneSplits).toBeUndefined();
+    }
+  });
+
+  it('통산 코스 기록은 스카우팅 스냅샷으로만 남는다', () => {
+    const mine = seededTeam('rt-mine', 'u1');
+    const state = createGame(mine, seededTeam('rt-foe', 'u2'), DEFAULT_SETTINGS, 'rt-scout');
+    const id = mine.lineup[0];
+
+    // 델타 컨테이너는 비어 있고, 표시용 스냅샷에만 통산이 들어 있다.
+    expect(state.away.roster[id].zoneSplits).toBeUndefined();
+    expect(state.away.scoutZones?.[id]?.ab.reduce((a, b) => a + b, 0)).toBe(SEED_AB);
+  });
+
+  it('기록이 없는 팀은 스카우팅 스냅샷 자체를 만들지 않는다', () => {
+    // 신생 팀의 온라인 페이로드가 지금과 똑같아야 한다.
+    const fresh = generateTeam(new Rng(seedFromString('rt-fresh')), { ownerUid: 'u3' });
+    const state = createGame(fresh, fresh, DEFAULT_SETTINGS, 'rt-fresh');
+    expect(state.away.scoutZones).toBeUndefined();
+  });
+
+  it('세 경기를 연속으로 치러도 스플릿 타수가 선형으로만 는다', () => {
+    let mine = seededTeam('rt-mine', 'u1');
+    const foe = seededTeam('rt-foe', 'u2');
+    const leadoff = mine.lineup[0];
+
+    for (let i = 0; i < 3; i++) {
+      const res = simulateGame(mine, foe, DEFAULT_SETTINGS, `rt-${i}`);
+      mine = applyMatchResult(mine, res.state.away, ctx({ kind: 'LEAGUE' })).team;
+    }
+
+    // 한 경기에 같은 타자가 6타석을 넘기는 일은 없다.
+    // 이중 집계가 있으면 100 -> 200 -> 400 -> 800으로 뛴다.
+    expect(splitAb(mine, leadoff)).toBeGreaterThan(SEED_AB);
+    expect(splitAb(mine, leadoff)).toBeLessThanOrEqual(SEED_AB + 3 * 6);
+
+    // 코스 기록도 같은 경로를 타므로 같은 폭으로만 늘어야 한다.
+    const zoneAb = zoneAbOf(mine, leadoff);
+    expect(zoneAb).toBeGreaterThan(SEED_AB);
+    expect(zoneAb).toBeLessThanOrEqual(SEED_AB + 3 * 6);
+    // 두 기록의 분모가 어긋나면 화면에서 둘 다 못 믿게 된다.
+    expect(zoneAb).toBe(splitAb(mine, leadoff));
+  });
+
+  it('온라인 경기는 코스 기록도 남기지 않는다', () => {
+    const mine = seededTeam('rt-mine', 'u1');
+    const foe = seededTeam('rt-foe', 'u2');
+    const leadoff = mine.lineup[0];
+    const res = simulateGame(mine, foe, DEFAULT_SETTINGS, 'rt-online');
+
+    const after = applyMatchResult(
+      mine,
+      res.state.away,
+      ctx({ kind: 'ONLINE', recordSeason: false }),
+    ).team;
+
+    // 상대 전력이 제각각인 전적이 섞이면 대타 판단의 근거가 흐려진다 (splits와 같은 정책).
+    expect(zoneAbOf(after, leadoff)).toBe(SEED_AB);
+    expect(splitAb(after, leadoff)).toBe(SEED_AB);
   });
 });

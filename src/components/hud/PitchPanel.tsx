@@ -2,11 +2,31 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { PITCH_DEFS } from '@/lib/game/constants';
-import { arsenalOf, staminaRemaining } from '@/lib/game/pitching';
+import {
+  ZONE_CELL_KO,
+  arsenalOf,
+  screenCellToZoneCell,
+  staminaRemaining,
+} from '@/lib/game/pitching';
+import { effectiveBatSide } from '@/lib/game/batting';
+import { battingSide } from '@/lib/game/engine';
 import { bullpenCandidates } from '@/lib/game/engine';
 import { isPartyMode, isRelayMode, useMatchStore } from '@/lib/store/matchStore';
 import { playClick } from '@/lib/audio/sfx';
+import { zoneHeatColor } from '@/lib/format';
 import type { GameState, PitchType, Player, Side } from '@/lib/game/types';
+
+/** 코스별 약점 오버레이를 띄우기 시작하는 상대 타자의 통산 타수 */
+const HEAT_MIN_AB = 30;
+/** 칸 하나를 칠하기 시작하는 타수 */
+const HEAT_MIN_CELL_AB = 5;
+/** 표본이 적은 칸을 전체 타율 쪽으로 끌어당기는 세기 (선수단 화면과 같은 값) */
+const HEAT_PRIOR_AB = 8;
+/**
+ * 경기 중 오버레이의 진하기. 선수단 화면의 1/3 수준이다 —
+ * 조준 마커와 존 테두리를 덮어 버리면 코스를 찍기 어려워진다.
+ */
+const HEAT_STRENGTH = 0.35;
 
 /**
  * 투구 조작 패널.
@@ -20,11 +40,14 @@ import type { GameState, PitchType, Player, Side } from '@/lib/game/types';
 export function PitchPanel({
   state,
   pitcher,
+  batter,
   playerSide,
   mirrored,
 }: {
   state: GameState;
   pitcher: Player;
+  /** 지금 타석의 타자. 코스별 약점 오버레이에만 쓴다. */
+  batter: Player;
   playerSide: Side;
   mirrored: boolean;
 }) {
@@ -43,6 +66,7 @@ export function PitchPanel({
   const [target, setTarget] = useState({ x: 0, y: 0 });
   const [quick, setQuick] = useState(false);
   const [showBullpen, setShowBullpen] = useState(false);
+  const [showHeat, setShowHeat] = useState(true);
   const zoneRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -75,6 +99,16 @@ export function PitchPanel({
   }
 
   const attr = pitcher.pitching?.arsenal[type];
+
+  // 상대 타자의 통산 코스별 기록. roster의 zoneSplits는 이번 경기 델타라 쓸 수 없어서,
+  // 경기 시작 시점 스냅샷을 따로 들고 다닌다 (@see engine.toTeamInGame).
+  // 온라인에서도 START가 GameState를 통째로 보내므로 프로토콜 추가 없이 그대로 온다.
+  const heat = state[battingSide(state)].scoutZones?.[batter.id];
+  const heatAb = heat ? heat.ab.reduce((a, b) => a + b, 0) : 0;
+  const heatBase = heat && heatAb ? heat.h.reduce((a, b) => a + b, 0) / heatAb : 0;
+  // 표본이 얇으면 토글 자체를 감춘다 — 신생 팀 상대에서는 지금과 완전히 같은 화면이 된다.
+  const canShowHeat = !!heat && heatAb >= HEAT_MIN_AB;
+  const batSide = effectiveBatSide(batter, pitcher);
 
   return (
     <div className="panel space-y-3 p-4">
@@ -126,7 +160,20 @@ export function PitchPanel({
 
       {/* 코스 */}
       <div>
-        <div className="field-label">코스 (클릭)</div>
+        <div className="flex items-center justify-between">
+          <div className="field-label">코스 (클릭)</div>
+          {canShowHeat && (
+            <button
+              type="button"
+              onClick={() => setShowHeat((v) => !v)}
+              className={`rounded px-1.5 py-0.5 text-[10px] ${
+                showHeat ? 'bg-lime-400/15 text-lime-300' : 'text-slate-500'
+              }`}
+            >
+              약점 {showHeat ? '표시' : '숨김'}
+            </button>
+          )}
+        </div>
         <div
           ref={zoneRef}
           onPointerDown={pickFromEvent}
@@ -143,9 +190,28 @@ export function PitchPanel({
             }}
           >
             <div className="grid h-full w-full grid-cols-3 grid-rows-3">
-              {Array.from({ length: 9 }, (_, i) => (
-                <div key={i} className="border border-amber-400/20" />
-              ))}
+              {Array.from({ length: 9 }, (_, i) => {
+                const cell = screenCellToZoneCell(i, batSide, mirrored);
+                const ab = heat?.ab[cell] ?? 0;
+                const paint = canShowHeat && showHeat && ab >= HEAT_MIN_CELL_AB;
+                return (
+                  <div
+                    key={i}
+                    className="border border-amber-400/20"
+                    style={
+                      paint
+                        ? {
+                            background: zoneHeatColor(
+                              (heat!.h[cell] + heatBase * HEAT_PRIOR_AB) / (ab + HEAT_PRIOR_AB),
+                              HEAT_STRENGTH,
+                            ),
+                          }
+                        : undefined
+                    }
+                    title={paint ? `${ZONE_CELL_KO[cell]} ${heat!.h[cell]}/${ab}` : undefined}
+                  />
+                );
+              })}
             </div>
           </div>
           {/* 목표 마커 */}

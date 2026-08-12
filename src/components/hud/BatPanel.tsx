@@ -116,15 +116,33 @@ export function BatPanel({ state, batter }: { state: GameState; batter: Player }
 
       {/* 조준 그리드 */}
       <div>
-        <div className="field-label">조준 (마우스 이동 · 방향키)</div>
+        <div className="field-label">
+          조준 <span className="hide-on-touch">(마우스 이동 · 방향키)</span>
+          <span className="touch-only">(끌어서 조준 · 손을 떼면 스윙)</span>
+        </div>
         <div
           ref={zoneRef}
           onPointerMove={move}
           onPointerDown={(e) => {
             move(e);
+            // 터치는 누르는 순간 스윙하지 않는다.
+            //
+            // 마우스는 커서를 옮겨 조준해 두고 클릭으로 치지만, 손가락은 화면에 닿는
+            // 그 순간이 곧 조준이라 같은 동작에 스윙까지 묶으면 **조준 자체가 불가능**하다
+            // (닿은 자리로 아무렇게나 휘두르게 된다). 그래서 터치는 끌어서 조준하고
+            // 손을 뗄 때 친다 — 투수가 와인드업하는 동안 겨누고 공이 올 때 놓으면 된다.
+            if (e.pointerType === 'touch') {
+              e.currentTarget.setPointerCapture(e.pointerId);
+              return;
+            }
             if (phase === 'SETUP') return;
             const t: SwingType = e.shiftKey ? 'POWER' : !relay && swingType === 'BUNT' ? 'BUNT' : 'NORMAL';
             swing(t);
+          }}
+          onPointerUp={(e) => {
+            if (e.pointerType !== 'touch' || phase === 'SETUP') return;
+            // 터치에는 Shift가 없으므로 아래 토글로 고른 타격 방식을 그대로 쓴다.
+            swing(swingType);
           }}
           className="relative mx-auto aspect-square w-full max-w-[190px] cursor-crosshair touch-none rounded-lg border border-white/10 bg-slate-950/70"
         >

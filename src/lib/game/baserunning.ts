@@ -26,11 +26,32 @@ export function baseToBase(p: Player): number {
   return lerp(3.75, 2.95, norm(effSpeed(p)));
 }
 
-/** 정지 상태(리드오프)에서 다음 베이스까지 — 도루 시 */
+/**
+ * 정지 상태(리드오프)에서 다음 베이스까지 — 도루 시 (s).
+ *
+ * **엔드포인트에 MLB 실측값을 그대로 꽂으면 안 된다.** lerp의 양 끝은 능력치 0과 99일 때의
+ * 값인데, 실제 라인업에 서는 타자의 speed는 p10 28 · 중앙 45 · p90 68에 몰려 있어서 그
+ * 구간만 통과한다. 4.1~3.1을 양 끝에 걸면 로스터 전원이 3.4~3.8초에 뭉쳐 수비 시간
+ * 3.30초를 아무도 못 이기고, 도루가 통째로 사라진다 (바로 위 homeToFirst가 같은 이유로
+ * MLB 범위보다 넓게 잡혀 있다).
+ *
+ * 그래서 **실측 분포가 통과했을 때 실측값이 나오도록** 역산했다:
+ *
+ *   중앙 45 -> 3.60초 · p90 68 -> 3.10초   (MLB 평균 3.6 · 엘리트 3.1)
+ *
+ * 느린 끝은 p10 28 -> 3.97초로 목표 4.1보다 0.13초 빠른데, 분포의 p10~중앙 간격(17포인트)이
+ * 중앙~p90(23포인트)보다 좁아 세 점을 직선 하나로 동시에 맞출 수 없기 때문이다. 결정이
+ * 실제로 갈리는 구간(speed 55~80)을 정확히 맞추는 쪽을 골랐다 — 3.97초짜리 주자는 어차피
+ * 뛰지 않는다.
+ *
+ * 바닥값은 외삽 방지다. speed 93(관측 최대)이 직선으로는 2.56초가 되는데, 그건 어떤 배터리도
+ * 못 잡는 시간이다. 실제 MLB 최속 기록이 2.9초 언저리라 거기서 끊는다.
+ */
 export function stealTime(p: Player, from: number): number {
-  // 1루->2루 기준 엘리트 3.35초, 느린 선수 4.15초. 3루 도루는 리드가 짧아 조금 더 걸린다.
-  const t = lerp(4.02, 3.26, norm(effSpeed(p)));
-  return from === 1 ? t + 0.1 : t;
+  const t = Math.max(2.9, lerp(4.58, 2.43, norm(effSpeed(p))));
+  // 2루->3루는 거리가 같지만 리드가 크다. 1루에는 1루수가 붙어서 견제를 받지만 2루에서는
+  // 유격수/2루수가 베이스에서 떨어져 서 있어 리드를 1m쯤 더 잡을 수 있다.
+  return from === 1 ? t - STEAL3_LEAD_GAIN : t;
 }
 
 /** 타구가 잡힌 뒤 태그업해서 진루하는 시간 */
@@ -42,9 +63,123 @@ export function tagUpTime(p: Player): number {
 // 도루
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 도루를 이루는 값들은 하나의 비교식 `runTime < defTime`에 걸린 손잡이들이다.
+// 하나만 돌리면 결과가 통째로 움직이므로, 아래 상수를 건드릴 때는 반드시 180경기 실측으로
+// 재보정한다. 각 상수의 유도 근거는 개별 주석에 있고, 전체 그림은 resolveSteals에 있다.
+//
+// 예전에는 두 개의 큰 오차(딜리버리가 공 비행을 두 번 세던 것 + 그걸 상쇄하려 퀵모션을
+// 55%로 올려 둔 것)가 서로 맞물려 **결과만 맞고 과정은 둘 다 틀린** 상태였다. 지금은 양쪽
+// 모두 실측값에서 유도되어 있다. 아래 값들이 다시 "결과를 맞추려고 넣은 숫자"가 되지
+// 않도록, 바꿀 때는 근거부터 바꾼다.
+// ---------------------------------------------------------------------------
+
 /**
- * 도루 판정.
- * 주자 도달 시간 vs (투수 딜리버리 + 포수 팝타임 + 송구).
+ * 2루->3루 도루에서 주자가 리드로 버는 시간 (s).
+ *
+ * 1루 주자는 1루수가 붙어 견제를 받지만, 2루에서는 유격수/2루수가 베이스에서 떨어져 있어
+ * 리드를 1m 남짓 더 잡는다. 8.5m/s면 0.12초다.
+ */
+const STEAL3_LEAD_GAIN = 0.12;
+/**
+ * 2루->3루 도루에서 수비가 송구 거리로 버는 시간 (s).
+ *
+ * 홈->2루 38.8m, 홈->3루 27.4m로 11.4m 짧다. 포수 송구 36m/s면 0.32초를 번다. 다만 3루
+ * 송구는 우타자를 피해 던져야 하고 태그도 까다로워 0.10초쯤 돌려준다. 순 0.22초.
+ *
+ * **주자 리드(-0.12)와 이 값(-0.22)의 차이가 3루 도루의 난이도 전부다.** 순 0.10초 불리하고,
+ * 그래서 성공률이 2루 도루보다 조금 낮다. 예전에는 리드 부호가 뒤집혀(+0.10) 있어서 순
+ * 0.22초 불리했고, 실측 성공률이 53%로 손익분기(69%) 한참 아래였다 — CPU가 뛸수록 손해를
+ * 보는 상태였다.
+ */
+const STEAL3_THROW_GAIN = 0.22;
+
+/**
+ * 홈 스틸에서 주자가 실제로 달려야 하는 구간의 비율.
+ *
+ * 3루 주자는 투수가 공을 놓기 전에 이미 뛰고 있고 리드도 크다. 3루~홈 27.4m 중 리드와
+ * 스타트로 이미 벌어 놓은 몫을 빼면 남는 건 절반이 조금 안 된다.
+ */
+const HOME_STEAL_LEAD = 0.42;
+/** 포수가 공을 잡고 홈에서 태그하기까지 (s). 송구가 없으니 팝타임 대신 이것만 붙는다. */
+const HOME_TAG_TIME = 0.15;
+
+/**
+ * 주자의 '점프' — 속도 능력치로 설명되지 않는 모든 것의 표준편차 (s).
+ *
+ * 리드를 얼마나 벌렸는지, 투수의 첫 동작을 얼마나 빨리 읽었는지, 송구가 베이스에 정확히
+ * 갔는지, 슬라이딩이 태그를 피했는지. 실제 도루의 성패는 대부분 여기서 갈린다.
+ *
+ * **이 항이 없으면 도루는 속도 능력치만의 함수가 된다.** 실제로 그런 상태였고, 산포가
+ * σ0.13(딜리버리 0.06 + 팝타임 0.08 + 주파 0.08)밖에 없어서 속도별 성공률이
+ * 50대 17% -> 60대 59% -> 70대 93%로 계단처럼 꺾였다. 속도 70이면 공짜 베이스, 55면
+ * 자살이라는 뜻이라 실제 야구(엘리트도 20%는 잡힌다)와 다르고, 무엇보다 능력치 몇 포인트
+ * 차이가 결과를 통째로 뒤집어 예측이 불가능해진다.
+ *
+ * 0.25초는 8.5m/s에서 리드 2m 남짓에 해당한다. 좋은 점프와 나쁜 점프의 차이로 그 정도는
+ * 충분히 벌어지고, 여기에 송구 정확도까지 얹힌 몫이다. 이 값으로 곡선이 MLB 모양
+ * (엘리트 ~80% · 경계 ~55%)에 맞는다.
+ */
+const STEAL_JUMP_SIGMA = 0.25;
+
+/** 도루 저지에 걸리는 시간의 분해. 합이 주자의 주파 시간과 겨루는 값이다. */
+export interface StealDefenseTime {
+  /** 셋포지션 첫 동작 -> 공을 놓는 순간 */
+  delivery: number;
+  /** 릴리스 -> 포수 미트 */
+  flight: number;
+  /** 포구 -> 2루 송구 도달 */
+  popTime: number;
+  /** delivery + flight + popTime */
+  total: number;
+}
+
+/**
+ * 도루 저지 시간.
+ *
+ * `delivery`는 **릴리스까지**다. 야구에서 관례적으로 말하는 "딜리버리 타임"(1.3초 안팎)은
+ * 미트에 꽂히는 순간까지를 뜻하는데, 여기서는 `flight`를 따로 더하므로 그 관례값을 그대로
+ * 쓰면 공 비행을 두 번 세게 된다. 실제로 예전에 그렇게 되어 있었고, 수비 시간이 0.5초
+ * 길어진 걸 퀵모션 빈도로 상쇄하고 있었다.
+ *
+ * 릴리스까지로 쪼갠 대가로 구속이 도루에 영향을 준다 — 느린 변화구를 던지면 주자가 그만큼
+ * 벌고, 이건 실제 야구에 있는 효과다.
+ *
+ * 합계 목표(MLB 실측): 일반 3.30초 · 퀵모션 3.05초.
+ */
+export function stealDefenseTime(
+  rng: Rng,
+  catcher: Player | undefined,
+  quickPitch: boolean,
+  pitchVelocityKmh: number,
+): StealDefenseTime {
+  // 셋포지션 -> 릴리스. 퀵모션(슬라이드 스텝)이면 짧다.
+  const delivery = (quickPitch ? 0.62 : 0.88) + rng.normal(0, 0.06);
+  // 릴리스 -> 포수 미트. 18.44m를 평균 구속(감속 92%)으로 나눈 값이라 145km/h에서 0.50초.
+  const flight = 18.44 / ((pitchVelocityKmh / 3.6) * 0.92);
+  // 포수 팝타임 (포구 -> 2루 송구 도달). 실제 MLB 1.85~2.10초.
+  const catcherArm = catcher ? norm(catcher.batting.arm) : 0.4;
+  const catcherField = catcher ? norm(catcher.batting.fielding) : 0.4;
+  const popTime = lerp(2.1, 1.82, catcherArm * 0.65 + catcherField * 0.35) + rng.normal(0, 0.08);
+
+  return { delivery, flight, popTime, total: delivery + flight + popTime };
+}
+
+/**
+ * 도루 판정 — 주자의 주파 시간 vs 수비의 저지 시간, 단순 경주다.
+ *
+ * 180경기 실측으로 유도한 양 끝 (모두 MLB 실측에 맞춤):
+ *
+ *   주파 (중앙 / p90)     3.60 / 3.10초   <- stealTime
+ *   수비 (일반 / 퀵모션)  3.30 / 3.03초   <- stealDefenseTime
+ *   산포                  σ0.27           <- 점프 0.25 + 딜리버리 0.06 + 팝타임 0.08
+ *
+ * 여기서 나오는 속도별 성공률: 40대 10% · 50대 28% · 60대 56% · 70대 84% · 80대 94%.
+ * 그 위에서 ai.decideSteal이 손익분기(69%) 위 주자만 뛰게 걸러 팀·경기당 도루 0.51 ·
+ * 도실 0.18 · 성공률 74%를 만든다 (MLB 0.5~0.6 · 0.2 · 75%).
+ *
+ * `pitcher`는 아직 쓰이지 않는다. 실제로는 딜리버리 타임이 투수마다 다르지만 지금은
+ * 퀵모션 여부로만 갈린다.
  */
 export function resolveSteals(
   rng: Rng,
@@ -57,14 +192,7 @@ export function resolveSteals(
   pitchVelocityKmh: number,
 ): StealResult[] {
   const results: StealResult[] = [];
-  // 투수 딜리버리 타임 (셋포지션). 퀵모션이면 짧다.
-  const delivery = (quickPitch ? 1.05 : 1.32) + rng.normal(0, 0.06);
-  // 공이 포수 미트에 도달하는 시간
-  const flight = 18.44 / ((pitchVelocityKmh / 3.6) * 0.92);
-  // 포수 팝타임 (포구 -> 2루 송구 도달). 실제 MLB 1.85~2.10초.
-  const catcherArm = catcher ? norm(catcher.batting.arm) : 0.4;
-  const catcherField = catcher ? norm(catcher.batting.fielding) : 0.4;
-  const popTime = lerp(2.1, 1.82, catcherArm * 0.65 + catcherField * 0.35) + rng.normal(0, 0.08);
+  const def = stealDefenseTime(rng, catcher, quickPitch, pitchVelocityKmh);
 
   for (const from of stealFrom.slice().sort((a, b) => b - a)) {
     const runner = bases[from];
@@ -75,18 +203,28 @@ export function resolveSteals(
     if (!p) continue;
 
     if (from === 2) {
-      // 홈 스틸. 성공률이 매우 낮다.
-      const runTime = stealTime(p, 2) * 0.86;
-      const defTime = delivery + rng.range(-0.05, 0.15);
+      // 홈 스틸.
+      //
+      // 3루 주자는 투수의 첫 동작에 맞춰 뛰기 때문에 3루~홈 전 구간을 새로 달리는 게 아니라
+      // 리드로 이미 줄여 놓은 나머지만 남는다. 그래서 주파 시간에 HOME_STEAL_LEAD를 곱한다.
+      // 수비는 포수 송구가 필요 없으므로 팝타임 대신 태그 시간만 붙는다.
+      //
+      // 예전에는 전 구간(×0.86 ≈ 3.0초)을 딜리버리 하나(1.32초)와 겨루게 해서 **성공률이
+      // 구조적으로 정확히 0이었다.** CPU는 홈 스틸을 시도하지 않아 드러나지 않았지만,
+      // 사람이 홈 스틸을 명령하면 주자가 누구든 무조건 아웃이었다.
+      const runTime = stealTime(p, 2) * HOME_STEAL_LEAD + rng.normal(0, 0.08);
+      const defTime = def.delivery + def.flight + HOME_TAG_TIME;
+      // 순수 경주로만 보면 발 빠른 주자는 늘 성공하는데, 실제 홈 스틸의 성패는 기습이
+      // 통했는지(투수가 와인드업에 들어갔는지, 주자를 봤는지)에 달려 있다.
       const safe = runTime < defTime && rng.chance(0.35 + norm(effSpeed(p)) * 0.25);
       results.push({ fromBase: from, playerId: runner.playerId, safe });
       continue;
     }
 
-    const runTime = stealTime(p, from) + rng.normal(0, 0.08);
-    // 3루 도루는 거리가 같지만 포수 송구가 짧아 유리 -> popTime 보정
-    const throwAdj = from === 1 ? -0.12 : 0;
-    const defTime = delivery + flight + popTime + throwAdj;
+    const runTime = stealTime(p, from) + rng.normal(0, STEAL_JUMP_SIGMA);
+    // 2루->3루는 포수 송구가 짧아 수비가 유리하다 -> 팝타임에서 깎는다
+    const throwAdj = from === 1 ? -STEAL3_THROW_GAIN : 0;
+    const defTime = def.total + throwAdj;
     const safe = runTime < defTime;
     results.push({ fromBase: from, playerId: runner.playerId, safe });
   }

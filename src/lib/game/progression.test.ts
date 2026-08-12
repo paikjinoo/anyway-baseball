@@ -20,8 +20,12 @@ import {
   learnPitch,
   learnPitchGold,
   learnablePitchesFor,
+  pitchTrainingRefund,
+  replaceablePitchesOf,
+  replacePitch,
   statUpgradeCost,
   trainBatting,
+  trainPitch,
 } from './training';
 import { useItem } from './items';
 import type { Player, Team, Tier } from './types';
@@ -299,6 +303,190 @@ describe('구종 습득 (골드)', () => {
     };
     const r = useItem(t, t.players[0].id, 'RESET_STATS');
     expect(r.ok).toBe(false);
+  });
+});
+
+describe('구종 교체 (골드)', () => {
+  /** 슬롯을 끝까지 채운 C등급 투수와 그 팀 */
+  function fullSlots(): Team {
+    let t = teamWith(pitcher({ tier: 'C' }), 1_000_000);
+    const id = t.players[0].id;
+    let guard = 0;
+    while (pitchSlotsUsed(t.players[0]) < TIER_PITCH_SLOTS.C && guard++ < 10) {
+      const next = learnablePitchesFor(t.players[0])[0];
+      if (!next) break;
+      t = learnPitch(t, id, next, guard).team;
+    }
+    return t;
+  }
+
+  it('슬롯이 가득 차도 보유 구종을 다른 구종으로 바꿀 수 있다', () => {
+    const t = fullSlots();
+    const p = t.players[0];
+    expect(learnPitch(t, p.id, learnablePitchesFor(p)[0], 1).ok).toBe(false);
+
+    const from = replaceablePitchesOf(p)[0];
+    const to = learnablePitchesFor(p)[0];
+    const cost = learnPitchGold(to, p);
+
+    const r = replacePitch(t, p.id, from, to, 5);
+    expect(r.ok).toBe(true);
+    expect(r.team.gold).toBe(t.gold - cost);
+    // 슬롯 수는 그대로 — 그래서 가득 찬 투수도 쓸 수 있다
+    expect(pitchSlotsUsed(r.team.players[0])).toBe(pitchSlotsUsed(p));
+    expect(r.team.players[0].pitching?.arsenal[from]).toBeUndefined();
+    expect(r.team.players[0].pitching?.arsenal[to]).toBeDefined();
+  });
+
+  it('직구는 바꿀 수 없다', () => {
+    const t = fullSlots();
+    const p = t.players[0];
+    const r = replacePitch(t, p.id, 'FOURSEAM', learnablePitchesFor(p)[0], 2);
+    expect(r.ok).toBe(false);
+    expect(r.team).toBe(t);
+    expect(replaceablePitchesOf(p)).not.toContain('FOURSEAM');
+  });
+
+  it('보유하지 않은 구종에서, 또는 이미 보유한 구종으로는 바꿀 수 없다', () => {
+    const t = fullSlots();
+    const p = t.players[0];
+    const owned = replaceablePitchesOf(p);
+    const missing = learnablePitchesFor(p)[0];
+
+    expect(replacePitch(t, p.id, missing, owned[0], 3).ok).toBe(false);
+    expect(replacePitch(t, p.id, owned[0], owned[1], 3).ok).toBe(false);
+    expect(replacePitch(t, p.id, owned[0], owned[0], 3).ok).toBe(false);
+  });
+
+  it('타자에게는 쓸 수 없고 골드도 빠지지 않는다', () => {
+    const t = teamWith(batter(), 1_000_000);
+    const r = replacePitch(t, t.players[0].id, 'SLIDER', 'CURVE', 4);
+    expect(r.ok).toBe(false);
+    expect(r.team.gold).toBe(1_000_000);
+  });
+
+  it('골드가 부족하면 구종이 그대로 남는다', () => {
+    const t = { ...fullSlots(), gold: 0 };
+    const p = t.players[0];
+    const from = replaceablePitchesOf(p)[0];
+    const r = replacePitch(t, p.id, from, learnablePitchesFor(p)[0], 6);
+    expect(r.ok).toBe(false);
+    expect(r.message).toContain('골드');
+    expect(r.team.players[0].pitching?.arsenal[from]).toBeDefined();
+  });
+
+  it('버린 구종에 부은 훈련 포인트를 전액 돌려준다', () => {
+    // 훈련으로 올린 만큼만 돌아와야 하므로, 창단 구종을 실제로 훈련시켜 놓고 잰다
+    const raw = pitcher({ tier: 'S', potential: 99, trainingPoints: 3000 });
+    const from = replaceablePitchesOf(raw)[0];
+    let trained = raw;
+    for (const key of ['velocity', 'control', 'movement'] as const) {
+      trained = trainPitch(trained, from, key, 5).player;
+    }
+    const paid = raw.trainingPoints - trained.trainingPoints;
+    expect(paid).toBeGreaterThan(0);
+    expect(pitchTrainingRefund(trained, from)).toBe(paid);
+
+    const t = teamWith(trained, 1_000_000);
+    const r = replacePitch(t, trained.id, from, learnablePitchesFor(trained)[0], 21);
+    expect(r.ok).toBe(true);
+    expect(r.team.players[0].trainingPoints).toBe(raw.trainingPoints);
+    expect(r.message).toContain('환급');
+  });
+
+  it('훈련한 적 없는 구종을 버려도 포인트가 생기지 않는다', () => {
+    const p = pitcher({ tier: 'C' });
+    const from = replaceablePitchesOf(p)[0];
+    expect(pitchTrainingRefund(p, from)).toBe(0);
+
+    const t = teamWith(p, 1_000_000);
+    const r = replacePitch(t, p.id, from, learnablePitchesFor(p)[0], 22);
+    expect(r.ok).toBe(true);
+    expect(r.team.players[0].trainingPoints).toBe(p.trainingPoints);
+    expect(r.message).not.toContain('환급');
+  });
+
+  it('골드로 익힌 구종은 습득 시점부터의 훈련만 돌려준다', () => {
+    const t0 = teamWith(pitcher({ tier: 'S', potential: 99, trainingPoints: 3000 }), 1_000_000);
+    const id = t0.players[0].id;
+    const bought = learnablePitchesFor(t0.players[0])[0];
+    const t1 = learnPitch(t0, id, bought, 23).team;
+    // 습득 직후에는 돌려받을 것이 없다
+    expect(pitchTrainingRefund(t1.players[0], bought)).toBe(0);
+
+    const before = t1.players[0].trainingPoints;
+    const trained = trainPitch(t1.players[0], bought, 'movement', 6).player;
+    const paid = before - trained.trainingPoints;
+    expect(paid).toBeGreaterThan(0);
+
+    const t2: Team = { ...t1, players: [trained] };
+    const r = replacePitch(t2, id, bought, learnablePitchesFor(trained)[0], 24);
+    expect(r.ok).toBe(true);
+    expect(r.team.players[0].trainingPoints).toBe(before);
+  });
+
+  it('환급받은 포인트를 초기화권이 다시 주지 않는다', () => {
+    const raw = pitcher({ tier: 'S', potential: 99, trainingPoints: 3000 });
+    const from = replaceablePitchesOf(raw)[0];
+    const trained = trainPitch(raw, from, 'control', 4).player;
+    const t = { ...teamWith(trained, 1_000_000), inventory: { RESET_STATS: 1 } };
+
+    const swapped = replacePitch(t, raw.id, from, learnablePitchesFor(trained)[0], 25).team;
+    expect(swapped.players[0].trainingPoints).toBe(raw.trainingPoints);
+
+    const r = useItem(swapped, raw.id, 'RESET_STATS');
+    expect(r.ok).toBe(true);
+    // 이미 돌려받았으므로 초기화권은 그 위에 더 얹지 않는다
+    expect(r.team.players[0].trainingPoints).toBe(raw.trainingPoints);
+    expect(r.team.players[0].base.learned).toBeUndefined();
+  });
+
+  it('버린 구종의 훈련치를 물려받지 않는다', () => {
+    const base = pitcher({ tier: 'S' });
+    const from = replaceablePitchesOf(base)[0];
+    const boosted = structuredClone(base);
+    boosted.pitching!.arsenal[from] = { velocity: 88, control: 88, movement: 88 };
+
+    const t = teamWith(boosted, 1_000_000);
+    const to = learnablePitchesFor(boosted)[0];
+    const r = replacePitch(t, boosted.id, from, to, 11);
+    expect(r.ok).toBe(true);
+
+    // 습득과 같은 규칙으로 낮게 시작한다 (learnPitch의 상한: 60 / 55 / 62)
+    const fresh = r.team.players[0].pitching!.arsenal[to]!;
+    expect(fresh.velocity).toBeLessThanOrEqual(60);
+    expect(fresh.control).toBeLessThanOrEqual(55);
+    expect(fresh.movement).toBeLessThanOrEqual(62);
+  });
+
+  it('새 구종이 버린 구종의 자리를 그대로 물려받는다', () => {
+    const t = fullSlots();
+    const p = t.players[0];
+    const before = Object.keys(p.pitching!.arsenal);
+    const from = replaceablePitchesOf(p)[0];
+    const to = learnablePitchesFor(p)[0];
+
+    const r = replacePitch(t, p.id, from, to, 12);
+    const after = Object.keys(r.team.players[0].pitching!.arsenal);
+    expect(after).toEqual(before.map((k) => (k === from ? to : k)));
+  });
+
+  it('교체 비용도 spentGold에 쌓여 초기화권으로 돌아온다', () => {
+    const t = { ...fullSlots(), inventory: { RESET_STATS: 1 } };
+    const p = t.players[0];
+    const spentBefore = p.spentGold ?? 0;
+    const goldBefore = t.gold;
+    const from = replaceablePitchesOf(p)[0];
+    const to = learnablePitchesFor(p)[0];
+    const cost = learnPitchGold(to, p);
+
+    const swapped = replacePitch(t, p.id, from, to, 13).team;
+    expect(swapped.players[0].spentGold).toBe(spentBefore + cost);
+
+    const r = useItem(swapped, p.id, 'RESET_STATS');
+    expect(r.ok).toBe(true);
+    expect(r.team.gold).toBe(goldBefore + spentBefore);
+    expect(r.team.players[0].pitching!.arsenal).toEqual(p.base.arsenal);
   });
 });
 

@@ -24,6 +24,14 @@ import type { MatchRewardContext } from '../game/matchReward';
 import { PITCH_CLOCK_MS, PITCH_CLOCK_NET_GRACE_MS } from '../game/constants';
 import { arsenalOf } from '../game/pitching';
 import { buildTimeline, type PlayTimeline } from '../game/playback';
+import type { PlayClip } from '../game/record';
+import {
+  buildSuspendedMatch,
+  isSuspendable,
+  type ResumeContext,
+  type SuspendedMatch,
+} from '../game/resume';
+import { clearSuspendedMatch, saveSuspendedMatch } from '../firebase/store';
 import {
   advanceRelayState,
   applyRelayPitchResult,
@@ -37,6 +45,7 @@ import {
 import type {
   GameSettings,
   GameState,
+  OffenseCommand,
   PitchClockViolation,
   PitchCommand,
   PitchResult,
@@ -120,6 +129,18 @@ interface MatchStore {
   difficulty: Difficulty;
   /** 보상 산정 구분. CPU와 리그는 같은 엔진 모드를 쓰지만 보상 근거가 다르다. */
   rewardKind: MatchRewardKind;
+  /**
+   * 리그 일정의 어느 경기인가. 리그 경기가 아니면 null이다.
+   * 경기 기록(박스스코어)을 일정에 붙이려면 이 참조가 필요하다.
+   */
+  leagueRef: { leagueId: string; gameId: string } | null;
+  /**
+   * 이어서 하기 슬롯. null이면 이 경기는 저장되지 않는다.
+   *
+   * 혼자 치르는 경기(CPU·리그)에만 붙는다 — 온라인은 상대가 있어 나 혼자 되살릴 수
+   * 없고, 연습 타석과 다시 보기는 이어서 할 상태 자체가 없다.
+   */
+  resume: ResumeContext | null;
   state: GameState | null;
   /** 릴레이 모드의 순환표·점수 원장. 일반 경기에서는 null이다. */
   relayState: RelayState | null;
@@ -179,6 +200,15 @@ interface MatchStore {
   lastResult: PitchResult | null;
   /** 투구가 해석되기 직전의 상태. 결과 연출은 이 상태를 기준으로 그린다. */
   prePitchState: GameState | null;
+  /** 이 경기에서 모은 다시 보기 클립. 경기가 끝나면 박스스코어에 함께 저장된다. */
+  clips: PlayClip[];
+  /**
+   * 재생 중인 다시 보기 클립. null이면 실제 경기다.
+   *
+   * 이 값이 있는 동안은 보상도 리그 기록도 건드리지 않는다 — 다시 보기는 이미 끝난
+   * 경기를 다시 그리는 것뿐이라, 한 번 더 정산되면 그게 곧 무한 골드다.
+   */
+  replayClip: PlayClip | null;
   /** 이번 플레이의 주루 타임라인 */
   timeline: PlayTimeline | null;
   /** 결과 연출 기준 시각 (performance.now()) */
@@ -217,7 +247,15 @@ interface MatchStore {
     seed?: string;
     /** 기본값 'CPU'. 리그 일정 경기는 'LEAGUE'를 넘긴다. */
     rewardKind?: MatchRewardKind;
+    /** 리그 일정 경기일 때만. 박스스코어를 그 일정에 붙인다. */
+    leagueRef?: { leagueId: string; gameId: string };
+    /** 주면 중간에 나가도 이어서 할 수 있게 저장한다. 연습 타석은 주지 않는다. */
+    resume?: ResumeContext | null;
   }) => void;
+  /** 저장해 둔 경기를 그 자리에서 되살린다. */
+  resumeCpuGame: (saved: SuspendedMatch) => void;
+  /** 이어서 하기를 포기한다. 저장된 경기는 지워지고 되살릴 수 없다. */
+  discardResume: () => void;
   initOnlineGame: (opts: {
     state: GameState;
     mode: 'ONLINE_HOST' | 'ONLINE_GUEST';
@@ -240,6 +278,18 @@ interface MatchStore {
     settings: GameSettings;
     sendFn: (m: unknown) => void;
   }) => void;
+  /**
+   * 다시 보기 시작. 투구 직전 상태를 세우고 공이 날아가는 중(FLIGHT)으로 둔다.
+   * 공이 홈플레이트에 닿을 때쯤 화면이 resolveClip()을 부른다.
+   */
+  startClip: (clip: PlayClip) => void;
+  /** 다시 보기의 그 한 투구를 판정한다. 연출은 실제 경기와 같은 경로를 탄다. */
+  resolveClip: () => void;
+  /**
+   * 연습 타석: 카운트·아웃·주자를 지우고 다음 공을 받을 준비를 한다.
+   * 상황이 앞으로 가지 않으므로 타석이 끝나지 않고 무한히 칠 수 있다.
+   */
+  practiceReset: () => void;
   applyRelayState: (state: RelayState, notice?: string) => void;
   applyRelayResult: (result: PitchResult, state: RelayState) => void;
   setOwners: (owners: OwnerMap) => void;
@@ -401,6 +451,8 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
   mode: 'CPU',
   difficulty: 'NORMAL',
   rewardKind: 'CPU',
+  leagueRef: null,
+  resume: null,
   state: null,
   relayState: null,
   playerSide: 'away',
@@ -421,6 +473,8 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
   swungType: 'NORMAL',
   lastResult: null,
   prePitchState: null,
+  clips: [],
+  replayClip: null,
   timeline: null,
   resultStartAt: 0,
   playRate: 1,
@@ -437,7 +491,17 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
 
   // -------------------------------------------------------------------------
 
-  initCpuGame: ({ playerTeam, cpuTeam, playerSide, settings, difficulty, seed, rewardKind }) => {
+  initCpuGame: ({
+    playerTeam,
+    cpuTeam,
+    playerSide,
+    settings,
+    difficulty,
+    seed,
+    rewardKind,
+    leagueRef,
+    resume,
+  }) => {
     const away = playerSide === 'away' ? playerTeam : cpuTeam;
     const home = playerSide === 'home' ? playerTeam : cpuTeam;
     const seedSource = seed ?? `cpu-${Date.now()}-${playerTeam.id}`;
@@ -450,6 +514,8 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       mode: 'CPU',
       difficulty,
       rewardKind: rewardKind ?? 'CPU',
+      leagueRef: leagueRef ?? null,
+      resume: resume ?? null,
       state,
       relayState: null,
       playerSide,
@@ -464,6 +530,8 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       pitchPreview: null,
       lastResult: null,
       prePitchState: null,
+      clips: [],
+      replayClip: null,
       timeline: null,
       revealed: true,
       revealAt: 0,
@@ -479,6 +547,79 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
         { id: logId++, text: '1회 초 시작', kind: 'inning' },
       ],
     });
+    // 여기서는 저장하지 않는다. 한 공도 던지지 않은 경기를 저장해 두면 화면을 열자마자
+    // "이어서 할까요?"를 묻게 되는데, 그건 새로 시작하는 것과 아무 차이가 없다.
+    // 첫 저장은 첫 투구 결과(또는 첫 교체) 때 생긴다.
+  },
+
+  /**
+   * 저장해 둔 경기를 되살린다.
+   *
+   * initCpuGame과 달리 상태를 새로 만들지 않고 그대로 얹는다. 로그·AI 난수까지 같이
+   * 되살려야 "나갔다 온 티가 안 나는" 이어서 하기가 된다.
+   */
+  resumeCpuGame: (saved) => {
+    // 저장본을 그대로 얹으면 이후 structuredClone 없는 경로에서 원본이 흔들린다
+    const state = structuredClone(saved.state);
+    aiRng = new Rng(saved.aiRngState);
+    // 로그 id는 이어 붙인다. 0부터 다시 매기면 React 목록의 key가 겹친다.
+    logId = saved.log.reduce((max, l) => Math.max(max, l.id), -1) + 1;
+    cancelReveal();
+    startCrowd();
+    // 공수 교대 도중에 나갔다면 그 안내부터 다시 보여 준다 (엔진은 이미 이닝을 넘긴 상태다)
+    const inningBreak = state.phase === 'INNING_BREAK';
+    const now = performance.now();
+    set({
+      mode: 'CPU',
+      difficulty: saved.difficulty,
+      rewardKind: saved.rewardKind,
+      leagueRef: saved.leagueRef,
+      resume: { key: saved.key, uid: saved.uid, teamId: saved.teamId },
+      state,
+      relayState: null,
+      playerSide: saved.playerSide,
+      myUid: '',
+      owners: {},
+      seatNames: {},
+      phase: inningBreak ? 'INNING_BREAK' : 'SETUP',
+      pitchClockEndsAt: inningBreak ? 0 : now + PITCH_CLOCK_MS,
+      inningBreakEndsAt: inningBreak ? now + INNING_BREAK_MS : 0,
+      trajectory: null,
+      pitchCmd: null,
+      pitchPreview: null,
+      lastResult: null,
+      prePitchState: null,
+      // 클립은 저장하지 않는다 (@see game/resume.buildSuspendedMatch).
+      // 이어서 한 뒤의 장면만 다시 보기에 남는다.
+      clips: [],
+      replayClip: null,
+      timeline: null,
+      revealed: true,
+      revealAt: 0,
+      swung: false,
+      swungAt: 0,
+      stealOrders: [],
+      aim: { x: 0, y: 0 },
+      swingType: 'NORMAL',
+      waitingRemote: false,
+      message: null,
+      sendFn: null,
+      log: [
+        ...saved.log,
+        {
+          id: logId++,
+          text: `중단된 경기를 이어서 합니다 — ${state.inning}회 ${state.half === 'TOP' ? '초' : '말'}`,
+          kind: 'info',
+        },
+      ],
+    });
+  },
+
+  discardResume: () => {
+    const { resume } = get();
+    if (!resume) return;
+    clearSuspendedMatch(resume.uid, resume.key);
+    set({ resume: null });
   },
 
   initOnlineGame: ({ state, mode, playerSide, sendFn }) => {
@@ -489,6 +630,8 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     set({
       mode,
       rewardKind: 'ONLINE',
+      leagueRef: null,
+      resume: null,
       state,
       relayState: null,
       playerSide,
@@ -504,6 +647,8 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       pitchPreview: null,
       lastResult: null,
       prePitchState: null,
+      clips: [],
+      replayClip: null,
       timeline: null,
       revealed: true,
       revealAt: 0,
@@ -529,6 +674,8 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     set({
       mode,
       rewardKind: 'ONLINE',
+      leagueRef: null,
+      resume: null,
       state,
       relayState: null,
       playerSide,
@@ -544,6 +691,8 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       pitchPreview: null,
       lastResult: null,
       prePitchState: null,
+      clips: [],
+      replayClip: null,
       timeline: null,
       revealed: true,
       revealAt: 0,
@@ -579,6 +728,8 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     set({
       mode,
       rewardKind: 'RELAY',
+      leagueRef: null,
+      resume: null,
       state,
       relayState,
       playerSide: control.playerSide,
@@ -595,6 +746,8 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       pitchPreview: null,
       lastResult: null,
       prePitchState: null,
+      clips: [],
+      replayClip: null,
       timeline: null,
       revealed: true,
       revealAt: 0,
@@ -613,6 +766,95 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
           kind: 'inning',
         },
       ],
+    });
+  },
+
+  startClip: (clip) => {
+    const state = structuredClone(clip.state);
+    const traj = preparePitch(state, clip.pitch);
+    cancelReveal();
+    logId = 0;
+    startCrowd();
+    set({
+      mode: 'CPU',
+      difficulty: 'NORMAL',
+      rewardKind: 'CPU',
+      leagueRef: null,
+      // 다시 보기는 이미 끝난 장면을 다시 그리는 것뿐이다. 저장할 경기가 아니다.
+      resume: null,
+      replayClip: clip,
+      state,
+      relayState: null,
+      // 관전이므로 어느 쪽이 "내 팀"인지는 의미가 없다. 조작 패널은 아예 그리지 않는다.
+      playerSide: 'away',
+      myUid: '',
+      owners: {},
+      seatNames: {},
+      phase: 'FLIGHT',
+      // 다시 보기에는 피치 클락이 없다. 0이면 시계가 멈춰 있다는 뜻이다.
+      pitchClockEndsAt: 0,
+      inningBreakEndsAt: 0,
+      trajectory: traj,
+      pitchCmd: clip.pitch,
+      pitchPreview: null,
+      lastResult: null,
+      prePitchState: null,
+      clips: [],
+      timeline: null,
+      revealed: true,
+      revealAt: 0,
+      swung: false,
+      swungAt: 0,
+      swungType: clip.offense.swing.type,
+      log: [],
+      stealOrders: clip.offense.steal,
+      aim: { x: clip.offense.swing.aimX, y: clip.offense.swing.aimY },
+      swingType: clip.offense.swing.type,
+      waitingRemote: false,
+      message: null,
+      sendFn: null,
+      ...pitchTiming(traj, state.settings),
+    });
+    playPitchRelease(Math.max(0, (get().pitchStartAt - performance.now()) / 1000));
+  },
+
+  resolveClip: () => {
+    const st = get();
+    const clip = st.replayClip;
+    if (!clip || !st.state || st.phase !== 'FLIGHT') return;
+    const result = resolvePitch(st.state, clip.pitch, clip.offense);
+    applyResult(set, get, result);
+  },
+
+  practiceReset: () => {
+    const st = get();
+    if (!st.state) return;
+    const next = structuredClone(st.state);
+    // 매 공을 0-0 무사 주자 없음에서 시작한다. 연습에서 중요한 건 반복이지 상황이 아니다.
+    next.balls = 0;
+    next.strikes = 0;
+    next.outs = 0;
+    next.bases = [null, null, null];
+    next.phase = 'SETUP';
+    delete next.winner;
+    delete next.endedByMercy;
+    cancelReveal();
+    set({
+      state: next,
+      phase: 'SETUP',
+      // 연습에는 피치 클락이 없다. 타이밍을 익히는 자리에서 시간에 쫓기면 의미가 없다.
+      pitchClockEndsAt: 0,
+      inningBreakEndsAt: 0,
+      trajectory: null,
+      pitchCmd: null,
+      pitchPreview: null,
+      timeline: null,
+      revealed: true,
+      revealAt: 0,
+      swung: false,
+      swungAt: 0,
+      stealOrders: [],
+      waitingRemote: false,
     });
   },
 
@@ -889,6 +1131,8 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     const p = next[playerSide].roster[pitcherId];
     if (p) get().pushLog(`투수 교체: ${p.name}`, 'info');
     if (mode !== 'CPU') sendFn?.({ t: 'SUB_PITCHER', side: playerSide, pitcherId });
+    // 교체하고 바로 나가도 그 교체가 남아야 한다
+    persistResume(get);
   },
 
   /**
@@ -920,6 +1164,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     // 교체하는 동안 피치 클락에 볼을 먹지 않도록 새로 감는다.
     set({ state: res.state, pitchClockEndsAt: performance.now() + PITCH_CLOCK_MS });
     get().pushLog(res.message, 'info');
+    persistResume(get);
   },
 
   reset: () => {
@@ -931,6 +1176,9 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       phase: 'IDLE',
       // CPU 경기에서만 세팅되는 값이라 지우지 않으면 다음 경기까지 따라간다.
       difficulty: 'NORMAL',
+      leagueRef: null,
+      // 슬롯 자체는 지우지 않는다 — 나가기가 곧 이어서 하기다.
+      resume: null,
       pitchClockEndsAt: 0,
       inningBreakEndsAt: 0,
       trajectory: null,
@@ -938,6 +1186,8 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
       pitchPreview: null,
       lastResult: null,
       prePitchState: null,
+      clips: [],
+      replayClip: null,
       timeline: null,
       revealed: true,
       revealAt: 0,
@@ -963,6 +1213,42 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
 
 type SetFn = (partial: Partial<MatchStore> | ((s: MatchStore) => Partial<MatchStore>)) => void;
 type GetFn = () => MatchStore;
+
+/**
+ * 진행 중인 경기를 저장한다 (이어서 하기).
+ *
+ * **투구 결과가 확정된 직후에 부른다.** 투구 전 상태로 저장하면 결과가 마음에 들지
+ * 않을 때 나갔다 들어오는 것만으로 그 타석을 무를 수 있게 된다 — 리그 성적이 걸린
+ * 경기에서 그건 기능이 아니라 구멍이다.
+ *
+ * 45~90KB짜리 문서를 매 투구마다 다시 쓰지만 전부 로컬이고(@see firebase/store),
+ * 직렬화가 0.2ms 남짓이라 연출 프레임에 얹어도 티가 나지 않는다.
+ */
+function persistResume(get: GetFn) {
+  const st = get();
+  const ctx = st.resume;
+  if (!ctx || !st.state || st.replayClip) return;
+  if (!isSuspendable(st.state)) {
+    // 끝난 경기는 이어서 할 것이 없다. 슬롯을 비워 목록에서 사라지게 한다.
+    clearSuspendedMatch(ctx.uid, ctx.key);
+    return;
+  }
+  saveSuspendedMatch(
+    buildSuspendedMatch({
+      key: ctx.key,
+      uid: ctx.uid,
+      teamId: ctx.teamId,
+      savedAt: Date.now(),
+      rewardKind: st.rewardKind,
+      difficulty: st.difficulty,
+      playerSide: st.playerSide,
+      leagueRef: st.leagueRef,
+      aiRngState: aiRng.state,
+      state: st.state,
+      log: st.log,
+    }),
+  );
+}
 
 function relayControlState(relay: RelayState, state: GameState, myUid: string) {
   const batter = currentRelayBatter(relay);
@@ -1185,6 +1471,71 @@ function cpuSwingFor(state: GameState, traj: PitchTrajectory, difficulty: Diffic
   return decideSwing(state, traj, aiRng, difficulty);
 }
 
+// ---------------------------------------------------------------------------
+// 다시 보기 클립 수집
+// ---------------------------------------------------------------------------
+
+/** 한 경기에서 남길 클립 수. GameState를 통째로 품고 있어 무한정 쌓을 수 없다. */
+const MAX_CLIPS_PER_GAME = 5;
+
+/** 이 플레이로 앞서던 팀이 바뀌었는가. 역전은 점수 크기와 무관하게 남길 값어치가 있다. */
+function leadFlipped(prev: GameState, next: GameState): boolean {
+  const before = Math.sign(prev.home.runs - prev.away.runs);
+  const after = Math.sign(next.home.runs - next.away.runs);
+  return before !== after && after !== 0;
+}
+
+function clipLabel(prev: GameState, result: PitchResult): string {
+  const half = prev.half === 'TOP' ? '초' : '말';
+  return `${prev.inning}회${half} ${prev.outs}사 · ${result.description}`;
+}
+
+/**
+ * 다시 볼 만한 플레이를 골라 담는다.
+ *
+ * **저장하기 전에 실제로 한 번 재생해 보고, 원래 결과와 같을 때만 남긴다.**
+ * 클립은 "투구 직전 상태 + 커맨드"만 들고 있고 재생은 resolvePitch를 다시 부르는 것이라,
+ * 커맨드 복원이 조금이라도 어긋나면 다시 보기가 실제 경기와 다른 장면을 보여 준다.
+ * 그건 기능이 없는 것보다 나쁘다 — 그래서 여기서 걸러 낸다.
+ *
+ * steal 명령은 result.stealResults에서 되살린다. 도루를 지시했지만 주자가 없던 베이스는
+ * 결과에 남지 않는데, 그 차이가 판정을 바꿨다면 아래 대조에서 걸린다.
+ */
+function collectClip(set: SetFn, get: GetFn, prev: GameState, result: PitchResult) {
+  const st = get();
+  // 다시 보기는 이미 저장된 장면을 다시 그리는 것뿐이다. 여기서 또 모으면 클립이 자란다.
+  if (st.replayClip) return;
+  if (st.clips.length >= MAX_CLIPS_PER_GAME) return;
+
+  const worthKeeping = result.kind === 'HOME_RUN' || leadFlipped(prev, result.state);
+  if (!worthKeeping) return;
+
+  const pitch = st.pitchCmd;
+  // 피치 클락 위반처럼 공을 던지지 않은 플레이는 재현할 커맨드가 없다.
+  if (!pitch || !result.trajectory) return;
+
+  const offense: OffenseCommand = {
+    steal: result.stealResults.map((s) => s.fromBase),
+    swing: result.swing,
+  };
+
+  const check = resolvePitch(structuredClone(prev), pitch, offense);
+  if (check.kind !== result.kind || check.runsScored !== result.runsScored) return;
+
+  set({
+    clips: [
+      ...st.clips,
+      {
+        id: `${prev.id}-${prev.pitchCount}`,
+        label: clipLabel(prev, result),
+        state: structuredClone(prev),
+        pitch,
+        offense,
+      },
+    ],
+  });
+}
+
 function applyResult(set: SetFn, get: GetFn, result: PitchResult) {
   const st = get();
   const prev = st.state;
@@ -1250,6 +1601,8 @@ function applyResult(set: SetFn, get: GetFn, result: PitchResult) {
     playCheer(0.78, 2, revealDelay + 0.08);
   }
 
+  if (prev) collectClip(set, get, prev, result);
+
   set({
     state: next,
     prePitchState: prev,
@@ -1268,10 +1621,16 @@ function applyResult(set: SetFn, get: GetFn, result: PitchResult) {
     waitingRemote: false,
   });
 
+  // 판정이 끝난 상태를 곧바로 저장한다. 연출이 끝나기를 기다리면 그 사이에 나가는 것으로
+  // 방금 그 투구를 무를 수 있다.
+  persistResume(get);
+
   // 실황 로그도 결과의 일부다. 미리 찍히면 배너를 감춘 의미가 없다.
   scheduleReveal(() => {
     set({ revealed: true });
     pushResultLog(get, result, prev, next);
+    // 로그까지 담아 한 번 더 남긴다 (같은 슬롯을 덮어쓴다)
+    persistResume(get);
   }, revealAt - performance.now());
 }
 

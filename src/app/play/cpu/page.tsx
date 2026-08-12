@@ -9,6 +9,15 @@ import { DIFFICULTY_LABELS, type Difficulty } from '@/lib/game/ai';
 import { Rng, seedFromString } from '@/lib/game/rng';
 import { generateTeam, teamRating } from '@/lib/game/generator';
 import { rosterIssues } from '@/lib/game/roster';
+import { clearSuspendedMatch, loadSuspendedMatch } from '@/lib/firebase/store';
+import {
+  CPU_RESUME_KEY,
+  describeSuspended,
+  resumeIssue,
+  RESUME_ISSUE_KO,
+  savedAgoText,
+  type SuspendedMatch,
+} from '@/lib/game/resume';
 import { TeamLogo } from '@/components/ui/TeamLogo';
 import type { Side, Team } from '@/lib/game/types';
 
@@ -19,13 +28,17 @@ export default function CpuGamePage() {
   const router = useRouter();
   const team = useActiveTeam();
   const settings = useAppStore((s) => s.settings);
+  const user = useAppStore((s) => s.user);
 
   const initCpuGame = useMatchStore((s) => s.initCpuGame);
+  const resumeCpuGame = useMatchStore((s) => s.resumeCpuGame);
   const reset = useMatchStore((s) => s.reset);
 
   const [difficulty, setDifficulty] = useState<Difficulty>('NORMAL');
   const [side, setSide] = useState<Side>('home');
   const [started, setStarted] = useState(false);
+  /** 중단해 둔 CPU 경기. 화면을 열 때 한 번 읽는다. */
+  const [saved, setSaved] = useState<SuspendedMatch | null>(null);
 
   const cpuTeam: Team | null = useMemo(() => {
     if (!team) return null;
@@ -39,10 +52,29 @@ export default function CpuGamePage() {
 
   useEffect(() => () => reset(), [reset]);
 
+  useEffect(() => {
+    if (!user) return;
+    setSaved(loadSuspendedMatch(user.uid, CPU_RESUME_KEY));
+  }, [user]);
+
   const issues = useMemo(
     () => (team ? rosterIssues(team, settings.useDH) : []),
     [team, settings.useDH],
   );
+
+  /** 저장된 경기를 이어서 할 수 없는 이유. null이면 이어서 할 수 있다. */
+  const savedIssue = useMemo(
+    () =>
+      saved && user && team
+        ? resumeIssue(saved, { uid: user.uid, teamId: team.id }, Date.now())
+        : null,
+    [saved, user, team],
+  );
+
+  function dropSaved() {
+    if (user) clearSuspendedMatch(user.uid, CPU_RESUME_KEY);
+    setSaved(null);
+  }
 
   if (!team || !cpuTeam) {
     return <div className="py-20 text-center text-slate-500">팀이 필요합니다.</div>;
@@ -58,6 +90,18 @@ export default function CpuGamePage() {
             경기 선택으로 돌아가기
           </button>
         </div>
+
+        {saved && (
+          <ResumeCard
+            saved={saved}
+            issue={savedIssue}
+            onResume={() => {
+              resumeCpuGame(saved);
+              setStarted(true);
+            }}
+            onDrop={dropSaved}
+          />
+        )}
 
         <section className="panel p-5">
           <h2 className="mb-3 font-bold">난이도</h2>
@@ -143,12 +187,20 @@ export default function CpuGamePage() {
               playerSide: side,
               settings,
               difficulty,
+              // 중간에 나가도 이어서 할 수 있게 저장한다. CPU 경기 슬롯은 하나뿐이라
+              // 새 경기를 시작하는 순간 이전에 중단해 둔 경기는 덮어써진다.
+              resume: user ? { key: CPU_RESUME_KEY, uid: user.uid, teamId: team.id } : null,
             });
             setStarted(true);
           }}
         >
           플레이 볼!
         </button>
+        {saved && !savedIssue && (
+          <p className="-mt-3 text-center text-xs text-amber-300/90">
+            새 경기를 시작하면 위에 저장된 경기는 사라집니다.
+          </p>
+        )}
       </div>
     );
   }
@@ -160,6 +212,68 @@ export default function CpuGamePage() {
         router.push('/play');
       }}
     />
+  );
+}
+
+/**
+ * 중단해 둔 경기 카드.
+ *
+ * 이어서 할 수 없는 저장(다른 팀·오래된 것)도 지우기 버튼과 함께 보여 준다.
+ * 아무 말 없이 감추면 "분명 나갔다 왔는데 없어졌다"가 되기 때문이다.
+ */
+function ResumeCard({
+  saved,
+  issue,
+  onResume,
+  onDrop,
+}: {
+  saved: SuspendedMatch;
+  issue: ReturnType<typeof resumeIssue>;
+  onResume: () => void;
+  onDrop: () => void;
+}) {
+  const info = describeSuspended(saved);
+  return (
+    <section
+      className={`panel p-5 ${issue ? 'border-white/10' : 'border-lime-400/40 bg-lime-500/[0.07]'}`}
+    >
+      <div className="mb-3 flex items-center gap-2">
+        <h2 className="font-bold">{issue ? '이어서 할 수 없는 경기' : '진행 중이던 경기'}</h2>
+        <span className="text-[11px] text-slate-500">
+          {savedAgoText(saved.savedAt, Date.now())} 저장
+        </span>
+      </div>
+
+      <div className="rounded-xl bg-black/25 px-4 py-3 text-center">
+        <div className="text-xs text-slate-500">
+          {info.inning} · {info.situation} · 내 팀 {info.sideLabel}
+        </div>
+        <div className="mt-0.5 text-xl font-black tabular">{info.score}</div>
+      </div>
+
+      {issue ? (
+        <>
+          <p className="mt-3 text-xs text-slate-400">{RESUME_ISSUE_KO[issue]}</p>
+          <button className="btn btn-danger mt-3 w-full !py-1.5 !text-xs" onClick={onDrop}>
+            저장 삭제
+          </button>
+        </>
+      ) : (
+        <div className="mt-3 flex gap-2">
+          <button className="btn btn-primary flex-1 !py-2" onClick={onResume}>
+            이어서 하기
+          </button>
+          <button
+            className="btn btn-danger !py-2 !text-xs"
+            onClick={() => {
+              if (confirm('저장된 경기를 지울까요? 되돌릴 수 없습니다.')) onDrop();
+            }}
+          >
+            삭제
+          </button>
+        </div>
+      )}
+    </section>
   );
 }
 

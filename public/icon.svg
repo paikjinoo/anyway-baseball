@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Anyway Baseball">
+  <!--
+    앱 아이콘 (여백 있는 'any' 용). TeamLogo의 기본 로고와 같은 모티프다 —
+    야구공 + 붉은 실밥. 패스는 viewBox 100 기준이라 여기서는 2.6배로 옮겨 그렸다.
+    색은 globals.css의 bg-deep / accent 토큰을 그대로 쓴다.
+  -->
+  <defs>
+    <radialGradient id="ball" cx="38%" cy="32%" r="72%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="62%" stop-color="#f2f6f0"/>
+      <stop offset="100%" stop-color="#cdd8cf"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#c8f55a"/>
+      <stop offset="100%" stop-color="#aee833"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="#030806"/>
+  <rect x="10" y="10" width="492" height="492" rx="104" fill="none" stroke="url(#rim)" stroke-opacity="0.5" stroke-width="8"/>
+
+  <g transform="translate(256 256)">
+    <circle r="150" fill="url(#ball)"/>
+    <!-- 실밥. TeamLogo의 M34 30c8 12 8 28 0 40 / M66 30c-8 12-8 28 0 40 을 옮긴 것 -->
+    <g fill="none" stroke="#b91c1c" stroke-width="15" stroke-linecap="round">
+      <path d="M-83 -104c26 39 26 91 0 130"/>
+      <path d="M83 -104c-26 39-26 91 0 130"/>
+    </g>
+  </g>
+</svg>

@@ -1,14 +1,39 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useActiveTeam, useAppStore } from '@/lib/store/appStore';
 import { firebaseConfigured } from '@/lib/firebase/client';
 import { teamRating } from '@/lib/game/generator';
+import { listSuspendedMatches } from '@/lib/firebase/store';
+import {
+  describeSuspended,
+  isSuspendable,
+  RESUME_MAX_AGE_MS,
+  savedAgoText,
+  type SuspendedMatch,
+} from '@/lib/game/resume';
 import { TeamLogo } from '@/components/ui/TeamLogo';
 
 export default function PlayIndexPage() {
   const team = useActiveTeam();
   const leagues = useAppStore((s) => s.leagues);
+  const user = useAppStore((s) => s.user);
+  /**
+   * 중단해 둔 경기들. 여기서는 안내만 한다 — 정말 이어서 할 수 있는지는
+   * 각 경기 화면이 팀·일정까지 보고 다시 판단한다.
+   */
+  const [suspended, setSuspended] = useState<SuspendedMatch[]>([]);
+
+  useEffect(() => {
+    if (!user) return;
+    const now = Date.now();
+    setSuspended(
+      listSuspendedMatches(user.uid).filter(
+        (m) => isSuspendable(m.state) && now - m.savedAt <= RESUME_MAX_AGE_MS,
+      ),
+    );
+  }, [user]);
 
   if (!team) {
     return (
@@ -31,7 +56,46 @@ export default function PlayIndexPage() {
         </div>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+      {suspended.length > 0 && (
+        <section className="panel border-lime-400/40 bg-lime-500/[0.07] p-5">
+          <h2 className="mb-1 font-bold">이어서 하기</h2>
+          <p className="mb-3 text-xs text-slate-400">
+            중간에 나온 경기입니다. 나갔던 자리에서 그대로 이어집니다.
+          </p>
+          <div className="space-y-2">
+            {suspended.map((m) => {
+              const info = describeSuspended(m);
+              const href = m.leagueRef
+                ? `/league/${m.leagueRef.leagueId}/${m.leagueRef.gameId}`
+                : '/play/cpu';
+              return (
+                <Link
+                  key={`${m.uid}:${m.key}`}
+                  href={href}
+                  className="flex items-center gap-3 rounded-xl bg-black/25 px-4 py-3 transition hover:bg-black/40"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[11px] text-slate-500">
+                      {m.leagueRef ? '리그 경기' : 'CPU 대전'} ·{' '}
+                      {savedAgoText(m.savedAt, Date.now())}
+                    </div>
+                    <div className="truncate text-sm font-bold">{info.headline}</div>
+                  </div>
+                  <span className="btn btn-primary !py-1 !text-[11px]">이어서 하기</span>
+                </Link>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <ModeCard
+          href="/practice"
+          title="연습 타석"
+          desc="카운트도 아웃도 없이 계속 칩니다. 스윙마다 얼마나 빨랐는지·늦었는지가 숫자로 나옵니다. 보상은 없습니다."
+          cta="타석에 들어서기"
+        />
         <ModeCard
           href="/play/cpu"
           title="CPU 대전"

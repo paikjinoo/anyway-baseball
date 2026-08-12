@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useAppStore } from '@/lib/store/appStore';
 import { RuleSettings } from '@/components/settings/RuleSettings';
+import { DataBackup } from '@/components/settings/DataBackup';
 import { NICKNAME_MAX, normalizeNickname } from '@/lib/firebase/store';
 import {
   playBatCrack,
@@ -89,6 +90,8 @@ export default function SettingsPage() {
           />
         </label>
       </section>
+
+      <DataBackup />
 
       <p className="text-center text-xs text-slate-600">
         설정은 이 브라우저에 저장되며 새 경기부터 적용됩니다.

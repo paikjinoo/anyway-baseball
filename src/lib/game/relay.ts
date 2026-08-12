@@ -1,4 +1,4 @@
-import { isFoul, judgeSwing, makeBattedBall } from './batting';
+import { effectiveBatSide, isFoul, judgeSwing, makeBattedBall } from './batting';
 import { PITCH_DEFS } from './constants';
 import { emptySeason, hitterScore, pitcherScore } from './generator';
 import { computePitch, describeLocation } from './pitching';
@@ -419,9 +419,11 @@ export function resolveRelayPitch(
   result.pitchNumber = state.pitchCount;
   result.trajectory = trajectory;
 
-  const insideEdge = batter.bats === 'L' ? 2.6 : -2.6;
+  // 몸쪽은 타자가 실제로 선 쪽으로 정해진다 (스위치히터는 투수에 따라 바뀐다)
+  const batSide = effectiveBatSide(batter, pitcher);
+  const insideEdge = batSide === 'L' ? 2.6 : -2.6;
   const hitByPitch =
-    (batter.bats === 'L' ? trajectory.zoneX > insideEdge : trajectory.zoneX < insideEdge) &&
+    (batSide === 'L' ? trajectory.zoneX > insideEdge : trajectory.zoneX < insideEdge) &&
     Math.abs(trajectory.zoneY) < 1.6 &&
     rng.chance(0.3);
   if (hitByPitch && !swing.swing) {
@@ -461,7 +463,15 @@ export function resolveRelayPitch(
   }
 
   result.contact = true;
-  const battedBall = makeBattedBall(rng, batter, swing, trajectory, judged.quality, judged.timingErr);
+  const battedBall = makeBattedBall(
+    rng,
+    batter,
+    pitcher,
+    swing,
+    trajectory,
+    judged.quality,
+    judged.timingErr,
+  );
   result.battedBall = battedBall;
   if (isFoul(battedBall.sprayAngle)) {
     if (state.strikes < 2) state.strikes += 1;

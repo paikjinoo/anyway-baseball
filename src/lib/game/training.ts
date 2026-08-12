@@ -219,6 +219,72 @@ export interface LearnPitchResult {
   message: string;
 }
 
+/** 습득 굴림의 중심값. 그 투수의 직구가 좋을수록 새 구종도 조금 높게 시작한다. */
+function newPitchBaseline(p: Player): number {
+  const fastball = p.pitching?.arsenal.FOURSEAM;
+  const avg = fastball ? (fastball.velocity + fastball.control + fastball.movement) / 3 : 40;
+  return clamp(avg * 0.45, 15, 45);
+}
+
+/**
+ * 막 익힌 구종의 시작 능력치. 그 투수의 직구를 기준으로 낮게 잡는다.
+ *
+ * 습득이든 교체든 같은 함수를 쓴다 — 교체가 조금이라도 후하면 "일단 싼 구종을 배운 뒤
+ * 비싼 구종으로 갈아탄다"가 최적해가 되어 습득 비용 곡선이 통째로 무의미해진다.
+ */
+function rollNewPitch(p: Player, rng: Rng): PitchAttr {
+  const start = newPitchBaseline(p);
+  return {
+    velocity: Math.round(clamp(start + rng.range(-5, 8), 12, 60)),
+    control: Math.round(clamp(start + rng.range(-8, 5), 10, 55)),
+    movement: Math.round(clamp(start + rng.range(-3, 12), 15, 62)),
+  };
+}
+
+/**
+ * 그 구종의 출발점 — 훈련으로 올린 분량만 환급하기 위한 기준선이다.
+ *
+ * 창단 때 받은 구종은 base.arsenal에, 골드로 익힌 구종은 base.learned에 출발점이 남는다.
+ * 둘 다 없는 구 데이터는 습득 굴림의 **최댓값**으로 잡는다 — 모르는 쪽으로 후하게 주면
+ * 훈련한 적 없는 구종을 버리는 것만으로 훈련 포인트가 생긴다.
+ */
+function pitchOrigin(p: Player, type: PitchType): PitchAttr {
+  const generated = p.base.arsenal[type];
+  if (generated) return generated;
+  const learned = p.base.learned?.[type];
+  if (learned) return learned;
+  const start = newPitchBaseline(p);
+  return {
+    velocity: Math.round(clamp(start + 8, 12, 60)),
+    control: Math.round(clamp(start + 5, 10, 55)),
+    movement: Math.round(clamp(start + 12, 15, 62)),
+  };
+}
+
+/**
+ * 그 구종에 부은 훈련 포인트. 구종을 교체할 때 이만큼을 돌려준다.
+ *
+ * 출발점부터 지금 값까지 훈련 비용 곡선을 그대로 되짚어 더한다 — 비용이 현재 값만의
+ * 함수라서(@see pitchUpgradeCost) 실제로 낸 값과 정확히 일치한다. **생성 시점에 이미
+ * 갖고 있던 만큼은 빼고 센다.** 안 그러면 손대지 않은 구종을 버리는 것만으로 포인트가 나온다.
+ */
+export function pitchTrainingRefund(player: Player, type: PitchType): number {
+  const attr = player.pitching?.arsenal[type];
+  if (!attr) return 0;
+  const origin = pitchOrigin(player, type);
+  const cap = statCap(player);
+  let sum = 0;
+  for (const key of ['velocity', 'control', 'movement'] as (keyof PitchAttr)[]) {
+    // 상한을 넘는 값은 훈련으로 만든 것이 아니다 (생성 시점에 이미 그랬다)
+    for (let v = origin[key]; v < attr[key]; v++) {
+      const cost = pitchUpgradeCost(v, cap, type);
+      if (!Number.isFinite(cost)) break;
+      sum += cost;
+    }
+  }
+  return sum;
+}
+
 /**
  * 새 구종 습득. 비용은 팀 골드에서 나간다.
  * 습득 직후 능력치는 낮게 시작하며, 이후 훈련 포인트로 끌어올린다.
@@ -256,19 +322,12 @@ export function learnPitch(
     return { ok: false, team, message: `골드가 부족합니다. (필요: ${cost.toLocaleString()}G)` };
   }
 
-  const rng = new Rng(seed);
-  const fastball = p.pitching.arsenal.FOURSEAM;
-  // 직구 능력치를 기준으로 낮게 시작
-  const baseline = fastball ? (fastball.velocity + fastball.control + fastball.movement) / 3 : 40;
-  const start = clamp(baseline * 0.45, 15, 45);
-
   // 훈련 포인트는 건드리지 않는다. 습득은 골드로만 한다.
   p.spentGold = (p.spentGold ?? 0) + cost;
-  p.pitching.arsenal[type] = {
-    velocity: Math.round(clamp(start + rng.range(-5, 8), 12, 60)),
-    control: Math.round(clamp(start + rng.range(-8, 5), 10, 55)),
-    movement: Math.round(clamp(start + rng.range(-3, 12), 15, 62)),
-  };
+  const fresh = rollNewPitch(p, new Rng(seed));
+  p.pitching.arsenal[type] = fresh;
+  // 나중에 이 구종을 교체할 때 "훈련으로 올린 분량"을 가려내려면 출발점이 필요하다
+  p.base.learned = { ...p.base.learned, [type]: { ...fresh } };
 
   return {
     ok: true,
@@ -281,10 +340,94 @@ export function learnPitch(
   };
 }
 
+/**
+ * 이미 가진 구종을 버리고 그 자리에 다른 구종을 익힌다. 비용은 습득과 똑같다.
+ *
+ * 슬롯을 늘리지 않으므로 슬롯이 가득 찬 투수도 쓸 수 있다 — 이 기능이 있는 이유가
+ * 그것이다. 버리는 구종에 부은 훈련 포인트는 전액 돌려준다
+ * (@see pitchTrainingRefund). 새 구종은 습득과 똑같이 낮게 시작하므로, 돌려받은
+ * 포인트를 그대로 부으면 버린 구종과 같은 수준까지 되돌릴 수 있다.
+ */
+export function replacePitch(
+  team: Team,
+  playerId: string,
+  from: PitchType,
+  to: PitchType,
+  seed: number,
+): LearnPitchResult {
+  const target = team.players.find((x) => x.id === playerId);
+  if (!target) return { ok: false, team, message: '선수를 찾을 수 없습니다.' };
+
+  const p = structuredClone(target);
+  if (!p.pitching) {
+    return { ok: false, team, message: '투수가 아닙니다.' };
+  }
+  if (from === to) {
+    return { ok: false, team, message: '같은 구종으로는 바꿀 수 없습니다.' };
+  }
+  if (!p.pitching.arsenal[from]) {
+    return { ok: false, team, message: '보유하지 않은 구종입니다.' };
+  }
+  // 직구는 모든 투수의 기본 구종이다. 없는 구종을 던지려 할 때 엔진이 대신 쓰는 것도 직구다.
+  if (PITCH_DEFS[from].innate) {
+    return { ok: false, team, message: `${PITCH_DEFS[from].ko}는 바꿀 수 없습니다.` };
+  }
+  if (!LEARNABLE_PITCHES.includes(to)) {
+    return { ok: false, team, message: '습득할 수 없는 구종입니다.' };
+  }
+  if (p.pitching.arsenal[to]) {
+    return { ok: false, team, message: '이미 보유한 구종입니다.' };
+  }
+
+  const cost = learnPitchGold(to, p);
+  if (team.gold < cost) {
+    return { ok: false, team, message: `골드가 부족합니다. (필요: ${cost.toLocaleString()}G)` };
+  }
+
+  const refund = pitchTrainingRefund(p, from);
+  const fresh = rollNewPitch(p, new Rng(seed));
+
+  // 지운 자리에 그대로 끼워 넣는다. delete 후 추가하면 새 구종이 맨 뒤로 밀려
+  // 투구 패널의 구종 버튼 순서와 overflowPitches가 함께 흔들린다.
+  const arsenal: Partial<Record<PitchType, PitchAttr>> = {};
+  for (const key of Object.keys(p.pitching.arsenal) as PitchType[]) {
+    if (key === from) arsenal[to] = fresh;
+    else arsenal[key] = p.pitching.arsenal[key];
+  }
+  p.pitching.arsenal = arsenal;
+  p.spentGold = (p.spentGold ?? 0) + cost;
+
+  // 버린 구종의 출발점은 이제 의미가 없고, 새 구종의 출발점이 그 자리를 대신한다
+  const learned = { ...p.base.learned, [to]: { ...fresh } };
+  delete learned[from];
+  p.base.learned = learned;
+
+  // 돌려준 만큼 spentPoints에서 뺀다. 안 그러면 능력치초기화권이 같은 포인트를 또 준다.
+  p.trainingPoints += refund;
+  p.spentPoints = Math.max(0, p.spentPoints - refund);
+
+  const back = refund > 0 ? ` · 훈련 P ${refund.toLocaleString()} 환급` : '';
+  return {
+    ok: true,
+    team: {
+      ...team,
+      gold: team.gold - cost,
+      players: team.players.map((x) => (x.id === playerId ? p : x)),
+    },
+    message: `${PITCH_DEFS[from].ko} → ${PITCH_DEFS[to].ko} 변경! (${cost.toLocaleString()}G 사용${back})`,
+  };
+}
+
 /** 습득 가능한 구종 목록 (아직 없는 것) */
 export function learnablePitchesFor(player: Player): PitchType[] {
   const owned = new Set(Object.keys(player.pitching?.arsenal ?? {}) as PitchType[]);
   return LEARNABLE_PITCHES.filter((t) => !owned.has(t));
+}
+
+/** 다른 구종으로 바꿀 수 있는 보유 구종 (직구 제외) */
+export function replaceablePitchesOf(player: Player): PitchType[] {
+  const owned = Object.keys(player.pitching?.arsenal ?? {}) as PitchType[];
+  return owned.filter((t) => !PITCH_DEFS[t].innate);
 }
 
 // ---------------------------------------------------------------------------

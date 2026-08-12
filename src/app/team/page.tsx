@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useAppStore, useActiveTeam } from '@/lib/store/appStore';
 import { TeamLogo } from '@/components/ui/TeamLogo';
 import { UNIFORM_DEFS } from '@/lib/game/constants';
@@ -82,16 +82,24 @@ export default function TeamPage() {
 
   if (teams.length === 0) {
     return (
-      <div className="panel mx-auto max-w-md p-8 text-center">
-        <h1 className="mb-2 text-2xl font-bold">아직 팀이 없습니다</h1>
-        <p className="mb-6 text-sm text-slate-400">
-          팀을 창단하면 투수 10명(선발 4 · 중간계투 5 · 마무리 1)과 타자 13명이 배정됩니다.
-          전원 C등급 1레벨에서 시작하며, 경기 경험치로 레벨을 올리고 골드로 티어를 강화합니다.
-          한 계정에 팀은 하나입니다.
-        </p>
-        <button className="btn btn-primary w-full" onClick={() => void createTeam()} disabled={saving}>
-          {saving ? '창단 중…' : '팀 창단하기'}
-        </button>
+      <div className="team-page team-page-empty">
+        <section className="team-foundation" aria-labelledby="team-foundation-title">
+          <span className="team-kicker">FRONT OFFICE · FOUNDING DESK</span>
+          <h1 id="team-foundation-title">당신의 구단을 창단하세요</h1>
+          <p>
+            한 계정에는 하나의 구단만 운영할 수 있습니다. 창단 즉시 경기 가능한 선수단과
+            구단 운영 시스템이 준비됩니다.
+          </p>
+          <dl className="team-foundation-ledger">
+            <Stat label="투수진" value="10명" />
+            <Stat label="타자진" value="13명" />
+            <Stat label="초기 등급" value="C · LV.1" />
+          </dl>
+          <button className="team-primary-action" onClick={() => void createTeam()} disabled={saving}>
+            <span>{saving ? '창단 준비 중…' : '구단 창단 승인'}</span>
+            <small>BEGIN FRANCHISE</small>
+          </button>
+        </section>
       </div>
     );
   }
@@ -99,30 +107,71 @@ export default function TeamPage() {
   if (!draft) return null;
 
   const set = (patch: Partial<Team>) => setDraft({ ...draft, ...patch });
+  const displayAbbr = draft.abbr.trim() || abbrFromName(draft.name);
+  const selectedUniform = UNIFORM_DEFS.find((uniform) => uniform.id === draft.uniformType);
+  const rating = teamRating(draft);
+  const brandStyle = {
+    '--club-primary': draft.primaryColor,
+    '--club-secondary': draft.secondaryColor,
+    '--club-accent': draft.accentColor,
+  } as CSSProperties;
 
   return (
-    <div className="space-y-5">
-      <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-2xl font-black">팀 설정</h1>
-        <div className="flex-1" />
-        <span className="rounded-lg bg-amber-500/15 px-3 py-1 text-sm font-bold text-amber-300">
-          {draft.gold.toLocaleString()} G
-        </span>
-      </div>
+    <div className="team-page" style={brandStyle}>
+      <section className="team-hero" aria-labelledby="team-page-title">
+        <div className="team-hero-copy">
+          <span className="team-kicker">FRONT OFFICE · BRAND STUDIO</span>
+          <h1 id="team-page-title">{draft.name || '신생 구단'} 본부</h1>
+          <p>구단의 이름과 상징, 유니폼을 설계하고 팬들이 기억할 하나의 정체성을 완성하세요.</p>
+          <div className="team-hero-status">
+            <span className={dirty ? 'is-dirty' : 'is-saved'}>
+              <i aria-hidden="true" />
+              {dirty ? '저장하지 않은 변경사항' : '모든 변경사항 저장됨'}
+            </span>
+            <span>CLUB ID · {displayAbbr}</span>
+          </div>
+        </div>
+
+        <dl className="team-hero-ledger" aria-label="구단 현황">
+          <div>
+            <dt>CLUB FUNDS</dt>
+            <dd>{draft.gold.toLocaleString()} G</dd>
+          </div>
+          <div>
+            <dt>TEAM RATING</dt>
+            <dd>{rating}</dd>
+          </div>
+          <div>
+            <dt>ACTIVE ROSTER</dt>
+            <dd>{draft.players.length}</dd>
+          </div>
+          <div>
+            <dt>UNIFORM</dt>
+            <dd>{selectedUniform?.ko ?? '클래식'}</dd>
+          </div>
+        </dl>
+      </section>
 
       {msg && (
-        <div className="rounded-xl border border-lime-500/30 bg-lime-500/10 px-4 py-2.5 text-sm text-lime-200">
+        <div className="team-notice" role="status">
+          <span aria-hidden="true">✓</span>
           {msg}
         </div>
       )}
 
-      <div className="grid gap-5 lg:grid-cols-[1fr_360px]">
-        {/* ---- 편집 ---- */}
-        <div className="space-y-5">
-          <section className="panel p-5">
-            <h2 className="mb-4 font-bold">기본 정보</h2>
-            <div className="grid gap-4 sm:grid-cols-[1fr_120px]">
+      <div className="team-studio-layout">
+        <main className="team-editor" aria-label="구단 정체성 편집">
+          <section className="team-config-section team-identity-section">
+            <header className="team-section-heading">
+              <span>01</span>
               <div>
+                <small>IDENTITY</small>
+                <h2>구단 기본 정보</h2>
+              </div>
+              <p>중계 화면과 리그 기록에 표시될 이름입니다.</p>
+            </header>
+            <div className="team-identity-fields">
+              <div className="team-field">
                 <label className="field-label">팀 이름</label>
                 <input
                   type="text"
@@ -131,7 +180,7 @@ export default function TeamPage() {
                   onChange={(e) => set({ name: e.target.value })}
                 />
               </div>
-              <div>
+              <div className="team-field team-abbr-field">
                 <label className="field-label">약칭 (3자)</label>
                 <input
                   type="text"
@@ -143,34 +192,47 @@ export default function TeamPage() {
             </div>
           </section>
 
-          <section className="panel p-5">
-            <h2 className="mb-4 font-bold">팀 로고</h2>
-            <div className="grid grid-cols-6 gap-2 sm:grid-cols-8">
-              {LOGO_IDS.map((id) => (
+          <section className="team-config-section">
+            <header className="team-section-heading">
+              <span>02</span>
+              <div>
+                <small>CREST VAULT</small>
+                <h2>구단 엠블럼</h2>
+              </div>
+              <p>선수 카드와 전광판에 새겨질 구단의 상징입니다.</p>
+            </header>
+            <div className="team-logo-vault" role="list" aria-label="구단 엠블럼 선택">
+              {LOGO_IDS.map((id, index) => (
                 <button
                   key={id}
                   onClick={() => set({ logoId: id })}
-                  className={`grid aspect-square place-items-center rounded-xl border-2 p-1.5 transition ${
-                    draft.logoId === id
-                      ? 'border-lime-400 bg-lime-500/15'
-                      : 'border-transparent bg-white/5 hover:bg-white/10'
-                  }`}
-                  title={id}
+                  className={`team-logo-option ${draft.logoId === id ? 'is-selected' : ''}`}
+                  aria-pressed={draft.logoId === id}
+                  aria-label={`엠블럼 ${index + 1}`}
                 >
+                  <span className="team-logo-option-index">{String(index + 1).padStart(2, '0')}</span>
                   <TeamLogo
                     logoId={id}
                     primary={draft.primaryColor}
                     secondary={draft.secondaryColor}
                     size={34}
                   />
+                  <span className="team-logo-option-check" aria-hidden="true">✓</span>
                 </button>
               ))}
             </div>
           </section>
 
-          <section className="panel p-5">
-            <h2 className="mb-4 font-bold">유니폼 색상</h2>
-            <div className="grid gap-4 sm:grid-cols-3">
+          <section className="team-config-section">
+            <header className="team-section-heading">
+              <span>03</span>
+              <div>
+                <small>COLOR SYSTEM</small>
+                <h2>구단 컬러</h2>
+              </div>
+              <p>홈구장과 유니폼을 하나로 연결하는 브랜드 팔레트입니다.</p>
+            </header>
+            <div className="team-color-fields">
               <ColorField
                 label="메인"
                 value={draft.primaryColor}
@@ -187,41 +249,52 @@ export default function TeamPage() {
                 onChange={(v) => set({ accentColor: v })}
               />
             </div>
-            <div className="mt-4">
-              <label className="field-label">프리셋</label>
-              <div className="flex flex-wrap gap-2">
+            <div className="team-preset-bank">
+              <label className="field-label">큐레이션 팔레트</label>
+              <div className="team-preset-grid">
                 {TEAM_COLOR_PRESETS.map((p, i) => (
                   <button
                     key={i}
                     onClick={() =>
                       set({ primaryColor: p.primary, secondaryColor: p.secondary, accentColor: p.accent })
                     }
-                    className="flex h-8 w-16 overflow-hidden rounded-lg border border-white/10"
-                    title="적용"
+                    className={`team-preset-option ${
+                      draft.primaryColor === p.primary &&
+                      draft.secondaryColor === p.secondary &&
+                      draft.accentColor === p.accent
+                        ? 'is-selected'
+                        : ''
+                    }`}
+                    aria-label={`컬러 팔레트 ${i + 1} 적용`}
                   >
-                    <span className="h-full flex-1" style={{ background: p.primary }} />
-                    <span className="h-full flex-1" style={{ background: p.secondary }} />
-                    <span className="h-full flex-1" style={{ background: p.accent }} />
+                    <span style={{ background: p.primary }} />
+                    <span style={{ background: p.secondary }} />
+                    <span style={{ background: p.accent }} />
+                    <small>{String(i + 1).padStart(2, '0')}</small>
                   </button>
                 ))}
               </div>
             </div>
           </section>
 
-          <section className="panel p-5">
-            <h2 className="mb-4 font-bold">유니폼 종류</h2>
-            <div className="grid gap-2 sm:grid-cols-3">
+          <section className="team-config-section">
+            <header className="team-section-heading">
+              <span>04</span>
+              <div>
+                <small>UNIFORM ARCHIVE</small>
+                <h2>유니폼 실루엣</h2>
+              </div>
+              <p>선수단의 인상을 결정할 베이스 디자인을 선택하세요.</p>
+            </header>
+            <div className="team-uniform-grid">
               {UNIFORM_DEFS.map((u) => (
                 <button
                   key={u.id}
                   onClick={() => set({ uniformType: u.id as UniformType })}
-                  className={`rounded-xl border-2 p-3 text-left transition ${
-                    draft.uniformType === u.id
-                      ? 'border-lime-400 bg-lime-500/10'
-                      : 'border-white/10 bg-white/[0.03] hover:bg-white/[0.07]'
-                  }`}
+                  className={`team-uniform-option ${draft.uniformType === u.id ? 'is-selected' : ''}`}
+                  aria-pressed={draft.uniformType === u.id}
                 >
-                  <div className="mb-2 flex justify-center">
+                  <div className="team-uniform-option-art">
                     <UniformPreview
                       type={u.id}
                       primary={draft.primaryColor}
@@ -230,57 +303,85 @@ export default function TeamPage() {
                       width={54}
                     />
                   </div>
-                  <div className="text-sm font-semibold">{u.ko}</div>
-                  <div className="text-[11px] text-slate-500">{u.desc}</div>
+                  <div className="team-uniform-option-copy">
+                    <small>GAME KIT</small>
+                    <strong>{u.ko}</strong>
+                    <span>{u.desc}</span>
+                  </div>
+                  <i aria-hidden="true">✓</i>
                 </button>
               ))}
             </div>
           </section>
-        </div>
+        </main>
 
-        {/* ---- 미리보기 ---- */}
-        <div className="space-y-4 lg:sticky lg:top-20 lg:self-start">
-          <section className="panel p-5 text-center">
-            <TeamLogo
-              logoId={draft.logoId}
-              primary={draft.primaryColor}
-              secondary={draft.secondaryColor}
-              size={104}
-            />
-            <div className="mt-3 text-xl font-black">{draft.name || '팀 이름'}</div>
-            <div className="text-sm text-slate-400">{draft.abbr || abbrFromName(draft.name)}</div>
+        <aside className="team-preview-column" aria-label="구단 브랜드 미리보기">
+          <section className="team-brand-card">
+            <div className="team-brand-card-topline">
+              <span>LIVE CLUB IDENTITY</span>
+              <span>01 / ACTIVE</span>
+            </div>
+            <div className="team-brand-lockup">
+              <div className="team-brand-crest">
+                <TeamLogo
+                  logoId={draft.logoId}
+                  primary={draft.primaryColor}
+                  secondary={draft.secondaryColor}
+                  size={104}
+                />
+              </div>
+              <div>
+                <small>PRO BASEBALL CLUB</small>
+                <h2>{draft.name || '팀 이름'}</h2>
+                <span>{displayAbbr}</span>
+              </div>
+            </div>
 
-            <div className="my-5 flex items-end justify-center gap-4">
+            <div className="team-uniform-stage">
+              <div className="team-uniform-halo" aria-hidden="true" />
               <UniformPreview
                 type={draft.uniformType}
                 primary={draft.primaryColor}
                 secondary={draft.secondaryColor}
                 accent={draft.accentColor}
-                width={92}
+                width={128}
               />
+              <div className="team-uniform-caption">
+                <small>SELECTED KIT</small>
+                <strong>{selectedUniform?.ko ?? '클래식'}</strong>
+                <span>{selectedUniform?.desc}</span>
+              </div>
             </div>
 
-            <dl className="grid grid-cols-2 gap-2 text-sm">
+            <div className="team-brand-palette" aria-label="현재 구단 색상">
+              <span style={{ background: draft.primaryColor }}><small>PRIMARY</small></span>
+              <span style={{ background: draft.secondaryColor }}><small>SECONDARY</small></span>
+              <span style={{ background: draft.accentColor }}><small>ACCENT</small></span>
+            </div>
+
+            <dl className="team-brand-stats">
               <Stat label="선수" value={`${draft.players.length}명`} />
-              <Stat label="전력" value={String(teamRating(draft))} />
+              <Stat label="전력" value={String(rating)} />
             </dl>
           </section>
 
-          <div className="flex gap-2">
-            <button className="btn btn-primary flex-1" onClick={() => void save()} disabled={!dirty || saving}>
-              {saving ? '저장 중…' : dirty ? '저장' : '저장됨'}
+          <div className="team-action-panel">
+            <button className="team-primary-action" onClick={() => void save()} disabled={!dirty || saving}>
+              <span>{saving ? '저장 중…' : dirty ? '구단 아이덴티티 저장' : '모든 변경사항 저장됨'}</span>
+              <small>{dirty ? 'COMMIT CHANGES' : 'IDENTITY SECURED'}</small>
             </button>
-            <button className="btn btn-danger" onClick={() => void remove()}>
-              삭제
+            <button
+              className="team-secondary-action"
+              onClick={() => setDraft({ ...draft, lineup: autoLineup(draft) })}
+            >
+              <span>타순 자동 편성</span>
+              <small>OPTIMIZE LINEUP</small>
+            </button>
+            <button className="team-delete-action" onClick={() => void remove()}>
+              구단 데이터 삭제
             </button>
           </div>
-          <button
-            className="btn w-full !text-xs"
-            onClick={() => setDraft({ ...draft, lineup: autoLineup(draft) })}
-          >
-            타순 자동 편성
-          </button>
-        </div>
+        </aside>
       </div>
     </div>
   );
@@ -296,16 +397,22 @@ function ColorField({
   onChange: (v: string) => void;
 }) {
   return (
-    <div>
+    <div className="team-color-field">
       <label className="field-label">{label}</label>
-      <div className="flex items-center gap-2">
+      <div className="team-color-control">
         <input
           type="color"
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          className="h-10 w-12 cursor-pointer rounded-lg border border-white/10 bg-transparent"
+          className="team-color-picker"
+          aria-label={`${label} 색상 선택`}
         />
-        <input type="text" value={value} onChange={(e) => onChange(e.target.value)} />
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          aria-label={`${label} 색상 코드`}
+        />
       </div>
     </div>
   );
@@ -313,9 +420,9 @@ function ColorField({
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg bg-white/5 p-2">
-      <dt className="text-[11px] text-slate-500">{label}</dt>
-      <dd className="font-bold">{value}</dd>
+    <div>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
     </div>
   );
 }

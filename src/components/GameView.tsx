@@ -60,6 +60,11 @@ export function GameView({
   const controllerIsTeammate = useMatchStore(
     (s) => !!controllerUid && controllerUid !== s.myUid && isSameSide(s, controllerUid),
   );
+  // 이어서 하기가 걸린 경기(CPU·리그)는 나가기를 한 번 물어본다.
+  // 저장되는 줄 모르고 나가면 "포기"와 구분이 안 되고, 반대로 포기할 길도 있어야 한다.
+  const resumable = useMatchStore((s) => !!s.resume);
+  const discardResume = useMatchStore((s) => s.discardResume);
+  const [askExit, setAskExit] = useState(false);
   // 모든 모드가 이 훅으로 보상을 받는다 (골드 + 선수별 경험치)
   const reward = useMatchReward();
   const spectating = party && !canBat && !canPitch;
@@ -107,6 +112,8 @@ export function GameView({
   // 끝내기 상황에서 종료 화면이 먼저 뜨면 마지막 플레이를 볼 수 없다.
   // 연출이 끝나고 advance()가 돌아야 띄운다.
   const over = state.phase === 'GAME_OVER' && phase !== 'RESULT';
+  // 나가기 확인은 아직 끝나지 않은 경기에서만. 끝난 뒤에는 저장할 것이 없다.
+  const confirmExit = resumable && !over;
   // 공수 교대 중에는 조작 패널을 접어 스카이뷰를 가리지 않는다
   const inningBreak = phase === 'INNING_BREAK';
 
@@ -138,14 +145,20 @@ export function GameView({
             <button className="btn !px-2.5 !py-1.5 !text-xs" onClick={() => setShowLog((v) => !v)}>
               실황
             </button>
-            {onExit ? (
-              <button className="btn btn-danger !px-2.5 !py-1.5 !text-xs" onClick={onExit}>
+            {confirmExit ? (
+              <button
+                className="btn btn-danger !px-2.5 !py-1.5 !text-xs"
+                onClick={() => setAskExit(true)}
+              >
                 나가기
               </button>
             ) : (
-              <Link href={exitHref} className="btn btn-danger !px-2.5 !py-1.5 !text-xs">
-                나가기
-              </Link>
+              <ExitAction
+                label="나가기"
+                className="btn btn-danger !px-2.5 !py-1.5 !text-xs"
+                onExit={onExit}
+                exitHref={exitHref}
+              />
             )}
           </div>
         </div>
@@ -206,6 +219,7 @@ export function GameView({
           ) : canPitch && phase === 'SETUP' ? (
             <>
               <PitchPanel
+                batter={batter}
                 state={state}
                 pitcher={pitcher}
                 playerSide={playerSide as Side}
@@ -284,6 +298,44 @@ export function GameView({
         <InningBreakOverlay state={state} onSkip={canSkipBreak ? advance : null} />
       )}
 
+      {/* 나가기 확인 (이어서 하기) */}
+      {askExit && !over && (
+        <div className="absolute inset-0 z-40 grid place-items-center bg-black/70 backdrop-blur-sm">
+          <div className="panel pop-in w-[min(92vw,400px)] p-6">
+            <h2 className="text-xl font-black">경기를 나갈까요?</h2>
+            <p className="mt-2 text-sm leading-relaxed text-slate-400">
+              지금까지 친 경기는 저장되어 있습니다. 나중에 같은 자리에서 이어서 할 수 있습니다.
+            </p>
+            <div className="mt-4 rounded-xl bg-white/5 px-4 py-3 text-center">
+              <div className="text-xs text-slate-500">
+                {state.inning}회 {state.half === 'TOP' ? '초' : '말'} · {state.outs}아웃
+              </div>
+              <div className="mt-0.5 text-lg font-black tabular">
+                {state.away.abbr} {state.away.runs} : {state.home.runs} {state.home.abbr}
+              </div>
+            </div>
+            <div className="mt-5 space-y-2">
+              <ExitAction
+                label="저장하고 나가기"
+                className="btn btn-primary w-full"
+                onExit={onExit}
+                exitHref={exitHref}
+              />
+              <ExitAction
+                label="경기 포기 (저장 삭제)"
+                className="btn btn-danger w-full !py-1.5 !text-xs"
+                before={discardResume}
+                onExit={onExit}
+                exitHref={exitHref}
+              />
+              <button className="btn w-full !py-1.5 !text-xs" onClick={() => setAskExit(false)}>
+                계속 하기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 경기 종료 */}
       {over && (
         <div className="absolute inset-0 z-30 grid place-items-center bg-black/70 backdrop-blur-sm">
@@ -320,20 +372,54 @@ export function GameView({
               </div>
             )}
             <div className="flex gap-2">
-              {onExit ? (
-                <button className="btn btn-primary flex-1" onClick={onExit}>
-                  나가기
-                </button>
-              ) : (
-                <Link href={exitHref} className="btn btn-primary flex-1">
-                  나가기
-                </Link>
-              )}
+              <ExitAction
+                label="나가기"
+                className="btn btn-primary flex-1"
+                onExit={onExit}
+                exitHref={exitHref}
+              />
             </div>
           </div>
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * 화면을 벗어나는 버튼. 부모가 onExit을 주면 그 처리(리셋·라우팅)를 그대로 쓰고,
+ * 없으면 exitHref로 이동한다. before는 나가기 직전에 한 번 실행된다(경기 포기 등).
+ */
+function ExitAction({
+  label,
+  className,
+  onExit,
+  exitHref,
+  before,
+}: {
+  label: string;
+  className: string;
+  onExit?: () => void;
+  exitHref: string;
+  before?: () => void;
+}) {
+  if (onExit) {
+    return (
+      <button
+        className={className}
+        onClick={() => {
+          before?.();
+          onExit();
+        }}
+      >
+        {label}
+      </button>
+    );
+  }
+  return (
+    <Link href={exitHref} className={className} onClick={() => before?.()}>
+      {label}
+    </Link>
   );
 }
 

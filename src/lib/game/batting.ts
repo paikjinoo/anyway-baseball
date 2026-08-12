@@ -1,6 +1,13 @@
 import { Rng, clamp, lerp, norm } from './rng';
 import { BAT_DEFS, BODY_BY_ID, PITCH_DEFS, SWING_DEFS } from './constants';
-import type { BattedBall, PitchTrajectory, Player, SwingCommand, Vec3 } from './types';
+import type {
+  BattedBall,
+  Handedness,
+  PitchTrajectory,
+  Player,
+  SwingCommand,
+  Vec3,
+} from './types';
 import { GRAVITY, DRAG_K, LIFT_K, FENCE_HEIGHT, fenceDistance } from './constants';
 
 // ---------------------------------------------------------------------------
@@ -115,6 +122,42 @@ export function effectiveBatting(p: Player) {
 }
 
 /**
+ * 이 타석에서 타자가 실제로 서는 쪽.
+ *
+ * 스위치히터는 투수 반대편에 선다. 예전에는 `bats === 'S' && true`로 **항상 좌타 고정**
+ * 이었는데, 좌우 상성이 없던 시절에는 타구 방향만 바뀌어 눈에 띄지 않았다. 상성이 붙는
+ * 순간부터는 스위치히터가 우투수를 상대로 영구히 불리해지는 버그가 된다.
+ *
+ * **좌우를 읽는 곳은 전부 이 함수 하나를 거쳐야 한다.** 호출하는 쪽마다 `bats`를 직접
+ * 읽으면 반드시 어딘가 어긋나고, 그때는 "판정은 좌타인데 화면에서는 우타석에 선"
+ * 반쪽이 된다 (부상 보정을 engine.toTeamInGame 한 곳에만 건 것과 같은 이유).
+ */
+export function effectiveBatSide(batter: Player, pitcher: Player): Handedness {
+  if (batter.bats !== 'S') return batter.bats;
+  return pitcher.throws === 'L' ? 'R' : 'L';
+}
+
+/**
+ * 좌우 상성(플래툰) 보정. 배트 판정 반경에 곱한다.
+ *
+ * 같은 손끼리 붙으면(좌투-좌타) 변화구가 몸쪽에서 바깥으로 달아나 치기 어렵고,
+ * 엇갈리면 반대로 공이 몸쪽으로 들어와 보기 편하다. 실제 MLB의 좌우 스플릿은
+ * OPS 기준으로 동측 약 −8%, 이측 약 +5% 수준이다.
+ *
+ * 판정 반경 하나로만 거는 이유는 그것이 헛스윙률과 타구의 질(reachQ·sweetQ)에
+ * 동시에 흘러들어 타율·장타가 함께 움직이는 유일한 지점이기 때문이다. 여러 곳에
+ * 나눠 걸면 180경기 시뮬레이션으로 되돌리기가 사실상 불가능해진다.
+ */
+export const PLATOON_SAME_HAND = 0.965;
+export const PLATOON_OPPOSITE_HAND = 1.02;
+
+export function platoonRadiusMult(batter: Player, pitcher: Player): number {
+  return effectiveBatSide(batter, pitcher) === pitcher.throws
+    ? PLATOON_SAME_HAND
+    : PLATOON_OPPOSITE_HAND;
+}
+
+/**
  * 스윙 결과 판정.
  *
  * 두 축으로 평가한다.
@@ -135,8 +178,9 @@ export function judgeSwing(
   const eyeStat = norm(eb.eye);
 
   // --- 공간 판정 ---------------------------------------------------------
-  // 컨택 능력치가 높을수록 배트 판정 반경이 커진다.
-  const radius = def.contactRadius * (0.62 + 0.72 * contactStat);
+  // 컨택 능력치가 높을수록 배트 판정 반경이 커진다. 좌우 상성이 여기에 곱해진다.
+  const radius =
+    def.contactRadius * (0.62 + 0.72 * contactStat) * platoonRadiusMult(batter, pitcher);
   const dx = swing.aimX - traj.zoneX;
   const dy = swing.aimY - traj.zoneY;
   const spatialErr = Math.hypot(dx, dy * 0.92);
@@ -196,6 +240,7 @@ export function judgeSwing(
 export function makeBattedBall(
   rng: Rng,
   batter: Player,
+  pitcher: Player,
   swing: SwingCommand,
   traj: PitchTrajectory,
   quality: number,
@@ -204,7 +249,8 @@ export function makeBattedBall(
   const def = SWING_DEFS[swing.type];
   const eb = effectiveBatting(batter);
   const powerStat = norm(eb.power);
-  const isLefty = batter.bats === 'L' || (batter.bats === 'S' && true);
+  // 당겨치는 방향은 실제로 선 쪽을 따른다 (스위치히터는 투수에 따라 바뀐다)
+  const isLefty = effectiveBatSide(batter, pitcher) === 'L';
 
   // --- 타구 속도 ---------------------------------------------------------
   // quality는 대략 [0.2, 1.0] 균등분포로 나온다. 이 구간을 실제 MLB의

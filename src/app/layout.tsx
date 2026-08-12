@@ -31,6 +31,21 @@ export const metadata: Metadata = {
     description: 'PLAY THE WHOLE GAME. 브라우저에서 즐기는 3D 야구 시뮬레이션.',
     images: ['/og.png'],
   },
+  // manifest는 여기 적지 않는다 — app/manifest.ts가 있으면 Next가 자동으로 넣는다.
+  icons: {
+    icon: [
+      { url: '/icon.svg', type: 'image/svg+xml' },
+      { url: '/icon-192.png', sizes: '192x192', type: 'image/png' },
+    ],
+    // iOS는 PNG만 인식하고 투명 픽셀을 검게 칠한다. 배경을 미리 깐 파일을 쓴다.
+    apple: [{ url: '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }],
+  },
+  appleWebApp: {
+    capable: true,
+    title: 'Anyway Baseball',
+    // black-translucent는 상태바가 헤더 위로 겹쳐 레이아웃을 다시 짜야 한다.
+    statusBarStyle: 'black',
+  },
 };
 
 export const viewport: Viewport = {

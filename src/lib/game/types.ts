@@ -50,6 +50,15 @@ export interface PlayerBase {
   batting: BattingAttr;
   stamina: number;
   arsenal: Partial<Record<PitchType, PitchAttr>>;
+  /**
+   * 골드로 익힌 구종의 **습득 직후** 능력치. 창단 때 받은 구종은 arsenal에 이미 출발점이
+   * 남으므로 여기 넣지 않는다.
+   *
+   * 구종을 교체할 때 "훈련으로 올린 분량"만 정확히 돌려주려면 출발점이 필요하다
+   * (@see training.pitchTrainingRefund). spentGold와 같은 이유로 선택 필드다 — 이 필드가
+   * 생기기 전에 저장된 팀도 그대로 읽혀야 하므로 TEAM_SCHEMA_VERSION을 올리지 않는다.
+   */
+  learned?: Partial<Record<PitchType, PitchAttr>>;
 }
 
 export type Handedness = 'L' | 'R';
@@ -162,8 +171,58 @@ export interface Player {
   fatigue: number;
   /** 부상 중이면 라인업/로테이션에 넣을 수 없다. */
   injury?: Injury;
-  /** 시즌 누적 스탯 */
+  /** 이번 시즌 누적 스탯. 시즌을 마감하면 0으로 돌아간다. */
   season: SeasonStat;
+  /**
+   * 통산 기록. 지난 시즌들의 합이며 **이번 시즌은 들어 있지 않다**.
+   *
+   * 선택 필드다 — 이 필드가 생기기 전에 저장된 팀도 그대로 읽혀야 하므로
+   * TEAM_SCHEMA_VERSION을 올리지 않는다. 없으면 빈 기록으로 읽는다.
+   * @see season.closeSeason
+   */
+  career?: SeasonStat;
+  /** 시즌별 기록. 저장 용량 때문에 최근 몇 시즌만 남긴다. */
+  seasonLog?: SeasonLogEntry[];
+  /**
+   * 좌우 스플릿. 상대 투수의 손별 [타수, 안타].
+   *
+   * 대타를 고를 때 능력치 말고 볼 것이 생긴다. 선택 필드이며 없으면 기록이 없다는 뜻이다.
+   */
+  splits?: Splits;
+  /**
+   * 코스별 약점. splits와 같은 규칙이다 — 팀 문서에서는 통산 누적이고,
+   * GameState.roster 안에서는 이번 경기 델타다 (@see engine.toTeamInGame).
+   *
+   * 선택 필드다 — 이 필드가 생기기 전에 저장된 팀도 그대로 읽혀야 하므로
+   * TEAM_SCHEMA_VERSION을 올리지 않는다. 없으면 기록이 없다는 뜻이다.
+   */
+  zoneSplits?: ZoneSplits;
+}
+
+/** 상대 투수 손별 [타수, 안타] */
+export interface Splits {
+  vsL?: [number, number];
+  vsR?: [number, number];
+}
+
+/**
+ * 코스별 [타수, 안타]. 3×3 히트맵의 9칸을 타수 배열과 안타 배열로 나눠 담는다.
+ *
+ * 중첩 배열(`[[타수, 안타], ...]`)로 두지 않는 이유는 **Firestore가 배열 안의 배열을
+ * 저장하지 못하기** 때문이다. 이 파일의 타입은 그대로 Firestore 문서 스키마가 된다.
+ *
+ * 칸 인덱스는 pitching.zoneCell이 정한다 (0 = 높은 몸쪽 … 4 = 한복판 … 8 = 낮은 바깥쪽).
+ */
+export interface ZoneSplits {
+  /** 코스별 타수. 길이 9. */
+  ab: number[];
+  /** 코스별 안타. ab와 같은 인덱스. */
+  h: number[];
+}
+
+export interface SeasonLogEntry {
+  seasonNo: number;
+  stat: SeasonStat;
 }
 
 export interface SeasonStat {
@@ -247,6 +306,11 @@ export interface Team {
   /** 재화. 티어 강화에 쓴다. */
   gold: number;
   inventory: Inventory;
+  /**
+   * 지금 치르고 있는 시즌 번호. 시즌을 마감할 때마다 1씩 오른다.
+   * 선택 필드이며 없으면 1로 읽는다.
+   */
+  seasonNo?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -421,6 +485,16 @@ export interface TeamInGame {
   hits: number;
   errors: number;
   lob: number;
+  /**
+   * 경기 시작 시점의 통산 코스별 기록. playerId -> ZoneSplits. **표시 전용이다.**
+   *
+   * roster의 zoneSplits는 이번 경기 델타라 상대 타자를 스카우팅하는 데 쓸 수 없다.
+   * 이 스냅샷은 경기 중 절대 갱신되지 않고 경기 후 병합에도 들어가지 않는다 —
+   * 컨테이너를 나눠 둔 것 자체가 "이건 더하면 안 되는 값"이라는 표시다.
+   *
+   * 기록이 있는 타자만 담으므로 신생 팀에서는 비어 있다(= 페이로드 증가 0).
+   */
+  scoutZones?: Record<string, ZoneSplits>;
 }
 
 // ---------------------------------------------------------------------------
@@ -666,6 +740,32 @@ export interface LeagueGame {
   playedAt?: number;
 }
 
+/**
+ * 포스트시즌 시리즈 하나.
+ *
+ * 정규 일정과 따로 두는 이유는 순위표 때문이다 — computeStandings는 schedule을 통째로
+ * 훑어 승패를 세므로, 단기전 결과가 거기 섞이면 "정규 시즌 순위"가 사라진다.
+ */
+export interface PostseasonSeries {
+  id: string;
+  /** 1 = 준결승, 2 = 결승. 팀이 적으면 결승 하나만 생긴다. */
+  round: number;
+  /** 상위 시드. 홈 경기를 더 많이 갖는다. */
+  hiSeedId: string;
+  loSeedId: string;
+  /** 이 시리즈를 가져가는 데 필요한 승수 (3이면 5전 3선승) */
+  winsNeeded: number;
+  games: LeagueGame[];
+  winnerId?: string;
+}
+
+export interface Postseason {
+  status: 'ACTIVE' | 'FINISHED';
+  series: PostseasonSeries[];
+  championTeamId?: string;
+  runnerUpTeamId?: string;
+}
+
 export interface League {
   id: string;
   name: string;
@@ -679,8 +779,17 @@ export interface League {
   roundsPerOpponent: number;
   createdAt: number;
   status: 'DRAFT' | 'ACTIVE' | 'FINISHED';
-  /** 종료 보상(골드·아이템)을 지급한 시각. 두 번 주지 않기 위한 표식. */
+  /** 정규 시즌 순위 보상(골드·아이템)을 지급한 시각. 두 번 주지 않기 위한 표식. */
   rewardedAt?: number;
+  /**
+   * 포스트시즌. 정규 일정을 다 치른 뒤에 생긴다.
+   *
+   * 선택 필드다 — 이 필드가 생기기 전에 저장된 리그도 그대로 읽혀야 하고,
+   * 스키마 버전을 올리면 그 리그를 통째로 못 쓰게 된다.
+   */
+  postseason?: Postseason;
+  /** 포스트시즌 보상을 지급한 시각 */
+  postseasonRewardedAt?: number;
 }
 
 export interface StandingRow {

@@ -161,6 +161,7 @@ export function RelayGameView({ onExit }: { onExit: () => void }) {
             <PitchPanel
               state={state}
               pitcher={pitcher}
+              batter={batter}
               playerSide="home"
               mirrored={zoneFlippedOnScreen(cameraMode, false)}
             />

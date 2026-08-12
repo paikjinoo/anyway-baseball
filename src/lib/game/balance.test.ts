@@ -15,7 +15,7 @@ import { DEFAULT_SETTINGS } from './types';
  */
 describe('밸런스 (180경기 시뮬레이션)', () => {
   it('팀·경기당 지표가 MLB 실측 근처에 머문다', () => {
-    const total = { g: 0, r: 0, h: 0, hr: 0, d: 0, t: 0, bb: 0, so: 0, ab: 0 };
+    const total = { g: 0, r: 0, h: 0, hr: 0, d: 0, t: 0, bb: 0, so: 0, ab: 0, sb: 0, cs: 0 };
 
     for (let i = 0; i < 180; i++) {
       const rng = new Rng(seedFromString(`bal-${i}`));
@@ -36,6 +36,8 @@ describe('밸런스 (180경기 시뮬레이션)', () => {
           total.bb += s.bb;
           total.so += s.so;
           total.ab += s.ab;
+          total.sb += s.sb;
+          total.cs += s.cs;
         }
       }
     }
@@ -61,6 +63,22 @@ describe('밸런스 (180경기 시뮬레이션)', () => {
     expect(per(total.so)).toBeLessThan(9.6);
     expect(avg).toBeGreaterThan(0.225);
     expect(avg).toBeLessThan(0.275);
+
+    // 도루 (MLB 도루 0.5~0.6 · 도실 0.2 · 시도 0.75 · 성공률 75%)
+    //
+    // 이 단정이 없던 동안 ai.decideSteal의 문턱값이 창단 로스터가 닿을 수 없는 곳에 있어
+    // **180경기를 돌려도 도루 시도가 0회**였다. 지표에 없으면 없는 것도 못 본다.
+    // 아래쪽 경계가 진짜 목적이다 — 0으로 주저앉는 회귀를 잡는다.
+    expect(per(total.sb)).toBeGreaterThan(0.3);
+    expect(per(total.sb)).toBeLessThan(0.85);
+    // 성공률. 너무 낮으면 발 느린 주자까지 뛰는 것이고, 너무 높으면 도루가 공짜가 된 것이다.
+    // 이 엔진은 주파 시간(중앙 3.60 / p90 3.10초) 대 수비 시간(일반 3.30 / 퀵 3.03초) 경주라
+    // 74% 근처에 머문다. 손익분기가 69%이므로 아래 경계는 그보다 낮게 두면 의미가 없다 —
+    // 69% 밑으로 내려갔다는 건 CPU가 뛸수록 손해 보는 판단을 하고 있다는 뜻이다.
+    const attempts = total.sb + total.cs;
+    expect(attempts).toBeGreaterThan(0);
+    expect(total.sb / attempts).toBeGreaterThan(0.66);
+    expect(total.sb / attempts).toBeLessThan(0.85);
   }, 120_000);
 
   it('선발이 완투하지 않고 불펜이 등판한다', () => {

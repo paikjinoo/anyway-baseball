@@ -22,6 +22,7 @@ import type {
   Team,
   Tier,
   UniformType,
+  ZoneSplits,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -111,6 +112,11 @@ export function emptySeason(): SeasonStat {
     g: 0, pa: 0, ab: 0, h: 0, double: 0, triple: 0, hr: 0, rbi: 0, r: 0,
     bb: 0, hbp: 0, so: 0, sb: 0, cs: 0, ip3: 0, er: 0, pk: 0, pbb: 0, ph: 0, np: 0, w: 0, l: 0,
   };
+}
+
+/** 코스별 기록의 빈 값. 9칸 고정이며 이 길이는 pitching.zoneCell이 정한다. */
+export function emptyZoneSplits(): ZoneSplits {
+  return { ab: Array(9).fill(0), h: Array(9).fill(0) };
 }
 
 /**

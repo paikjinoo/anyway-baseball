@@ -13,7 +13,8 @@ import {
   type MatchRewardContext,
   type PlayerExpLine,
 } from '../game/matchReward';
-import { claimOnlineReward, saveTeam } from '../firebase/store';
+import { claimOnlineReward, saveGameRecord, saveTeam } from '../firebase/store';
+import { buildGameRecord } from '../game/record';
 import type { Team, TeamInGame } from '../game/types';
 
 /**
@@ -107,6 +108,8 @@ export function useMatchReward(): MatchRewardSummary | null {
     if (!over || claimed.current) return;
 
     const st = useMatchStore.getState();
+    // 다시 보기가 끝내기 장면을 재생하면 phase가 GAME_OVER가 된다. 그건 경기가 아니다.
+    if (st.replayClip) return;
     const app = useAppStore.getState();
     const uid = app.user?.uid;
     const team = app.teams.find((t) => t.id === app.activeTeamId) ?? null;
@@ -163,6 +166,22 @@ export function useMatchReward(): MatchRewardSummary | null {
 
     app.upsertTeam(next);
     void saveTeam(next);
+
+    // 박스스코어. 보상과 달리 팀에 붙는 값이 아니라 실패해도 경기 결과에 영향이 없으므로
+    // 지급이 전부 끝난 뒤에 남긴다. 릴레이는 GameState 자체가 없어 기록할 것이 없다.
+    if (st.state) {
+      saveGameRecord(
+        buildGameRecord(st.state, {
+          kind,
+          playedAt: Date.now(),
+          leagueId: st.leagueRef?.leagueId,
+          leagueGameId: st.leagueRef?.gameId,
+          decisionPitcherId: basis.decisionPitcherId,
+          highlights: st.log.filter((l) => l.kind === 'score').map((l) => l.text),
+          clips: st.clips,
+        }),
+      );
+    }
 
     setSummary({
       earnedGold: result.gold,

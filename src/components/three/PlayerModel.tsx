@@ -5,7 +5,14 @@ import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { clamp } from '@/lib/game/rng';
 import { BODY_BY_ID } from '@/lib/game/constants';
-import type { AccessoryType, BatType, GloveType, Player, UniformType } from '@/lib/game/types';
+import type {
+  AccessoryType,
+  BatType,
+  GloveType,
+  Handedness,
+  Player,
+  UniformType,
+} from '@/lib/game/types';
 
 export interface UniformSpec {
   primary: string;
@@ -1093,16 +1100,18 @@ function buildPose(
   player: Player,
   intensity: number,
   clock: number,
+  batSide: Handedness,
 ): Pose {
+  const lefty = batSide === 'L';
   switch (kind) {
     case 'BATTING':
-      return player.bats === 'L'
+      return lefty
         ? mirrorPose(battingPose(player, t, clock))
         : battingPose(player, t, clock);
     case 'BATTING_SWING':
-      return player.bats === 'L' ? mirrorPose(swingPose(player, t)) : swingPose(player, t);
+      return lefty ? mirrorPose(swingPose(player, t)) : swingPose(player, t);
     case 'BATTING_BUNT':
-      return player.bats === 'L' ? mirrorPose(buntPose(player, t)) : buntPose(player, t);
+      return lefty ? mirrorPose(buntPose(player, t)) : buntPose(player, t);
     case 'PITCHING_SET':
       return player.throws === 'L' ? mirrorPose(pitchingSetPose(clock)) : pitchingSetPose(clock);
     case 'PITCHING_RELEASE':
@@ -1339,6 +1348,14 @@ interface Props {
   rotationY?: number;
   /** 모자/헬멧/포수 마스크. 생략하면 포즈에서 고른다. */
   headwear?: Headwear;
+  /**
+   * 이 타석에서 실제로 서는 쪽. 생략하면 player.bats를 쓴다.
+   *
+   * 스위치히터는 상대 투수에 따라 좌우가 바뀌므로 판정과 같은 값을 받아야 한다
+   * (@see batting.effectiveBatSide). 이 값이 없으면 "판정은 좌타인데 화면에서는
+   * 우타석에 선" 상태가 된다.
+   */
+  batSide?: Handedness;
   showName?: boolean;
   scale?: number;
 }
@@ -1404,6 +1421,7 @@ export function PlayerModel({
   rotationY = 0,
   headwear,
   scale = 1,
+  batSide,
 }: Props) {
   const jersey = useJerseyMaterial(uniform);
   const h = useMemo(() => hashOf(player.id), [player.id]);
@@ -1444,8 +1462,11 @@ export function PlayerModel({
   }, []);
 
   // 렌더에서 받은 값을 프레임 루프로 넘긴다
-  const input = useRef({ pose, animT, intensity, position, rotationY, scale, player });
-  input.current = { pose, animT, intensity, position, rotationY, scale, player };
+  // 스위치히터는 'S'라 좌우가 정해지지 않는다. 미리보기처럼 상대 투수가 없는 화면에서는
+  // 우타로 그린다 — 판정이 걸린 화면은 batSide를 반드시 넘긴다.
+  const side: Handedness = batSide ?? (player.bats === 'S' ? 'R' : player.bats);
+  const input = useRef({ pose, animT, intensity, position, rotationY, scale, player, side });
+  input.current = { pose, animT, intensity, position, rotationY, scale, player, side };
 
   const anim = useRef({
     // 선수마다 위상을 흩어 12명이 한 몸처럼 움직이지 않게 한다
@@ -1465,7 +1486,7 @@ export function PlayerModel({
     a.clock += dt;
 
     const t = SELF_DRIVEN[inp.pose] ? a.clock : inp.animT;
-    const p = buildPose(inp.pose, t, inp.player, inp.intensity, a.clock);
+    const p = buildPose(inp.pose, t, inp.player, inp.intensity, a.clock, inp.side);
     writeSnapshot(p, a.next);
     if (j.current.bat) j.current.bat.visible = !!p.bat;
     if (j.current.glove) j.current.glove.visible = !!p.glove;

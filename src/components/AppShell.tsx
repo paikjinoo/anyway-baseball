@@ -6,7 +6,8 @@ import { useEffect } from 'react';
 import { useAppStore } from '@/lib/store/appStore';
 import { watchAuth, signInWithGoogle, signOut, getOrCreateGuest } from '@/lib/firebase/auth';
 import { firebaseConfigured } from '@/lib/firebase/client';
-import { fetchNickname, listLeagues, listTeams } from '@/lib/firebase/store';
+import { fetchNickname, listLeagues, listTeamsReport } from '@/lib/firebase/store';
+import { DataNotice } from './DataNotice';
 import { startMenuBgm, stopMenuBgm, unlockAudio } from '@/lib/audio/sfx';
 import { useMatchStore } from '@/lib/store/matchStore';
 
@@ -29,6 +30,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const setAuthReady = useAppStore((s) => s.setAuthReady);
   const setDataReady = useAppStore((s) => s.setDataReady);
   const setTeams = useAppStore((s) => s.setTeams);
+  const setDataIssues = useAppStore((s) => s.setDataIssues);
   const setLeagues = useAppStore((s) => s.setLeagues);
   const hydrateSettings = useAppStore((s) => s.hydrateSettings);
   const matchActive = useMatchStore((s) => s.phase !== 'IDLE');
@@ -59,10 +61,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     let alive = true;
     void (async () => {
       try {
-        const [teams, leagues] = await Promise.all([listTeams(uid), listLeagues(uid)]);
+        const [report, leagues] = await Promise.all([listTeamsReport(uid), listLeagues(uid)]);
         if (!alive) return;
-        setTeams(teams);
+        setTeams(report.teams);
         setLeagues(leagues);
+        setDataIssues(report.skipped);
       } finally {
         if (alive) setDataReady(true);
       }
@@ -70,7 +73,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return () => {
       alive = false;
     };
-  }, [authReady, uid, setTeams, setLeagues, setDataReady]);
+  }, [authReady, uid, setTeams, setLeagues, setDataReady, setDataIssues]);
 
   // 다른 기기에서 정한 닉네임을 따라온다. 이 기기 값은 이미 적용돼 있어 깜빡이지 않는다.
   useEffect(() => {
@@ -179,7 +182,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </header>
 
       {/* main과 children은 같은 트리 위치를 유지해 경기 시작 시 페이지 상태가 초기화되지 않게 한다. */}
-      <main className={matchActive ? '' : 'app-main'}>{children}</main>
+      <main className={matchActive ? '' : 'app-main'}>
+        {!matchActive && <DataNotice />}
+        {children}
+      </main>
 
       <nav className={matchActive ? 'hidden' : 'mobile-nav'} aria-label="모바일 주요 메뉴">
         {navLinks(true)}

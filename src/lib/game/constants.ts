@@ -67,6 +67,19 @@ export const ZONE_CENTER_Y = (ZONE_TOP + ZONE_BOTTOM) / 2;
 export const BALL_RADIUS = 0.0366;
 
 /**
+ * 스트라이크 판정 경계 (존 좌표). 공 반지름 때문에 1보다 조금 넓다.
+ * ZONE_TOP과 값이 같지만 단위가 다르다 — 이쪽은 존 좌표(-1~1), 저쪽은 미터다.
+ */
+export const ZONE_STRIKE_LIMIT = 1.06;
+
+/**
+ * 3×3 코스 분할 경계 (존 좌표). 판정 범위를 삼등분한 값(1.06/3 ≈ 0.353)을 어림한 것이다.
+ * 실황 텍스트(describeLocation)와 코스별 기록(zoneCell)이 같은 칸을 가리키려면
+ * 두 곳이 반드시 이 상수를 함께 써야 한다.
+ */
+export const ZONE_THIRD = 0.35;
+
+/**
  * 존 좌표(-1~1)를 실제 미터 좌표로 변환.
  * 존 x는 포수/타자 시점의 화면 좌우(+1 = 오른쪽 = 1루 쪽 = 우타자 바깥쪽)이고,
  * 월드 +X는 3루 방향이므로 부호가 뒤집힌다.

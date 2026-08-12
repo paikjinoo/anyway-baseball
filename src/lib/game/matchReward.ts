@@ -1,9 +1,9 @@
 import { Rng, clamp } from './rng';
 import { pitchCapacity } from './pitching';
 import { grantExp } from './progression';
-import { emptySeason } from './generator';
+import { emptySeason, emptyZoneSplits } from './generator';
 import type { Difficulty } from './ai';
-import type { Player, SeasonStat, Team, TeamInGame } from './types';
+import type { Player, SeasonStat, Splits, Team, TeamInGame, ZoneSplits } from './types';
 
 /**
  * 경기 결과 -> 보상.
@@ -101,6 +101,38 @@ const SEASON_KEYS = Object.keys(emptySeason()) as (keyof SeasonStat)[];
 export function mergeSeason(a: SeasonStat, b: SeasonStat): SeasonStat {
   const out = {} as SeasonStat;
   for (const k of SEASON_KEYS) out[k] = (a[k] ?? 0) + (b[k] ?? 0);
+  return out;
+}
+
+/** 좌우 스플릿 합산. 시즌 기록과 같은 이유로 키 목록에서 돈다. */
+export function mergeSplits(a: Splits | undefined, b: Splits | undefined): Splits | undefined {
+  if (!a && !b) return undefined;
+  const out: Splits = {};
+  for (const k of ['vsL', 'vsR'] as const) {
+    const x = a?.[k];
+    const y = b?.[k];
+    if (!x && !y) continue;
+    out[k] = [(x?.[0] ?? 0) + (y?.[0] ?? 0), (x?.[1] ?? 0) + (y?.[1] ?? 0)];
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * 코스별 기록 합산. 두 배열을 인덱스로 더할 뿐이다.
+ *
+ * 길이가 다른 저장 데이터를 만나도 9칸으로 맞춘다 — 칸 수를 바꾸는 일이 생기면
+ * 여기서 걸러 주는 편이 화면에서 undefined를 만나는 것보다 낫다.
+ */
+export function mergeZoneSplits(
+  a: ZoneSplits | undefined,
+  b: ZoneSplits | undefined,
+): ZoneSplits | undefined {
+  if (!a && !b) return undefined;
+  const out = emptyZoneSplits();
+  for (let i = 0; i < out.ab.length; i++) {
+    out.ab[i] = (a?.ab[i] ?? 0) + (b?.ab[i] ?? 0);
+    out.h[i] = (a?.h[i] ?? 0) + (b?.h[i] ?? 0);
+  }
   return out;
 }
 
@@ -251,6 +283,10 @@ export function applyMatchResult(
             }
           : line;
       next.season = mergeSeason(p.season, decision);
+      // 스플릿과 코스별 기록도 같은 조건에서만 쌓는다 — 온라인 전적이 섞이면
+      // 대타 판단의 근거가 흐려진다.
+      next.splits = mergeSplits(p.splits, inGame.splits);
+      next.zoneSplits = mergeZoneSplits(p.zoneSplits, inGame.zoneSplits);
     }
 
     // 2) 경험치 -> 레벨업 -> 훈련 포인트
