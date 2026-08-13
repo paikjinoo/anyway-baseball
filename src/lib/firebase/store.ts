@@ -15,6 +15,7 @@ import type { GameRecord } from '../game/record';
 import type { GameSettings, League, Team } from '../game/types';
 import { repairTeam } from '../game/season';
 import {
+  isUnrecoverable,
   migrateTeamDoc,
   normalizeLeague,
   normalizeSettings,
@@ -37,6 +38,14 @@ import { ONLINE_DAILY_EXP_CAP, ONLINE_DAILY_GOLD_CAP } from '../game/onlineCap';
  */
 
 const LS_TEAMS = 'ab:teams';
+/**
+ * 정리한 옛 팀 문서를 옮겨 두는 선반. **지우는 게 아니라 옮기는 것이다.**
+ *
+ * 목록 조회(`ab:teams`)에서 빠지므로 사용자에게는 사라진 것과 같지만, 원본 바이트는 남는다.
+ * 백업 내보내기가 "지금 코드가 못 읽는 팀도 원본을 담는다"는 원칙을 지키고 있어서
+ * (@see exportSnapshot), 여기서 진짜로 삭제해 버리면 그 원칙이 무의미해진다.
+ */
+const LS_LEGACY_TEAMS = 'ab:teams:legacy';
 const LS_LEAGUES = 'ab:leagues';
 const LS_SETTINGS = 'ab:settings';
 const LS_NICKNAME = 'ab:nickname';
@@ -93,6 +102,8 @@ export interface TeamLoadReport {
   skipped: SkippedDoc[];
   /** 이번 로드에서 업그레이드된 팀 수 */
   migrated: number;
+  /** 이번 로드에서 정리한 옛 팀 수. 사용자에게 한 번 알려 주고 끝낸다. */
+  cleaned: number;
 }
 
 /**
@@ -198,7 +209,10 @@ export async function listTeamsReport(uid: string): Promise<TeamLoadReport> {
       const report = ownedTeams(all, uid);
       // 업그레이드된 문서는 캐시에 되쓴다. 다음 로드부터는 변환 비용이 들지 않는다.
       for (const t of report.teams) all[t.id] = t;
+      const purged = purgeUnreadableTeams(all, report);
       lsWrite(LS_TEAMS, all);
+      // 원격에도 남겨 두면 다음 로드에 그대로 다시 내려와 정리가 매번 반복된다.
+      for (const id of purged) syncRemote(() => deleteDoc(doc(db, 'teams', id)));
       // **updatedAt은 올리지 않는다.** listTeams의 LWW 병합이 왜곡된다 —
       // 마이그레이션은 형태 변환일 뿐 "새 저장"이 아니다.
       if (report.migrated > 0) {
@@ -209,11 +223,16 @@ export async function listTeamsReport(uid: string): Promise<TeamLoadReport> {
       // 캐시 폴백
     }
   }
-  return ownedTeams(lsRead<Record<string, Team>>(LS_TEAMS, {}), uid);
+  // 게스트이거나 원격 조회가 실패한 경로. 로컬만 정리하면 되고, 원격에 사본이 남아 있다면
+  // 다음번 조회 성공 때 다시 걸려 그때 지워진다.
+  const cached = lsRead<Record<string, Team>>(LS_TEAMS, {});
+  const report = ownedTeams(cached, uid);
+  if (purgeUnreadableTeams(cached, report).length) lsWrite(LS_TEAMS, cached);
+  return report;
 }
 
 function ownedTeams(all: Record<string, Team>, uid: string): TeamLoadReport {
-  const out: TeamLoadReport = { teams: [], skipped: [], migrated: 0 };
+  const out: TeamLoadReport = { teams: [], skipped: [], migrated: 0, cleaned: 0 };
   for (const raw of Object.values(all)) {
     if (raw?.ownerUid !== uid) continue;
     const r = readTeamDoc(raw);
@@ -225,6 +244,38 @@ function ownedTeams(all: Record<string, Team>, uid: string): TeamLoadReport {
     }
   }
   return out;
+}
+
+/**
+ * 되살릴 수 없는 옛 팀을 목록에서 치운다. `all`과 `report`를 제자리에서 고치고,
+ * 원격에서도 지워야 할 id를 돌려준다.
+ *
+ * 이걸 자동으로 하는 이유는, 그냥 두면 **영원히 남기 때문이다.** 대상 문서는 티어/레벨이
+ * 들어오기 전에 만들어져 지금 코드로는 열리지 않고, 그 유저는 이미 재창단을 마쳤다.
+ * 매번 "읽지 못한 데이터가 있습니다"만 띄우면서 할 수 있는 일은 아무것도 주지 못한다.
+ *
+ * **지우는 범위는 isUnrecoverable이 정한다** (@see game/migrate). 특히 TOO_NEW —
+ * 다른 기기의 최신 빌드에서 저장한 멀쩡한 팀 — 는 절대 여기 들어오면 안 된다.
+ */
+function purgeUnreadableTeams(all: Record<string, Team>, report: TeamLoadReport): string[] {
+  const doomed: string[] = [];
+  const kept: SkippedDoc[] = [];
+  for (const s of report.skipped) {
+    if (s.id !== null && isUnrecoverable(s.reason)) doomed.push(s.id);
+    else kept.push(s);
+  }
+  if (!doomed.length) return [];
+
+  // 선반에 옮기는 게 **먼저다.** 용량이 꽉 차 선반 저장이 실패했는데 목록에서 먼저
+  // 빼 버리면, 되살릴 여지를 남기려던 원본이 그 순간 진짜로 사라진다.
+  const shelf = lsRead<Record<string, unknown>>(LS_LEGACY_TEAMS, {});
+  for (const id of doomed) shelf[id] = all[id];
+  if (!lsWrite(LS_LEGACY_TEAMS, shelf)) return [];
+
+  for (const id of doomed) delete all[id];
+  report.skipped = kept;
+  report.cleaned = doomed.length;
+  return doomed;
 }
 
 export async function deleteTeam(teamId: string): Promise<void> {

@@ -135,7 +135,7 @@ export function DataBackup() {
         `기록 ${res.recordCount}경기`,
       ];
       if (res.migrated) notes.push(`${res.migrated}개 업그레이드`);
-      if (res.skipped.length) notes.push(`${res.skipped.length}개는 읽지 못해 건너뜀`);
+      if (res.skipped.length) notes.push(`팀 ${res.skipped.length}개는 열 수 없어 제외`);
       setMsg(`가져왔습니다 — ${notes.join(' · ')}.`);
       setPending(null);
     } finally {

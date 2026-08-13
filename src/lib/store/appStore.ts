@@ -26,6 +26,11 @@ interface AppState {
    * 지금까지는 아무 설명 없이 사라져 사용자에게는 데이터가 없어진 것처럼 보였다.
    */
   dataIssues: SkippedDoc[];
+  /**
+   * 이번 로드에서 정리한 옛 팀 수. 정리하고 나면 문서가 사라지므로 다음 로드에는 0이 된다 —
+   * 즉 이 알림은 저절로 딱 한 번만 뜬다. 따로 "봤음" 표식을 둘 필요가 없다.
+   */
+  dataCleaned: number;
 
   setUser: (u: AppUser | null) => void;
   /** 감독 닉네임 변경. null이나 빈 문자열이면 계정 이름으로 되돌린다. */
@@ -43,7 +48,7 @@ interface AppState {
   removeLeague: (id: string) => void;
   updateSettings: (patch: Partial<GameSettings>) => void;
   hydrateSettings: () => void;
-  setDataIssues: (issues: SkippedDoc[]) => void;
+  setDataIssues: (issues: SkippedDoc[], cleaned?: number) => void;
 }
 
 const ACTIVE_KEY = 'ab:activeTeam';
@@ -57,8 +62,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   leagues: [],
   settings: DEFAULT_SETTINGS,
   dataIssues: [],
+  dataCleaned: 0,
 
-  setUser: (user) => set({ user, dataReady: false, dataIssues: [] }),
+  setUser: (user) => set({ user, dataReady: false, dataIssues: [], dataCleaned: 0 }),
 
   setNickname: (raw) => {
     const { user } = get();
@@ -136,7 +142,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { settings };
     }),
 
-  setDataIssues: (dataIssues) => set({ dataIssues }),
+  setDataIssues: (dataIssues, dataCleaned = 0) => set({ dataIssues, dataCleaned }),
 
   hydrateSettings: () => {
     const settings = loadSettings();

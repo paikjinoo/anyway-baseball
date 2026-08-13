@@ -4,10 +4,13 @@ import { generateTeam } from './generator';
 import { createLeague } from './league';
 import {
   isTeamShaped,
+  isUnrecoverable,
+  LEGACY_TEAM_VERSION,
   migrateTeamDoc,
   normalizeLeague,
   normalizeSettings,
   normalizeTeam,
+  type SkipReason,
   type TeamMigration,
 } from './migrate';
 import { DEFAULT_SETTINGS, TEAM_SCHEMA_VERSION } from './types';
@@ -73,12 +76,28 @@ describe('migrateTeamDoc', () => {
     expect(out.id).toBeTruthy();
   });
 
-  it('버전이 없거나 형태가 아니면 CORRUPT다', () => {
+  it('팀 문서라고 볼 수 없으면 CORRUPT다', () => {
     for (const bad of [{}, null, 'nope', { id: 't', name: 'x' }]) {
       const out = migrateTeamDoc(bad);
       expect(out.ok).toBe(false);
       if (!out.ok) expect(out.reason).toBe('CORRUPT');
     }
+  });
+
+  it('버전 필드가 없어도 팀 형태이면 손상이 아니라 옛 팀(v0)으로 읽는다', () => {
+    // schemaVersion은 티어/레벨을 넣으면서 2로 시작했다. 그전 팀에는 필드 자체가 없는데,
+    // 그걸 CORRUPT로 부르면 멀쩡한 옛 팀을 두고 "데이터가 손상됐다"고 거짓말하게 된다.
+    const legacy: Record<string, unknown> = { ...team() };
+    delete legacy.schemaVersion;
+
+    const out = migrateTeamDoc(legacy);
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.reason).toBe('TOO_OLD');
+    expect(out.version).toBe(LEGACY_TEAM_VERSION);
+    // 무엇이 없어졌는지 이름으로 말할 수 있어야 한다
+    expect(out.name).toBe(legacy.name);
+    expect(out.id).toBe(legacy.id);
   });
 
   it('업그레이더가 던지면 FAILED로 남기고 멈춘다', () => {
@@ -97,6 +116,20 @@ describe('migrateTeamDoc', () => {
     const out = migrateTeamDoc({ ...team(), schemaVersion: 2 }, wrecker, 3);
     expect(out.ok).toBe(false);
     if (!out.ok) expect(out.reason).toBe('CORRUPT');
+  });
+});
+
+describe('isUnrecoverable', () => {
+  it('올려 줄 방법이 없는 옛 팀만 정리 대상이다', () => {
+    expect(isUnrecoverable('TOO_OLD')).toBe(true);
+  });
+
+  it('나머지는 절대 정리하지 않는다', () => {
+    // 특히 TOO_NEW — 다른 기기의 최신 빌드에서 저장한 멀쩡한 팀이다. 새로고침 한 번이면
+    // 열리는데 여기서 true가 되면 그 팀을 진짜로 지워 버린다.
+    for (const reason of ['TOO_NEW', 'CORRUPT', 'FAILED'] satisfies SkipReason[]) {
+      expect(isUnrecoverable(reason)).toBe(false);
+    }
   });
 });
 

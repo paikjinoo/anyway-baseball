@@ -49,12 +49,33 @@ export type SkipReason =
   /** 업그레이더가 도중에 실패했다 */
   | 'FAILED';
 
+/**
+ * 사용자에게 그대로 보여 주는 문장.
+ *
+ * **개발자 용어를 쓰지 않는다.** "스키마", "마이그레이션", "형식 v2"는 읽는 사람에게
+ * 아무 정보도 주지 못하면서 불안만 준다. 특히 '손상'은 쓰지 않는다 — 대부분은 실제로
+ * 깨진 게 아니라 그저 오래됐을 뿐인데, 그 단어 하나 때문에 "내 데이터가 망가졌다"로 읽힌다.
+ */
 export const SKIP_REASON_KO: Record<SkipReason, string> = {
-  CORRUPT: '데이터가 손상되었습니다',
-  TOO_NEW: '더 새로운 버전에서 저장되었습니다',
-  TOO_OLD: '너무 오래된 형식입니다',
-  FAILED: '변환에 실패했습니다',
+  CORRUPT: '팀 정보를 읽을 수 없어요',
+  TOO_NEW: '최신 버전에서 저장된 팀이에요',
+  TOO_OLD: '예전 버전에서 만든 팀이에요',
+  FAILED: '팀 정보를 여는 데 실패했어요',
 };
+
+/**
+ * 되살릴 방법이 영영 없는 사유인가. **정리(삭제) 대상은 여기서만 정한다.**
+ *
+ * TOO_OLD 하나뿐이다 — 올려 줄 업그레이더가 없다는 뜻이고, 코드가 바뀌지 않는 한 다음
+ * 로드에서도 결과가 똑같다. 나머지는 절대 지우지 않는다:
+ *
+ * - TOO_NEW: 새로고침 한 번이면 열리는 **멀쩡한 팀**이다. 지우면 진짜로 데이터를 잃는다.
+ * - FAILED: 업그레이더 쪽 버그다. 고치면 다음 배포에서 살아난다.
+ * - CORRUPT: 왜 그런지 모르는 상태다. 원인을 모를 때는 손대지 않는 쪽이 안전하다.
+ */
+export function isUnrecoverable(reason: SkipReason): boolean {
+  return reason === 'TOO_OLD';
+}
 
 export type TeamDocOutcome =
   /** migratedFrom이 null이면 손대지 않았다는 뜻이다 */
@@ -76,10 +97,22 @@ export function isTeamShaped(doc: unknown): doc is Team {
   );
 }
 
+/**
+ * `schemaVersion` 자체가 생기기 전에 저장된 문서의 버전.
+ *
+ * 이 필드는 티어/레벨을 도입하면서 2로 시작했다 — 디스크에 v1이 존재한 적은 없고,
+ * 그 이전 문서에는 **버전 필드가 통째로 없다.** 그걸 "버전을 못 읽었다"로 처리하면
+ * 멀쩡한 옛 팀이 CORRUPT(손상)로 분류되어, 사용자에게 데이터가 깨졌다고 거짓말하게 된다.
+ */
+export const LEGACY_TEAM_VERSION = 0;
+
 function versionOf(doc: unknown): number | null {
   if (!doc || typeof doc !== 'object') return null;
   const v = (doc as TeamDoc).schemaVersion;
-  return typeof v === 'number' ? v : null;
+  if (typeof v === 'number') return v;
+  // 버전은 없지만 팀의 형태는 갖춘 문서 = 버전 도입 이전에 저장된 팀이다.
+  // 형태조차 아니면 여기서 판단하지 않는다 (호출부가 CORRUPT로 남긴다).
+  return isTeamShaped(doc) ? LEGACY_TEAM_VERSION : null;
 }
 
 function labelOf(doc: unknown): { id: string | null; name: string | null } {
@@ -106,6 +139,8 @@ export function migrateTeamDoc(
 ): TeamDocOutcome {
   const label = labelOf(raw);
   const version = versionOf(raw);
+  // CORRUPT는 "팀 문서라고 볼 수조차 없다"는 뜻으로만 쓴다. 버전만 없는 옛 팀은
+  // versionOf가 v0으로 읽어 아래 TOO_OLD 경로로 내려간다 (@see LEGACY_TEAM_VERSION).
   if (version === null) return { ok: false, reason: 'CORRUPT', version: null, ...label };
   if (version > target) return { ok: false, reason: 'TOO_NEW', version, ...label };
 
