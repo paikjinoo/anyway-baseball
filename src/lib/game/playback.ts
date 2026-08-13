@@ -8,7 +8,15 @@
  * 시간 단위는 전부 엔진 시간(초)이고 기준점 t=0 은 타격(또는 포구) 순간이다.
  */
 
-import { BASE_COORDS, BASE_DISTANCE, DEFENSE_SPOTS, GRAVITY, fenceDistance } from './constants';
+import {
+  BASE_COORDS,
+  BASE_DISTANCE,
+  DEFENSE_SPOTS,
+  DRAG_K,
+  GRAVITY,
+  RUN_STRIDE,
+  fenceDistance,
+} from './constants';
 import { baseToBase, homeToFirst, tagUpTime } from './baserunning';
 import { throwArrivalTime } from './fielding';
 import { clamp } from './rng';
@@ -27,8 +35,8 @@ export const BOX_EXIT = 0.2;
  * 40% 지점에 있어 순간이동처럼 보인다. 화면상으로는 짧게만 앞세운다.
  */
 const DISPLAY_HEAD_START = 0.45;
-/** 한 걸음 주기(양발 1회)당 이동 거리. 발이 미끄러지지 않게 보폭을 맞춘다. */
-const STRIDE = 2.2;
+/** 한 걸음 주기당 이동 거리. 모델의 접지 보폭과 짝을 이룬다 (@see constants.RUN_STRIDE) */
+const STRIDE = RUN_STRIDE;
 /** 홈런 세리머니 주루는 전력질주가 아니다 */
 const TROT_SCALE = 1.6;
 
@@ -161,6 +169,18 @@ export function buildTimeline(
 
   const homeRun = result.kind === 'HOME_RUN';
   const bunt = result.swing.type === 'BUNT';
+  /**
+   * 도루 주자는 판정이 쓴 주파 시간을 그대로 쓴다.
+   *
+   * 일반 주루 모델(baseToBase)로 그리면 3.3초가 걸려 1.9초에 도착하는 송구에
+   * 언제나 진다 — 세이프로 판정된 도루가 화면에서는 여유 있는 아웃으로 보인다.
+   * 타임라인의 t=0은 공이 홈플레이트에 닿는 순간이므로 catchTime만큼 당겨 놓는다.
+   */
+  const stealOf = new Map(
+    result.stealResults
+      .filter((x) => x.runTime !== undefined && x.catchTime !== undefined)
+      .map((x) => [x.playerId, x]),
+  );
   const hangTime = result.battedBall?.hangTime ?? 0;
   const runners: RunnerAnim[] = [];
   let duration = result.battedBall ? hangTime + 0.5 : 0.6;
@@ -195,6 +215,12 @@ export function buildTimeline(
             ? tagUpTime(p)
             : baseToBase(p);
       if (homeRun) dur *= TROT_SCALE;
+      const st = i === 0 ? stealOf.get(m.playerId) : undefined;
+      if (st && st.fromBase === from) {
+        // 투수가 움직인 순간 출발해서 판정과 같은 시각에 도착한다
+        cursor = -st.catchTime!;
+        dur = st.runTime! - cursor;
+      }
       legs.push({ from, to, start: cursor, end: cursor + dur, stop: i === legCount - 1 });
       cursor += dur;
     }
@@ -370,6 +396,10 @@ export interface FielderChase {
   secure: number;
   caught: boolean;
   error: boolean;
+  /** 전력으로 달려 겨우 닿는 타구 — 몸을 던진다 */
+  dive: boolean;
+  /** 서서 잡을 수 있는 높이를 넘는 타구 — 뛰어오른다 */
+  jump: boolean;
 }
 
 export interface BallThrow {
@@ -395,6 +425,44 @@ export interface FieldAnim {
 function dist2d(a: Vec3, b: Vec3): number {
   return Math.hypot(a.x - b.x, a.z - b.z);
 }
+
+/** 송구를 놓는 높이 / 받는 높이 (m) */
+const THROW_RELEASE_Y = 1.45;
+const THROW_CATCH_Y = 1.15;
+
+/**
+ * 송구 중 공의 위치.
+ *
+ * 예전에는 높이를 고정 포물선으로, 수평을 **등속**으로 그렸다. 그래서 외야에서 홈까지
+ * 90m를 던져도 공이 처음부터 끝까지 같은 속도로 흘러 무게가 느껴지지 않았다.
+ * 여기서는 출발·도착·비행시간(전부 판정이 정한 값)만 지키고 그 사이를 실제로 계산한다.
+ *
+ *  - 수직: 도착 높이에 맞는 초기 상향 속도를 역산해 중력으로 떨군다
+ *  - 수평: 엔진과 같은 항력 모델(a = -DRAG_K·v²)로 감속한다.
+ *    v(t) = v0 / (1 + k·v0·t) 이므로 거리는 ln(1 + k·v0·t)/k 이고,
+ *    도착 거리 d에서 역산하면 v0 = (e^(k·d) − 1)/(k·T).
+ */
+function throwPoint(th: BallThrow, t: number): Vec3 {
+  const T = Math.max(0.01, th.end - th.start);
+  const tau = clamp(t - th.start, 0, T);
+  const d = dist2d(th.from, th.to);
+
+  let u: number;
+  if (d < 0.5) {
+    u = tau / T;
+  } else {
+    const v0 = (Math.exp(DRAG_K * d) - 1) / (DRAG_K * T);
+    u = clamp(Math.log(1 + DRAG_K * v0 * tau) / (DRAG_K * d), 0, 1);
+  }
+
+  const vy = (THROW_CATCH_Y - THROW_RELEASE_Y + (GRAVITY * T * T) / 2) / T;
+  return {
+    x: th.from.x + (th.to.x - th.from.x) * u,
+    y: THROW_RELEASE_Y + vy * tau - (GRAVITY * tau * tau) / 2,
+    z: th.from.z + (th.to.z - th.from.z) * u,
+  };
+}
+
 
 // ---------------------------------------------------------------------------
 // 낙구 후의 공 (바운드 → 구르기)
@@ -740,8 +808,8 @@ function fieldEnd(f: FieldAnim | null): number {
 function buildFieldAnim(result: PitchResult): { field: FieldAnim | null; ground: GroundBall | null } {
   const play = result.fieldPlay;
   const bb = result.battedBall;
-  // 홈런/파울은 쫓아갈 공이 없다. 공만 굴러간다.
-  if (!bb) return { field: null, ground: null };
+  // 타구가 없어도 도루에는 수비가 붙는다 (포수 송구 + 베이스 커버)
+  if (!bb) return { field: buildStealAnim(result), ground: null };
   if (!play || play.homeRun || (play.foul && !play.foulCaught)) {
     return { field: null, ground: buildGroundBall(bb, bb.landing, bb.hangTime, null) };
   }
@@ -752,6 +820,56 @@ function buildFieldAnim(result: PitchResult): { field: FieldAnim | null; ground:
   const reach = play.error ? Math.max(bb.hangTime, secure - FUMBLE_MAX) : secure;
   const ground = buildGroundBall(bb, play.securePoint, reach, DEFENSE_SPOTS[play.primary]);
   return { field: buildChase(result, play, bb, ground.to), ground };
+}
+
+/** 도루 시 목표 베이스를 커버하는 야수. 2루는 유격수, 3루는 3루수. */
+const STEAL_COVER: Record<number, Position> = { 1: 'SS', 2: '3B', 3: 'C' };
+
+/**
+ * 도루 연출.
+ *
+ * 예전에는 타구가 없으면 field가 통째로 null이라 **포수가 미동도 하지 않았다.**
+ * 주자만 혼자 뛰다가 아웃 판정이 나는, 승부가 어디서 갈렸는지 알 수 없는 장면이었다.
+ *
+ * 시각은 전부 판정이 쓴 값(StealResult.catchTime/defTime)을 그대로 쓴다. 그래서
+ * 화면에서 송구가 베이스에 닿는 순간과 세이프/아웃이 갈리는 순간이 정확히 같다.
+ */
+function buildStealAnim(result: PitchResult): FieldAnim | null {
+  // 홈 스틸은 포수가 송구하지 않는다 (그 자리에서 태그한다)
+  const steals = result.stealResults.filter(
+    (s) => s.fromBase < 2 && s.catchTime !== undefined && s.defTime !== undefined,
+  );
+  if (!steals.length) return null;
+  // 더블 스틸이면 승부가 걸린 앞 주자 쪽으로 던진다
+  const target = steals.reduce((a, b) => (b.fromBase > a.fromBase ? b : a));
+  const base = target.fromBase + 1;
+  const bag = BASE_COORDS[base];
+  const home = DEFENSE_SPOTS.C;
+  const catchAt = target.catchTime!;
+  const arrive = target.defTime!;
+  const cover = STEAL_COVER[base] ?? 'SS';
+  const spot = DEFENSE_SPOTS[cover];
+
+  const chase: FielderChase = {
+    pos: 'C',
+    // 포수는 제자리에서 받아 던진다
+    legs: [{ from: home, to: home, start: 0, end: catchAt }],
+    reach: catchAt,
+    secure: catchAt,
+    caught: true,
+    error: false,
+    dive: false,
+    jump: false,
+  };
+  const throws: BallThrow[] = [{ from: home, to: bag, start: catchAt, end: arrive }];
+  const covers: FieldAnim['covers'] = [];
+  addCover(covers, cover, 'C', bag, home, arrive);
+  // 커버가 늦게 출발하면 태그가 성립하지 않으므로 투구와 동시에 붙는다
+  if (covers[0]) {
+    covers[0].leg.start = 0;
+    covers[0].leg.end = Math.min(arrive - 0.1, dist2d(spot, bag) / FIELDER_SPEED);
+  }
+  return { chase, throws, covers };
 }
 
 /** ball = 야수가 공을 만나는 지점 (구르는 타구는 실제로 굴러간 끝) */
@@ -782,6 +900,14 @@ function buildChase(
   const reach = Math.max(rawReach, arrive);
   const secure = Math.max(rawSecure, arrive);
 
+  // 아슬아슬한 처리에는 다이빙/점프를 붙인다. 전부 같은 자세로 서서 받으면
+  // 담장 앞 호수비도 평범한 뜬공도 구별이 안 된다.
+  //
+  // **평속(FIELDER_SPEED)으로 닿는 타구는 다이빙이 아니다.** buildChase는 여유가 있으면
+  // 도착 시각을 정확히 평속으로 잡으므로, 기준을 평속에 두면 사실상 모든 수비가
+  // 다이빙이 된다(처음에 그렇게 만들었더니 수비 프레임의 44%가 다이빙이었다).
+  // 평속을 넘겨야만 닿는 경우 = 몸을 던져야 닿는 경우다.
+  const runSpeed = runUp / Math.max(0.05, arrive - start);
   const chase: FielderChase = {
     pos: play.primary,
     legs: [{ from: home, to: ball, start, end: arrive }],
@@ -789,6 +915,9 @@ function buildChase(
     secure,
     caught: play.caught,
     error: play.error,
+    dive: runUp > 5 && runSpeed > FIELDER_SPEED * 1.03,
+    // 내야를 넘어가려던 라이너를 낚아채는 점프. 체공이 짧아 뛰지 않으면 닿지 않는다.
+    jump: play.caught && play.infield && bb.kind === 'LINE_DRIVE' && bb.hangTime < 1.5,
   };
 
   // ---- 송구 대상: 아웃이 기록된 베이스 -----------------------------------
@@ -923,9 +1052,50 @@ function addReturnThrow(
 export interface FielderSample {
   pos: Vec3;
   yaw: number;
-  pose: 'RUNNING' | 'FIELDING' | 'CATCHING' | 'IDLE';
+  pose: FielderPose;
   cycle: number;
   intensity: number;
+}
+
+export type FielderPose =
+  | 'RUNNING'
+  | 'FIELDING'
+  | 'CATCHING'
+  | 'IDLE'
+  | 'THROWING'
+  | 'TAG'
+  | 'DIVING'
+  | 'JUMP';
+
+/**
+ * 송구 모션 길이 (s)와 그 안에서 공이 손을 떠나는 지점.
+ *
+ * **릴리스가 BallThrow.start와 정확히 겹쳐야 한다.** 안 그러면 공이 아직 팔을 뒤로
+ * 뺀 야수의 손에서 튀어나가거나, 이미 던진 팔 뒤를 따라 나간다. 그래서 모션은
+ * `start` 이전에 시작해서 이후까지 이어진다.
+ * @see PlayerModel의 THROW_RELEASE_AT (같은 값이어야 한다)
+ */
+const THROW_MS = 0.62;
+const THROW_RELEASE = 0.44;
+
+/** 송구가 시작되기 전에 팔을 감기 시작하는 시각 */
+function throwWindup(startAt: number, notBefore: number): number {
+  return Math.max(notBefore, startAt - THROW_MS * THROW_RELEASE);
+}
+
+/** t가 이 야수의 송구 모션 구간이면 진행도(0~1), 아니면 null */
+function throwPhase(from: Vec3, th: BallThrow | undefined, notBefore: number, t: number) {
+  if (!th) return null;
+  const begin = throwWindup(th.start, notBefore);
+  const rel = th.start;
+  const end = rel + THROW_MS * (1 - THROW_RELEASE);
+  if (t < begin || t > end) return null;
+  // 여유가 모자라면 앞구간을 압축한다 (릴리스 시각은 그대로 지킨다)
+  const k =
+    t < rel
+      ? (rel === begin ? THROW_RELEASE : ((t - begin) / (rel - begin)) * THROW_RELEASE)
+      : THROW_RELEASE + ((t - rel) / (end - rel)) * (1 - THROW_RELEASE);
+  return { k: clamp(k, 0, 1), yaw: facing(from, th.to) };
 }
 
 function legPos(leg: MoveLeg, t: number): { pos: Vec3; moving: boolean; travelled: number } {
@@ -965,11 +1135,23 @@ export function sampleFielder(
   if (cover) {
     if (t < cover.leg.start) return null;
     const s = legPos(cover.leg, t);
+    // 베이스에 자리를 잡으면 포구 자세로 기다리다가, 송구가 닿은 뒤에는 태그 자세로 남는다
+    const arrived = !s.moving;
+    const throwIn = field.throws.find((th) => dist2d(th.to, cover.leg.to) < 1.2);
+    // 병살: 받아서 곧바로 다음 베이스로 던진다
+    const relayOut = field.throws.find((th) => dist2d(th.from, cover.leg.to) < 1.2);
+    const relaying = arrived
+      ? throwPhase(cover.leg.to, relayOut, throwIn ? throwIn.end : cover.leg.end, t)
+      : null;
+    if (relaying) {
+      return { pos: s.pos, yaw: relaying.yaw, pose: 'THROWING', cycle: relaying.k, intensity: 1 };
+    }
+    const tagging = arrived && !!throwIn && t > throwIn.end;
     return {
       pos: s.pos,
-      yaw: s.moving ? facing(cover.leg.from, cover.leg.to) : facing(cover.leg.to, cover.look),
-      pose: s.moving ? 'RUNNING' : 'CATCHING',
-      cycle: (s.travelled / 2.2) % 1,
+      yaw: arrived ? facing(cover.leg.to, cover.look) : facing(cover.leg.from, cover.leg.to),
+      pose: arrived ? (tagging ? 'TAG' : 'CATCHING') : 'RUNNING',
+      cycle: (s.travelled / RUN_STRIDE) % 1,
       intensity: 0.95,
     };
   }
@@ -980,6 +1162,19 @@ export function sampleFielder(
   const first = c.legs[0];
   if (t < first.start) return null;
 
+  // 공을 잡은 뒤의 송구. 릴리스 순간이 공이 떠나는 시각과 겹치도록 앞뒤로 걸친다.
+  const th = field.throws[0];
+  const thrown = throwPhase(c.legs[0].to, th, c.secure, t);
+  if (thrown) {
+    return {
+      pos: c.legs[0].to,
+      yaw: thrown.yaw,
+      pose: 'THROWING',
+      cycle: thrown.k,
+      intensity: 1,
+    };
+  }
+
   // 공을 들고 베이스로 가는 두 번째 구간
   const carry = c.legs[1];
   if (carry && t >= carry.start) {
@@ -987,8 +1182,8 @@ export function sampleFielder(
     return {
       pos: s.pos,
       yaw: facing(carry.from, carry.to),
-      pose: s.moving ? 'RUNNING' : 'FIELDING',
-      cycle: (s.travelled / 2.2) % 1,
+      pose: s.moving ? 'RUNNING' : 'TAG',
+      cycle: (s.travelled / RUN_STRIDE) % 1,
       intensity: 1,
     };
   }
@@ -997,12 +1192,27 @@ export function sampleFielder(
   // 도달 직전/직후에는 포구 자세
   const atBall = t >= first.end - 0.18;
   const waiting = !s.moving || atBall;
+  // 아슬아슬하게 닿는 타구는 몸을 던지거나 뛰어오른다
+  // 도약 구간: 도달 직전에 시작해 착지까지 이어진다. 그 뒤에는 평소 자세로 돌아간다
+  // (끝을 안 주면 한 번 뛰어든 야수가 플레이 내내 엎드려 있다).
+  const span = c.dive ? 0.42 : 0.34;
+  const effort = c.dive ? 'DIVING' : c.jump ? 'JUMP' : null;
+  const effortFrom = first.end - span;
+  if (effort && t >= effortFrom && t < effortFrom + span * 1.9) {
+    return {
+      pos: s.pos,
+      yaw: facing(first.from, first.to),
+      pose: effort,
+      cycle: clamp((t - effortFrom) / (span * 1.9), 0, 1),
+      intensity: 1,
+    };
+  }
   return {
     pos: s.pos,
     // 자리를 잡은 뒤에는 달려온 방향이 아니라 공이 오는 쪽(홈)을 본다
     yaw: waiting ? facing(s.pos, HOME) : facing(first.from, first.to),
     pose: waiting ? (c.caught ? 'CATCHING' : 'FIELDING') : 'RUNNING',
-    cycle: (s.travelled / 2.2) % 1,
+    cycle: (s.travelled / RUN_STRIDE) % 1,
     intensity: 1,
   };
 }
@@ -1032,17 +1242,7 @@ export function sampleBallInPlay(tl: PlayTimeline | null, t: number): Vec3 | nul
       if (i > 0) return { x: th.from.x, y: 1.1, z: th.from.z };
       break; // 첫 송구 전이면 타구를 잡은 야수가 들고 있다
     }
-    if (t <= th.end) {
-      const u = clamp((t - th.start) / Math.max(0.01, th.end - th.start), 0, 1);
-      const d = dist2d(th.from, th.to);
-      // 송구는 살짝 포물선을 그린다
-      const lift = Math.min(2.6, 0.6 + d * 0.045);
-      return {
-        x: th.from.x + (th.to.x - th.from.x) * u,
-        y: 1.4 + lift * 4 * u * (1 - u) - 0.2 * u,
-        z: th.from.z + (th.to.z - th.from.z) * u,
-      };
-    }
+    if (t <= th.end) return throwPoint(th, t);
     // 이 송구는 끝났다. 다음 송구가 없으면 베이스 위에 남는다.
     if (i === field.throws.length - 1) return { x: th.to.x, y: 1.1, z: th.to.z };
   }
@@ -1059,7 +1259,7 @@ export function sampleBallInPlay(tl: PlayTimeline | null, t: number): Vec3 | nul
 // 샘플링
 // ---------------------------------------------------------------------------
 
-export type RunnerState = 'IDLE' | 'RUNNING' | 'SLIDING' | 'CELEBRATE';
+export type RunnerState = 'IDLE' | 'RUNNING' | 'SLIDING' | 'SLIDING_HEAD' | 'CELEBRATE';
 
 export interface RunnerSample {
   pos: Vec3;
@@ -1072,6 +1272,10 @@ export interface RunnerSample {
   /** 슬라이딩 진행도 0~1 */
   slideT: number;
   visible: boolean;
+  /** 앞으로 기운 정도(rad). 출발 가속에서 커진다. */
+  lean: number;
+  /** 베이스를 도는 곡선 안쪽으로 기운 정도(rad) */
+  bank: number;
 }
 
 /** 베이스를 돌아 나가는 바깥쪽 부풀림 (m) */
@@ -1085,6 +1289,30 @@ function legPoints(leg: RunLeg, batsLeft: boolean): [Vec3, Vec3] {
   const a = leg.from < 0 ? bagPoint(-1, batsLeft) : bagPoint(leg.from);
   const b = leg.stop ? baseStation(leg.to) : bagPoint(leg.to);
   return [a, b];
+}
+
+const easeOutQuad = (x: number) => 1 - (1 - x) * (1 - x);
+
+/**
+ * 곡선 주루의 기울기 (rad).
+ *
+ * 원심력을 몸으로 버티는 각도 = atan(v^2 / (g * r)). 곡률 반경 r은 2차 베지어의
+ * 1·2계 도함수에서 얻는다. 실제 물리를 쓰면 "빠르게 도는 주자일수록 더 눕는다"가
+ * 저절로 나온다 — 상수로 넣으면 트로트와 전력질주가 같은 각도로 돈다.
+ */
+function bankOf(a: Vec3, b: Vec3, ctrl: Vec3, u: number, speed: number): number {
+  // 2차 베지어: B'(u) = 2(1-u)(P1-P0) + 2u(P2-P1), B''(u) = 2(P0 - 2P1 + P2)
+  const dx = 2 * (1 - u) * (ctrl.x - a.x) + 2 * u * (b.x - ctrl.x);
+  const dz = 2 * (1 - u) * (ctrl.z - a.z) + 2 * u * (b.z - ctrl.z);
+  const ddx = 2 * (a.x - 2 * ctrl.x + b.x);
+  const ddz = 2 * (a.z - 2 * ctrl.z + b.z);
+  const sp = Math.hypot(dx, dz);
+  if (sp < 1e-4) return 0;
+  const cross = dx * ddz - dz * ddx;
+  const curv = cross / (sp * sp * sp); // 부호가 도는 방향을 알려 준다
+  const lat = speed * speed * curv;
+  // 사람이 실제로 낼 수 있는 기울기까지만 (30도)
+  return clamp(Math.atan2(lat, GRAVITY), -0.52, 0.52);
 }
 
 function quad(a: Vec3, b: Vec3, ctrl: Vec3, u: number): Vec3 {
@@ -1104,6 +1332,8 @@ const HIDDEN: RunnerSample = {
   intensity: 0,
   slideT: 0,
   visible: false,
+  lean: 0,
+  bank: 0,
 };
 
 function still(base: number): RunnerSample {
@@ -1115,7 +1345,19 @@ function still(base: number): RunnerSample {
     intensity: 0,
     slideT: 0,
     visible: true,
+    lean: 0,
+    bank: 0,
   };
+}
+
+/**
+ * 슬라이딩 방향. 2·3루는 헤드퍼스트, 홈과 1루는 발부터.
+ *
+ * 실제로도 그렇게 갈린다 — 홈은 포수와 부딪히고 1루는 베이스를 밟고 지나가면 되므로
+ * 발부터 들어간다. 전부 같은 슬라이딩이면 어느 베이스든 같은 그림이 된다.
+ */
+function slideStateFor(base: number): RunnerState {
+  return base === 1 || base === 2 ? 'SLIDING_HEAD' : 'SLIDING';
 }
 
 /** 시각 t에서 주자의 위치/자세 */
@@ -1156,13 +1398,15 @@ export function sampleRunner(anim: RunnerAnim, t: number): RunnerSample {
         intensity: anim.trot ? 0.45 : 0.8,
         slideT: 0,
         visible: after < 2.2,
+        lean: 0,
+        bank: 0,
       };
     }
     if (anim.out) {
       const tail = tailPosition(anim, last);
       // 슬라이딩(또는 정지) 자세를 잠깐 유지했다가 사라진다
       if (anim.slide && after < 0.8) {
-        return { ...tail, state: 'SLIDING', slideT: clamp(after / 0.8, 0, 1) };
+        return { ...tail, state: slideStateFor(last.to), slideT: clamp(after / 0.8, 0, 1) };
       }
       return { ...tail, visible: after < 1.6 };
     }
@@ -1170,7 +1414,7 @@ export function sampleRunner(anim: RunnerAnim, t: number): RunnerSample {
     if (anim.slide && after < 0.6) {
       return {
         ...tailPosition(anim, last),
-        state: 'SLIDING',
+        state: slideStateFor(last.to),
         slideT: clamp(after / 0.6, 0, 1),
         cycle: 0,
         intensity: 0,
@@ -1200,13 +1444,19 @@ export function sampleRunner(anim: RunnerAnim, t: number): RunnerSample {
   // 마지막 구간 끝에서 슬라이딩
   const slidePhase = leg.stop && anim.slide ? clamp((u - 0.86) / 0.14, 0, 1) : 0;
   const speed = segLen / Math.max(0.01, leg.end - leg.start); // m/s
+  // 출발 직후에는 몸을 앞으로 눕히고, 베이스를 돌 때는 곡선 안쪽으로 기운다.
+  // 등속으로 곧게 선 채 미끄러지듯 도는 게 "가짜"로 보이는 큰 이유였다.
+  const lean = (1 - easeOutQuad(clamp(u / 0.22, 0, 1))) * 0.34 * clamp(speed / 7, 0, 1);
+  const bank = leg.stop ? 0 : bankOf(a, b, ctrl, u, speed);
   return {
     pos,
     yaw,
-    state: slidePhase > 0 ? 'SLIDING' : 'RUNNING',
+    state: slidePhase > 0 ? slideStateFor(leg.to) : 'RUNNING',
     cycle: (dist / STRIDE) % 1,
     intensity: clamp((speed - 3.2) / 4.2, 0.35, 1.15),
     slideT: slidePhase,
+    lean,
+    bank,
     visible: true,
   };
 }
@@ -1231,6 +1481,8 @@ function tailPosition(anim: RunnerAnim, last: RunLeg): RunnerSample {
     intensity: 0,
     slideT: 1,
     visible: true,
+    lean: 0,
+    bank: 0,
   };
 }
 

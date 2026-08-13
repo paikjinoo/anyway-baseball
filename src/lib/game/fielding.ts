@@ -1,7 +1,7 @@
 import { Rng, clamp, lerp, norm } from './rng';
 import { BASE_COORDS, DEFENSE_SPOTS, GLOVE_DEFS, MOUND_DISTANCE, fenceDistance } from './constants';
 import type { BattedBall, FieldPlay, Player, Position, Vec3 } from './types';
-import { effSpeed } from './batting';
+import { effSpeed, isFoulBall } from './batting';
 
 const INFIELD: Position[] = ['P', 'C', '1B', '2B', '3B', 'SS'];
 const OUTFIELD: Position[] = ['LF', 'CF', 'RF'];
@@ -115,7 +115,7 @@ export function resolveFielding(
   runnersOn: boolean[],
 ): FieldPlay {
   const theta = Math.atan2(bb.landing.x, bb.landing.z);
-  const foul = Math.abs(bb.sprayAngle) > 45;
+  const foul = isFoulBall(bb);
 
   const base: FieldPlay = {
     primary: 'CF',

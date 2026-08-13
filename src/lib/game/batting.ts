@@ -8,7 +8,7 @@ import type {
   SwingCommand,
   Vec3,
 } from './types';
-import { GRAVITY, DRAG_K, LIFT_K, FENCE_HEIGHT, fenceDistance } from './constants';
+import { GRAVITY, DRAG_K, MAGNUS_K, SIDESPIN_K, FENCE_HEIGHT, fenceDistance } from './constants';
 
 // ---------------------------------------------------------------------------
 // 스윙 판정
@@ -271,7 +271,11 @@ export function makeBattedBall(
   // 아래 두 상수는 최종 발사각 분포를 MLB 실측 N(11.5도, 27.7도)에 맞춘 값이다.
   // 좁히면 8~26도(라인드라이브) 구간에 타구가 몰려 BABIP이 .34까지 치솟고,
   // 팝업이 사라진다. 헤드리스 시뮬레이션의 "타구 종류 비중"으로 검증할 것.
-  let launch = 9 - vertOffset * 38 + rng.normal(0, 30);
+  //
+  // 기준값을 9에서 11로 올린 건 매그너스 도입의 대가다 — 당겨친 뜬공이 파울라인
+  // 쪽으로 휘면서 페어 뜬공이 줄어(gb 46 -> 49) 득점이 함께 빠졌다. 발사각을 조금
+  // 올려 페어 타구 구성을 원래대로 되돌린다.
+  let launch = 11 - vertOffset * 38 + rng.normal(0, 30);
   // 품질이 좋을수록 이상적 발사각으로 수렴하되, 너무 강하게 끌어당기면
   // 잘 맞은 타구가 전부 홈런 각도로 몰린다.
   // 이 수렴 계수가 홈런/뜬공 비율을 정한다 (MLB 13.5%). 타구속도와 비거리가
@@ -325,6 +329,7 @@ export function makeBattedBall(
     landing: flight.landing,
     landingVel: flight.landingVel,
     distance: flight.distance,
+    fairAngle: Math.round(flight.fairAngle * 10) / 10,
     kind,
     path: flight.path,
     overFence: flight.overFence,
@@ -343,6 +348,13 @@ export interface FlightResult {
   landingVel: Vec3;
   distance: number;
   path: Vec3[];
+  /**
+   * 실제로 날아간 방향 (도, sprayAngle과 같은 부호 규약).
+   *
+   * 매그너스로 타구가 휘기 때문에 **발사 방향과 착지 방향이 다르다.** 페어/파울은
+   * 공이 떨어진 자리로 정해지므로 이 값으로 판정해야 한다 (@see isFoulBall).
+   */
+  fairAngle: number;
   /** 펜스를 넘겼는지 */
   overFence: boolean;
   /** 펜스 맞고 튄 경우 */
@@ -358,6 +370,21 @@ export function simulateFlight(speedMps: number, launchDeg: number, sprayDeg: nu
   let vx = -horiz * Math.sin(sa);
   let vz = horiz * Math.cos(sa);
   let vy = speedMps * Math.sin(la);
+
+  // ---- 스핀 축 ------------------------------------------------------------
+  // 백스핀 축 = 수평 진행 방향에 수직인 수평축. (v_h x ŷ) 로 잡으면 그 축과 v의
+  // 외적이 위를 향한다(= 뜨는 힘).
+  // (v̂_h x ŷ) = (-v̂z, 0, v̂x). 이 축과 v의 외적이 +Y(위)를 향한다 = 백스핀 양력.
+  const hn = Math.hypot(vx, vz) || 1;
+  const bx = -(vz / hn);
+  const bz = vx / hn;
+  // 사이드스핀: 파울라인 쪽으로 휘도록 축을 수직으로 기울인다.
+  // sprayDeg가 음수(좌익)면 +Y 성분이 양수가 되어 힘이 +X(3루선)로 간다.
+  const side = -SIDESPIN_K * clamp(sprayDeg / 45, -1.6, 1.6);
+  const sn = Math.hypot(bx, side, bz) || 1;
+  const wx = bx / sn;
+  const wy = side / sn;
+  const wz = bz / sn;
 
   let x = 0;
   let y = 1.0; // 타격 지점 높이
@@ -376,11 +403,15 @@ export function simulateFlight(speedMps: number, launchDeg: number, sprayDeg: nu
   while (t < 12) {
     const v = Math.hypot(vx, vy, vz);
     const drag = DRAG_K * v;
-    const lift = LIFT_K * v * v;
+    // 매그너스 = k * |v| * (ŵ x v). 축이 서 있으면 위로, 기울면 옆으로 밀린다.
+    const mk = MAGNUS_K * v;
+    const mx = mk * (wy * vz - wz * vy);
+    const my = mk * (wz * vx - wx * vz);
+    const mz = mk * (wx * vy - wy * vx);
 
-    vx -= vx * drag * dt;
-    vz -= vz * drag * dt;
-    vy += (-GRAVITY + lift - vy * drag) * dt;
+    vx += (mx - vx * drag) * dt;
+    vz += (mz - vz * drag) * dt;
+    vy += (-GRAVITY + my - vy * drag) * dt;
 
     x += vx * dt;
     y += vy * dt;
@@ -417,9 +448,12 @@ export function simulateFlight(speedMps: number, launchDeg: number, sprayDeg: nu
   path.push({ x, y: Math.max(0, y), z });
 
   const landing = fencePoint ?? { x, y: Math.max(0, y), z };
+  // sprayAngle은 +가 우익, 월드 +X는 좌익이라 부호가 반대다
+  const fairAngle = (-Math.atan2(landing.x, landing.z) * 180) / Math.PI;
   return {
     hangTime: fencePoint ? fenceTime : t,
     landing,
+    fairAngle,
     landingVel: fenceVel ?? { x: vx, y: vy, z: vz },
     distance: Math.hypot(landing.x, landing.z),
     path,
@@ -431,6 +465,18 @@ export function simulateFlight(speedMps: number, launchDeg: number, sprayDeg: nu
 /** 파울 여부: 좌우 45도를 벗어나면 파울 */
 export function isFoul(sprayAngle: number): boolean {
   return Math.abs(sprayAngle) > 45;
+}
+
+/**
+ * 이 타구가 파울인가.
+ *
+ * **발사 방향이 아니라 착지 방향으로 판단한다.** 매그너스로 당겨친 타구가 파울라인
+ * 쪽으로 휘기 때문에, 발사 각도로만 보면 파울 지역에 떨어진 공을 페어로 처리하게 된다
+ * (그 상태에서는 담장 판정만 착지 기준이라 홈런이 통째로 사라졌다).
+ * fairAngle이 없는 옛 저장 데이터는 예전처럼 발사 각도를 쓴다.
+ */
+export function isFoulBall(bb: Pick<BattedBall, 'sprayAngle' | 'fairAngle'>): boolean {
+  return Math.abs(bb.fairAngle ?? bb.sprayAngle) > 45;
 }
 
 /** 타구 속도/각도로부터 사람이 읽는 설명 */

@@ -5,6 +5,10 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { Stadium } from './Stadium';
 import { PlayerModel, RELEASE_AT, type PoseKind, type UniformSpec } from './PlayerModel';
+import { useQuality } from './quality';
+import { BALL_GEO, backspinAxis, createBallMaterial, pitchSpinAxis, spinRateFor } from './ball';
+import { Particles, puff } from './Particles';
+import { Officials, OnDeck } from './Officials';
 import {
   BALL_RADIUS,
   DEFENSE_SPOTS,
@@ -44,7 +48,7 @@ import {
   WINDUP_MS,
 } from '@/lib/store/matchStore';
 import { useAppStore } from '@/lib/store/appStore';
-import { currentBatter, currentPitcher, defenseTeam, offense } from '@/lib/game/engine';
+import { currentBatter, currentPitcher, defenseTeam, offense, onDeckBatter } from '@/lib/game/engine';
 import { effectiveBatSide } from '@/lib/game/batting';
 import type { GameState, Player, Position, Vec3 } from '@/lib/game/types';
 
@@ -161,10 +165,15 @@ function Runners() {
   const phase = useMatchStore((s) => s.phase);
   const state = useMatchStore((s) => s.state);
   useFrameTick((s) => s.phase === 'RESULT' && !!s.timeline?.runners.length);
+  // 슬라이딩 먼지는 플레이당 주자별로 딱 한 번만 터뜨린다
+  const slid = useRef({ at: 0, ids: new Set<string>() });
 
   const s = useMatchStore.getState();
   const scene = sceneState(s);
   if (!scene || !state) return null;
+  if (slid.current.at !== s.resultStartAt) {
+    slid.current = { at: s.resultStartAt, ids: new Set() };
+  }
 
   const off = offense(scene);
   const uni = uniformOf(off);
@@ -179,25 +188,28 @@ function Runners() {
       drawn.add(anim.playerId);
       const smp = sampleRunner(anim, t);
       if (!smp.visible) continue;
-      const pose: PoseKind =
-        smp.state === 'RUNNING'
-          ? 'RUNNING'
-          : smp.state === 'SLIDING'
-            ? 'SLIDING'
-            : smp.state === 'CELEBRATE'
-              ? 'CELEBRATE'
-              : 'IDLE';
+      // RunnerState는 PoseKind의 부분집합이라 그대로 넘긴다
+      const sliding = smp.state === 'SLIDING' || smp.state === 'SLIDING_HEAD';
+      // 베이스는 전부 내야 흙이라 슬라이딩에는 흙먼지가 인다
+      if (sliding && !slid.current.ids.has(anim.playerId)) {
+        slid.current.ids.add(anim.playerId);
+        puff('DIRT', smp.pos.x, 0.03, smp.pos.z, 18, 1.15, {
+          x: -Math.sin(smp.yaw),
+          z: -Math.cos(smp.yaw),
+        });
+      }
       nodes.push(
         <PlayerModel
           key={`r-${anim.playerId}`}
           player={p}
           uniform={uni}
-          pose={pose}
+          pose={smp.state as PoseKind}
           headwear="HELMET"
-          animT={smp.state === 'SLIDING' ? smp.slideT : smp.cycle}
+          animT={sliding ? smp.slideT : smp.cycle}
           intensity={smp.intensity}
           position={[smp.pos.x, 0, smp.pos.z]}
           rotationY={smp.yaw}
+          tilt={sliding ? undefined : [smp.lean, smp.bank]}
         />,
       );
     }
@@ -346,13 +358,19 @@ const TRAIL_MIN_HEIGHT = 1.1;
 
 function Ball() {
   const ref = useRef<THREE.Mesh>(null);
-  const ballMat = useRef<THREE.MeshStandardMaterial>(null);
+  const ballMat = useMemo(() => createBallMaterial(), []);
   const trailRef = useRef<THREE.Points>(null);
   const trailMat = useRef<THREE.PointsMaterial>(null);
   const trailPositions = useRef(new Float32Array(60 * 3));
   const trailCount = useRef(0);
+  /** 직전 프레임 위치. 회전축과 속도를 여기서 얻는다. */
+  const prev = useRef(new THREE.Vector3());
+  const hadPos = useRef(false);
+  const vel = useRef(new THREE.Vector3());
+  /** 지면에 처음 닿는 순간에만 먼지를 한 번 터뜨린다 */
+  const puffedAt = useRef(0);
 
-  useFrame(() => {
+  useFrame((_, delta) => {
     const s = useMatchStore.getState();
     const mesh = ref.current;
     if (!mesh) return;
@@ -362,10 +380,43 @@ function Ball() {
       mesh.visible = false;
       if (trailRef.current) trailRef.current.visible = false;
       trailCount.current = 0;
+      hadPos.current = false;
       return;
     }
     mesh.visible = true;
     mesh.position.set(pos.x, pos.y, pos.z);
+
+    // --- 회전 -------------------------------------------------------------
+    // 실제 회전수(2200rpm)는 60fps에서 스트로보가 되므로 눈이 읽을 수 있는 속도로 돌린다.
+    const dt = Math.max(1e-3, Math.min(delta, 0.05));
+    if (hadPos.current) {
+      vel.current.set(pos.x, pos.y, pos.z).sub(prev.current).divideScalar(dt);
+      const speed = vel.current.length();
+      if (speed > 0.4) {
+        const axis =
+          s.phase === 'FLIGHT' && s.trajectory
+            ? pitchSpinAxis(s.trajectory)
+            : backspinAxis(vel.current);
+        mesh.rotateOnWorldAxis(axis, spinRateFor(speed) * dt);
+      }
+      // 낙구 순간의 흙/잔디 먼지. 노면은 내야 흙 반경(29m)으로 가른다.
+      if (
+        s.phase === 'RESULT' &&
+        prev.current.y > 0.14 &&
+        pos.y <= 0.14 &&
+        s.resultStartAt !== puffedAt.current
+      ) {
+        puffedAt.current = s.resultStartAt;
+        const dirt = Math.hypot(pos.x, pos.z) < 29;
+        const h = Math.hypot(vel.current.x, vel.current.z) || 1;
+        puff(dirt ? 'DIRT' : 'GRASS', pos.x, 0.02, pos.z, dirt ? 14 : 10, clamp(speed / 22, 0.4, 1.6), {
+          x: vel.current.x / h,
+          z: vel.current.z / h,
+        });
+      }
+    }
+    prev.current.set(pos.x, pos.y, pos.z);
+    hadPos.current = true;
 
     // 투구 중에는 공을 무엇보다 앞에 그린다.
     //
@@ -375,7 +426,7 @@ function Ball() {
     // 지나는 마지막 순간에 사라져 버렸다. 어차피 공은 포수보다 앞에 있으므로
     // 깊이 검사를 끄면 그 구간만 되살아나고 다른 장면은 그대로다.
     // (타구 연출에서는 야수 뒤로 지나가는 공도 있으므로 원래대로 되돌린다)
-    if (ballMat.current) ballMat.current.depthTest = s.phase !== 'FLIGHT';
+    ballMat.depthTest = s.phase !== 'FLIGHT';
     mesh.renderOrder = s.phase === 'FLIGHT' ? 10 : 0;
 
     // 궤적 잔상
@@ -410,16 +461,7 @@ function Ball() {
 
   return (
     <>
-      <mesh ref={ref} castShadow>
-        <sphereGeometry args={[0.055, 12, 10]} />
-        <meshStandardMaterial
-          ref={ballMat}
-          color="#ffffff"
-          emissive="#ffffff"
-          emissiveIntensity={0.18}
-          roughness={0.5}
-        />
-      </mesh>
+      <mesh ref={ref} geometry={BALL_GEO} material={ballMat} castShadow />
       <points ref={trailRef} geometry={trailGeo}>
         <pointsMaterial
           ref={trailMat}
@@ -464,8 +506,11 @@ function ballPosition(s: Store): Vec3 | null {
   if (s.phase === 'RESULT' && s.lastResult) {
     const r = s.lastResult;
     const elapsed = now - s.resultStartAt;
-    // 판정이 공보다 먼저 확정되는 구간(CPU 선행 스윙 등)에서는 투구 궤적을 계속 그린다
+    // 판정이 공보다 먼저 확정되는 구간(CPU 선행 스윙 등)에서는 투구 궤적을 계속 그린다.
+    // 단 도루는 포수가 받은 뒤 송구로 이어지므로 타임라인을 먼저 본다.
     if (elapsed < 0 || !r.battedBall || !r.contact) {
+      const played = sampleBallInPlay(s.timeline, (elapsed / 1000) * s.playRate);
+      if (played) return played;
       const t = (now - s.pitchStartAt) / s.displayFlightMs;
       return s.trajectory && t >= 0 ? pitchDisplayPos(s.trajectory, t) : null;
     }
@@ -877,13 +922,14 @@ export function GameScene({ cameraMode = 'DRAMATIC' }: { cameraMode?: CameraMode
   // 공수 교대 중에는 존을 그리지 않는다. 스카이뷰에서는 홈플레이트 위에 뜬
   // 노란 사각형이 그라운드를 가로지르는 선처럼 보인다.
   const inningBreak = useMatchStore((s) => s.phase === 'INNING_BREAK');
+  const q = useQuality();
 
   if (!state) return null;
 
   return (
     <Canvas
       shadows
-      dpr={[1, 1.8]}
+      dpr={[1, q.maxDpr]}
       camera={{ fov: 42, near: 0.1, far: 900, position: [0, 2.2, -6] }}
       // preserveDrawingBuffer: 캔버스를 이미지로 캡처할 수 있게 한다.
       // (끄면 toDataURL / 자동화 스크린샷이 검은 화면으로 나온다)
@@ -898,14 +944,16 @@ export function GameScene({ cameraMode = 'DRAMATIC' }: { cameraMode?: CameraMode
       <fog attach="fog" args={['#16304d', 180, 430]} />
 
       {/* 조명: 키(야간 조명탑) + 하늘/잔디 반사 + 반대편 림라이트.
-          합이 1을 크게 넘으면 얼굴이 하얗게 날아가므로 총량을 눌러 잡는다. */}
-      <hemisphereLight args={['#cfe4ff', '#31491f', 0.62]} />
+          합이 1을 크게 넘으면 얼굴이 하얗게 날아가므로 총량을 눌러 잡는다.
+          그림자 맵 크기는 생성 시점에만 반영되므로 품질이 바뀌면 조명을 새로 만든다. */}
+      <hemisphereLight args={['#cfe4ff', '#31491f', 0.6]} />
       <directionalLight
+        key={`sun-${q.sunShadow ? q.shadowMapSize : 0}`}
         position={[45, 70, 20]}
         intensity={1.05}
-        castShadow
-        shadow-mapSize-width={2048}
-        shadow-mapSize-height={2048}
+        castShadow={q.sunShadow}
+        shadow-mapSize-width={q.shadowMapSize}
+        shadow-mapSize-height={q.shadowMapSize}
         shadow-bias={-0.0006}
         shadow-normalBias={0.02}
         shadow-camera-left={-70}
@@ -914,12 +962,14 @@ export function GameScene({ cameraMode = 'DRAMATIC' }: { cameraMode?: CameraMode
         shadow-camera-bottom={-70}
         shadow-camera-far={220}
       />
-      <directionalLight position={[-40, 45, 90]} intensity={0.34} color="#bcd8ff" />
+      {/* 외야 쪽 역광. 선수 어깨·모자 위에 밝은 테를 남겨 배경에서 떼어 놓는다. */}
+      <directionalLight position={[-40, 45, 90]} intensity={0.42} color="#bcd8ff" />
       <directionalLight position={[10, 20, -60]} intensity={0.22} color="#ffe6bd" />
 
       <Stadium />
       <SceneActors />
       <Ball />
+      <Particles />
       {!inningBreak && <StrikeZone showAim={playerBatting} />}
       {!inningBreak && <PitchPreview />}
 
@@ -944,6 +994,9 @@ function SceneActors() {
       {!relay && <Runners />}
       <Batter />
       <Pitcher />
+      {/* 릴레이(타격 대결)는 수비가 없는 모드라 심판도 두지 않는다 */}
+      {!relay && <Officials />}
+      {!relay && <OnDeck player={onDeckBatter(scene)} uniform={uniformOf(offense(scene))} />}
     </>
   );
 }

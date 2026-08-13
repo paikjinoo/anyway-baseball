@@ -20,11 +20,17 @@ import type { BatSide, PitchCommand, PitchTrajectory, Player, Vec3 } from './typ
  * RELEASE_AT 시점에 손을 두는 위치**를 잰 것이다. 실제 스케일을 쓰면 공이
  * 모델 머리 위 40cm 지점에서 튀어나와 손과 따로 논다. 스트라이크존(0.45~1.06m)도
  * 같은 이유로 모델 스케일에 맞춰져 있다.
+ *
+ * **투구 포즈를 고치면 이 표를 다시 재야 한다.** 손이 움직였는데 표가 그대로면
+ * 공이 손에서 떨어져 나온다. 재는 법은 `poses.jointPositions` + `poses.torsoToModel`로
+ * k=RELEASE_AT일 때 던지는 팔(armL) 손의 월드 좌표를 뽑는 것이다.
+ * 아래 값은 그렇게 측정했다 (접지 모델을 실제 신발 밑판으로 바꾸면서 모델이
+ * 2cm 올라가 높이가 그만큼 커졌다).
  */
 export function releasePoint(pitcher: Player): Vec3 {
   const side = pitcher.throws === 'L' ? -1 : 1;
   // form: 0 오버스로 / 1 스리쿼터 / 2 사이드암 / 3 언더핸드 / 4 토네이도
-  const heights = [1.38, 1.39, 1.31, 1.14, 1.39];
+  const heights = [1.4, 1.4, 1.33, 1.16, 1.4];
   const offsets = [0.37, 0.42, 0.48, 0.46, 0.38];
   // 스트라이드로 마운드보다 앞에서 놓는 거리 (익스텐션)
   const extension = [0.58, 0.51, 0.4, 0.32, 0.57];

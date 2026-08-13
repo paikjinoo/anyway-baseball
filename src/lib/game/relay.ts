@@ -1,4 +1,4 @@
-import { effectiveBatSide, isFoul, judgeSwing, makeBattedBall } from './batting';
+import { effectiveBatSide, isFoulBall, judgeSwing, makeBattedBall } from './batting';
 import { PITCH_DEFS } from './constants';
 import { emptySeason, hitterScore, pitcherScore } from './generator';
 import { computePitch, describeLocation } from './pitching';
@@ -473,7 +473,7 @@ export function resolveRelayPitch(
     judged.timingErr,
   );
   result.battedBall = battedBall;
-  if (isFoul(battedBall.sprayAngle)) {
+  if (isFoulBall(battedBall)) {
     if (state.strikes < 2) state.strikes += 1;
     result.kind = 'FOUL';
     result.description = `${batter.name}, 파울!`;

@@ -5,6 +5,7 @@ import { useAppStore } from '@/lib/store/appStore';
 import { RuleSettings } from '@/components/settings/RuleSettings';
 import { DataBackup } from '@/components/settings/DataBackup';
 import { NICKNAME_MAX, normalizeNickname } from '@/lib/firebase/store';
+import { QUALITY_LABELS } from '@/components/three/quality';
 import {
   playBatCrack,
   playHomeRunCelebration,
@@ -75,6 +76,29 @@ export default function SettingsPage() {
 
       <section className="panel p-5">
         <h2 className="mb-4 font-bold">연출</h2>
+
+        <div className="mb-5">
+          <label className="field-label">그래픽 품질</label>
+          <div className="grid grid-cols-3 gap-2">
+            {QUALITY_LABELS.map((q) => (
+              <button
+                key={q.id}
+                onClick={() => update({ graphicsQuality: q.id })}
+                className={`rounded-xl border-2 px-3 py-3 font-semibold transition ${
+                  settings.graphicsQuality === q.id
+                    ? 'border-lime-400 bg-lime-500/15 text-lime-200'
+                    : 'border-white/10 bg-white/[0.03] hover:bg-white/[0.07]'
+                }`}
+              >
+                {q.ko}
+              </button>
+            ))}
+          </div>
+          <p className="mt-1.5 text-[11px] text-slate-500">
+            {QUALITY_LABELS.find((q) => q.id === settings.graphicsQuality)?.desc}
+          </p>
+        </div>
+
         <label className="flex items-center justify-between gap-3">
           <span>
             <span className="block text-sm font-semibold">카메라 흔들림</span>

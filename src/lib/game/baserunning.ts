@@ -217,7 +217,14 @@ export function resolveSteals(
       // 순수 경주로만 보면 발 빠른 주자는 늘 성공하는데, 실제 홈 스틸의 성패는 기습이
       // 통했는지(투수가 와인드업에 들어갔는지, 주자를 봤는지)에 달려 있다.
       const safe = runTime < defTime && rng.chance(0.35 + norm(effSpeed(p)) * 0.25);
-      results.push({ fromBase: from, playerId: runner.playerId, safe });
+      results.push({
+        fromBase: from,
+        playerId: runner.playerId,
+        safe,
+        runTime,
+        defTime,
+        catchTime: def.delivery + def.flight,
+      });
       continue;
     }
 
@@ -226,7 +233,14 @@ export function resolveSteals(
     const throwAdj = from === 1 ? -STEAL3_THROW_GAIN : 0;
     const defTime = def.total + throwAdj;
     const safe = runTime < defTime;
-    results.push({ fromBase: from, playerId: runner.playerId, safe });
+    results.push({
+      fromBase: from,
+      playerId: runner.playerId,
+      safe,
+      runTime,
+      defTime,
+      catchTime: def.delivery + def.flight,
+    });
   }
 
   return results;

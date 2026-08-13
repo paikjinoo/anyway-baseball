@@ -342,7 +342,17 @@ export interface GameSettings {
   /** 투구/타구 연출 속도 배율. 1.0이 기본. 낮을수록 느리다(= 쉬움). */
   pitchSpeedScale: number;
   cameraShake: boolean;
+  /**
+   * 그래픽 품질. 외곽선·접지 그림자·파티클·보조 인물의 총량을 정한다.
+   *
+   * **경기 규칙이 아니라 이 기기의 표시 설정이다** — MatchRules에 넣지 않으므로
+   * 온라인 대전에서 상대의 품질이 내 화면을 바꾸지 않는다.
+   * @see components/three/quality.ts
+   */
+  graphicsQuality: GraphicsQuality;
 }
+
+export type GraphicsQuality = 'HIGH' | 'MEDIUM' | 'LOW';
 
 export const DEFAULT_SETTINGS: GameSettings = {
   sfxEnabled: true,
@@ -358,6 +368,7 @@ export const DEFAULT_SETTINGS: GameSettings = {
   useDH: true,
   pitchSpeedScale: 0.55,
   cameraShake: true,
+  graphicsQuality: 'HIGH',
 };
 
 /**
@@ -580,6 +591,11 @@ export interface BattedBall {
   /** 비거리 (m) */
   distance: number;
   kind: 'GROUNDER' | 'LINE_DRIVE' | 'FLY' | 'POPUP' | 'BUNT';
+  /**
+   * 실제로 날아간 방향 (도). 매그너스로 휜 결과라 sprayAngle(발사 방향)과 다르다.
+   * 페어/파울은 이 값으로 가른다. 옛 저장 데이터에는 없다.
+   */
+  fairAngle?: number;
   /** 궤적 샘플. 연출용. */
   path: Vec3[];
   /** 담장을 넘어갔는가 (홈런) */
@@ -712,6 +728,20 @@ export interface StealResult {
   fromBase: number;
   playerId: string;
   safe: boolean;
+  /**
+   * 연출용 타이밍 (초). **판정에는 쓰이지 않는다** — 판정이 이미 쓴 값을 화면이
+   * 같은 숫자로 재생할 수 있도록 내보내는 것뿐이다.
+   *
+   * 이게 없던 동안에는 도루에 수비 연출 자체가 없어서, 포수가 미동도 하지 않는데
+   * 주자만 뛰다가 아웃 판정이 났다.
+   *
+   * 선택 필드다 — 옛 저장 클립에는 없고, 없으면 연출만 생략된다.
+   */
+  runTime?: number;
+  /** 투구 + 포수 팝타임. 송구가 베이스에 닿는 시각. */
+  defTime?: number;
+  /** 포수가 공을 잡아 던지기 시작하는 시각 (= 투구 도달 시각) */
+  catchTime?: number;
 }
 
 // ---------------------------------------------------------------------------
