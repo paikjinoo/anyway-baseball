@@ -307,6 +307,14 @@ export interface Team {
   gold: number;
   inventory: Inventory;
   /**
+   * 경제 상태(골드·아이템·선수 성장)의 무결성 서명.
+   *
+   * 저장할 때 찍고 읽을 때 맞춰 본다 — 콘솔로 `gold`를 고쳐 넣는 조작을 잡는 표식이다
+   * (@see game/integrity). 선택 필드다 — 서명이 생기기 전에 저장된 팀도 그대로 읽혀야
+   * 하므로 TEAM_SCHEMA_VERSION을 올리지 않는다. 없으면 서명 이전 문서로 본다.
+   */
+  seal?: string;
+  /**
    * 지금 치르고 있는 시즌 번호. 시즌을 마감할 때마다 1씩 오른다.
    * 선택 필드이며 없으면 1로 읽는다.
    */

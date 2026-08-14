@@ -28,6 +28,7 @@ import {
   type SuspendedMatch,
 } from '../game/resume';
 import { ONLINE_DAILY_EXP_CAP, ONLINE_DAILY_GOLD_CAP } from '../game/onlineCap';
+import { CPU_OWNER_UID, checkTeamSeal, clampGoldGain, sealTeam } from '../game/integrity';
 
 /**
  * 팀 / 리그 / 설정 저장소.
@@ -46,6 +47,16 @@ const LS_TEAMS = 'ab:teams';
  * (@see exportSnapshot), 여기서 진짜로 삭제해 버리면 그 원칙이 무의미해진다.
  */
 const LS_LEGACY_TEAMS = 'ab:teams:legacy';
+/**
+ * 조작이 감지되어 골드를 되돌린 문서의 원본 선반. LS_LEGACY_TEAMS와 같은 이유로 둔다 —
+ * 판정이 틀렸을 때 되돌릴 수 있어야 한다.
+ */
+const LS_TAMPERED_TEAMS = 'ab:teams:tampered';
+/**
+ * 팀별로 이 기기가 마지막으로 서명해 저장한 시각. 서명 없는 문서를 언제까지 봐 줄지
+ * 정하는 표식이다 (@see game/integrity.SealContext).
+ */
+const LS_SEAL_ANCHOR = 'ab:sealed';
 const LS_LEAGUES = 'ab:leagues';
 const LS_SETTINGS = 'ab:settings';
 const LS_NICKNAME = 'ab:nickname';
@@ -132,26 +143,110 @@ export interface TeamLoadReport {
   migrated: number;
   /** 이번 로드에서 정리한 옛 팀 수. 사용자에게 한 번 알려 주고 끝낸다. */
   cleaned: number;
+  /** 서명이 맞지 않아 골드를 되돌린 팀의 이름. 사용자에게 왜 골드가 없어졌는지 설명한다. */
+  tampered: string[];
+}
+
+// ---------------------------------------------------------------------------
+// 서명 앵커
+// ---------------------------------------------------------------------------
+
+function sealAnchors(): Record<string, number> {
+  return lsRead<Record<string, number>>(LS_SEAL_ANCHOR, {});
+}
+
+/** 이 팀의 서명본을 이 기기가 저장한 적이 있는지 (@see game/integrity.SealContext) */
+function anchorOf(teamId: string): number | null {
+  const at = sealAnchors()[teamId];
+  return typeof at === 'number' ? at : null;
+}
+
+function noteSealed(teamId: string, at: number) {
+  const all = sealAnchors();
+  if (all[teamId] === at) return;
+  all[teamId] = at;
+  lsWrite(LS_SEAL_ANCHOR, all);
+}
+
+/**
+ * 앵커를 지운다. **팀을 지울 때 반드시 같이 지워야 한다** — 안 지우면 백업 가져오기가
+ * 막힌다. 서명 이전에 내보낸 백업에는 서명이 없는데, 앵커가 남아 있으면 그 정상 백업이
+ * 조작으로 판정된다.
+ */
+function forgetSealed(teamId: string) {
+  const all = sealAnchors();
+  if (!(teamId in all)) return;
+  delete all[teamId];
+  lsWrite(LS_SEAL_ANCHOR, all);
+}
+
+/** 조작 판정을 받은 원본을 선반에 옮긴다. 판정이 틀렸을 때 되돌릴 유일한 출처다. */
+function shelveTampered(id: string, raw: unknown) {
+  const shelf = lsRead<Record<string, unknown>>(LS_TAMPERED_TEAMS, {});
+  shelf[id] = raw;
+  lsWrite(LS_TAMPERED_TEAMS, shelf);
+}
+
+export interface TeamDocRead {
+  team: Team | null;
+  skipped: SkippedDoc | null;
+  migratedFrom: number | null;
+  /** 서명이 맞지 않아 골드를 0으로 되돌렸는가 */
+  tampered: boolean;
 }
 
 /**
  * 저장소에서 읽은 팀 문서를 쓸 수 있는 형태로 만든다.
  * **팀을 돌려주는 모든 경로가 여기를 지난다** — 반환 지점마다 흩어 놓으면 반드시 어딘가 빠진다.
  *
- * 1) 스키마 버전을 목표까지 끌어올리고 (@see game/migrate.migrateTeamDoc)
- * 2) 이중 집계로 부푼 스플릿을 걷어낸다 (@see game/season.repairTeam)
+ * 1) 서명을 맞춰 보고 (@see game/integrity.checkTeamSeal)
+ * 2) 스키마 버전을 목표까지 끌어올리고 (@see game/migrate.migrateTeamDoc)
+ * 3) 이중 집계로 부푼 스플릿을 걷어낸 뒤 (@see game/season.repairTeam)
+ * 4) 다시 서명한다.
+ *
+ * **마지막에 다시 서명하는 것이 핵심이다.** 2)와 3)이 문서를 바꾸므로, 그대로 캐시에
+ * 되쓰면 다음 로드에서 옛 서명과 어긋나 멀쩡한 팀이 조작으로 잡힌다.
+ *
+ * 조작이 감지돼도 **문서를 버리지 않는다.** 골드만 0으로 되돌리고 선수·기록은 그대로 둔다.
+ * 판정이 틀렸을 때 잃는 것을 최소로 하려는 것이고, 원본은 선반에 남는다.
  */
-function readTeamDoc(raw: unknown): { team: Team | null; skipped: SkippedDoc | null; migratedFrom: number | null } {
-  if (!raw) return { team: null, skipped: null, migratedFrom: null };
+function readTeamDoc(raw: unknown): TeamDocRead {
+  if (!raw) return { team: null, skipped: null, migratedFrom: null, tampered: false };
+
+  const id = (raw as Team).id;
+  const verdict = checkTeamSeal(raw, { anchoredAt: typeof id === 'string' ? anchorOf(id) : null });
+
   const out = migrateTeamDoc(raw);
   if (!out.ok) {
     return {
       team: null,
       skipped: { id: out.id, name: out.name, version: out.version, reason: out.reason },
       migratedFrom: null,
+      tampered: false,
     };
   }
-  return { team: repairTeam(out.team), skipped: null, migratedFrom: out.migratedFrom };
+
+  const repaired = repairTeam(out.team);
+  // CPU 팀은 지갑이 없어 검사도 서명도 하지 않는다. 리그 화면이 순위표를 그릴 때마다
+  // 팀마다 부르는 경로라(@see app/league/page.tsx) 헛수고를 덜어 두는 뜻도 있다.
+  if (repaired.ownerUid === CPU_OWNER_UID) {
+    return { team: repaired, skipped: null, migratedFrom: out.migratedFrom, tampered: false };
+  }
+
+  const tampered = verdict === 'TAMPERED';
+  if (tampered) {
+    shelveTampered(repaired.id, raw);
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn(`[integrity] 서명 불일치 — 골드를 되돌립니다 (${repaired.id})`);
+    }
+  }
+
+  return {
+    team: sealTeam(tampered ? { ...repaired, gold: 0 } : repaired),
+    skipped: null,
+    migratedFrom: out.migratedFrom,
+    tampered,
+  };
 }
 
 /** 팀 하나만 필요할 때. 못 읽으면 null이다. */
@@ -160,11 +255,24 @@ function readTeam(raw: unknown): Team | null {
 }
 
 export async function saveTeam(team: Team): Promise<void> {
-  const next = { ...team, updatedAt: Date.now() };
-  // 네트워크와 무관하게 로컬 저장을 먼저 완료한다.
   const all = lsRead<Record<string, Team>>(LS_TEAMS, {});
+
+  // 직전 저장본이 성한 문서일 때만 증가폭을 본다. 조작된 문서를 기준으로 삼으면 그 값이
+  // 정상의 기준이 되어 버리고, 백업 가져오기처럼 직전 문서가 아예 없는 경우는 상한이 없다
+  // (deleteTeam이 먼저 지우고 들어온다).
+  const prev = all[team.id];
+  const trusted =
+    prev && checkTeamSeal(prev, { anchoredAt: anchorOf(team.id) }) === 'OK' ? prev : null;
+  const gold = trusted ? clampGoldGain(trusted.gold, team.gold) : team.gold;
+  if (process.env.NODE_ENV !== 'production' && trusted && gold !== team.gold) {
+    console.warn(`[integrity] 한 번에 늘 수 없는 골드입니다 (${trusted.gold} → ${team.gold})`);
+  }
+
+  const next = sealTeam({ ...team, gold, updatedAt: Date.now() });
+  // 네트워크와 무관하게 로컬 저장을 먼저 완료한다.
   all[team.id] = next;
   lsWrite(LS_TEAMS, all);
+  noteSealed(next.id, next.updatedAt);
   const db = getDb();
   if (firebaseConfigured && db && !isGuestUid(team.ownerUid)) {
     syncRemote(() => setDoc(doc(db, 'teams', team.id), next), `팀 저장(${team.id})`);
@@ -236,13 +344,25 @@ export async function listTeamsReport(uid: string): Promise<TeamLoadReport> {
       const remoteIds = new Set(snap.docs.map((d) => d.id));
       const all = lsRead<Record<string, Team>>(LS_TEAMS, {});
       for (const t of teams) {
-        if (!all[t.id] || t.updatedAt >= all[t.id].updatedAt) all[t.id] = t;
+        // **조작된 캐시본은 원격을 절대 이기지 못한다.** 콘솔로 골드를 고치는 스니펫은
+        // updatedAt까지 지금 시각으로 새로 찍기 때문에, 시각만 비교하면 조작본이 언제나
+        // 이긴다. 서명이 깨진 문서는 시각을 보지 않고 원격 사본으로 되돌린다 —
+        // 로그인 사용자에게는 이 한 줄이 곧 자동 복구다.
+        const local = all[t.id];
+        const keepLocal =
+          local && checkTeamSeal(local, { anchoredAt: anchorOf(t.id) }) !== 'TAMPERED'
+            ? local.updatedAt > t.updatedAt
+            : false;
+        if (!keepLocal) all[t.id] = t;
       }
       const report = ownedTeams(all, uid);
       // 업그레이드된 문서는 캐시에 되쓴다. 다음 로드부터는 변환 비용이 들지 않는다.
+      // 서명도 이때 최신으로 갱신된다 (@see readTeamDoc).
       for (const t of report.teams) all[t.id] = t;
       const purged = purgeUnreadableTeams(all, report);
-      lsWrite(LS_TEAMS, all);
+      // 앵커는 **서명본이 실제로 디스크에 앉은 뒤에만** 남긴다. 용량이 꽉 차 저장이 실패했는데
+      // 앵커만 세우면, 다음 로드에서 서명 없는 캐시본이 통째로 조작 판정을 받는다.
+      if (lsWrite(LS_TEAMS, all)) anchorLoaded(report.teams);
       // 원격에도 남겨 두면 다음 로드에 그대로 다시 내려와 정리가 매번 반복된다.
       for (const id of purged) syncRemote(() => deleteDoc(doc(db, 'teams', id)), `옛 팀 정리(${id})`);
       // **updatedAt은 올리지 않는다.** listTeams의 LWW 병합이 왜곡된다 —
@@ -270,18 +390,29 @@ export async function listTeamsReport(uid: string): Promise<TeamLoadReport> {
   // 다음번 조회 성공 때 다시 걸려 그때 지워진다.
   const cached = lsRead<Record<string, Team>>(LS_TEAMS, {});
   const report = ownedTeams(cached, uid);
-  if (purgeUnreadableTeams(cached, report).length) lsWrite(LS_TEAMS, cached);
+  purgeUnreadableTeams(cached, report);
+  // 원격 경로와 달리 예전에는 정리할 게 있을 때만 되썼다. 지금은 **언제나** 되쓴다 —
+  // 읽으면서 갱신한 서명이 디스크에 앉아야 앵커를 세울 수 있고, 앵커가 서야 서명을 지우는
+  // 우회가 막힌다. 팀은 계정당 하나라 쓰기 비용도 무시할 만하다.
+  for (const t of report.teams) cached[t.id] = t;
+  if (lsWrite(LS_TEAMS, cached)) anchorLoaded(report.teams);
   return report;
 }
 
+/** 서명이 디스크에 앉은 팀에 "이 기기는 이 팀의 서명본을 봤다"를 남긴다 */
+function anchorLoaded(teams: Team[]) {
+  for (const t of teams) noteSealed(t.id, t.updatedAt);
+}
+
 function ownedTeams(all: Record<string, Team>, uid: string): TeamLoadReport {
-  const out: TeamLoadReport = { teams: [], skipped: [], migrated: 0, cleaned: 0 };
+  const out: TeamLoadReport = { teams: [], skipped: [], migrated: 0, cleaned: 0, tampered: [] };
   for (const raw of Object.values(all)) {
     if (raw?.ownerUid !== uid) continue;
     const r = readTeamDoc(raw);
     if (r.team) {
       out.teams.push(r.team);
       if (r.migratedFrom !== null) out.migrated += 1;
+      if (r.tampered) out.tampered.push(r.team.name);
     } else if (r.skipped) {
       out.skipped.push(r.skipped);
     }
@@ -326,6 +457,8 @@ export async function deleteTeam(teamId: string): Promise<void> {
   const owner = all[teamId]?.ownerUid;
   delete all[teamId];
   lsWrite(LS_TEAMS, all);
+  // 팀이 사라지면 서명 표식도 같이 사라져야 한다 (@see forgetSealed).
+  forgetSealed(teamId);
   const db = getDb();
   if (firebaseConfigured && db && !(owner && isGuestUid(owner))) {
     syncRemote(() => deleteDoc(doc(db, 'teams', teamId)), `팀 삭제(${teamId})`);
@@ -777,6 +910,8 @@ export interface ImportResult {
   /** 가져오는 도중 업그레이드된 팀 수 */
   migrated: number;
   skipped: SkippedDoc[];
+  /** 서명이 맞지 않아 골드를 되돌린 팀 이름. 백업 파일을 고쳐 넣은 경우다. */
+  tampered: string[];
 }
 
 /**
@@ -806,6 +941,7 @@ export async function importSnapshot(payload: BackupPayload, uid: string): Promi
     recordCount: 0,
     migrated: 0,
     skipped: [],
+    tampered: [],
   };
   for (const raw of payload.teams) {
     const r = readTeamDoc(raw);
@@ -815,6 +951,7 @@ export async function importSnapshot(payload: BackupPayload, uid: string): Promi
     }
     if (r.migratedFrom !== null) out.migrated += 1;
     if (r.team.ownerUid === uid) {
+      if (r.tampered) out.tampered.push(r.team.name);
       await saveTeam(r.team);
       out.teams.push(r.team);
     } else {

@@ -16,11 +16,32 @@ service cloud.firestore {
     }
 
     // ---- 팀 -----------------------------------------------------------
+    //
+    // 한 번의 쓰기로 골드가 늘 수 있는 상한. 정상 경로의 최댓값은 능력치초기화권의 구종
+    // 골드 환급(3만G 남짓)이고, 그다음이 최대 레벨 S 방출(18,880G)과 리그 우승(8,000G)이다.
+    //
+    // **이 게임에서 서버가 실제로 강제하는 규칙은 이것 하나뿐이다.** 판정이 전부
+    // 클라이언트에 있어 "이 골드를 정말 벌었는가"는 여기서 알 수 없고, 알 수 있는 것은
+    // "한 번에 이만큼 느는 일은 정상 플레이에 없다"뿐이다. 콘솔로 30만G를 넣고 새로고침하는
+    // 조작은 이 선에서 원격 문서까지 오염되는 것을 막는다 — 서명(src/lib/game/integrity.ts)이
+    // 로컬을 되돌리는 동안, 원격에는 애초에 그 값이 올라가지 못한다.
+    //
+    // 한계도 분명하다. 삭제 후 재생성은 이 검사를 지나지 않는다(create에는 비교할 이전 값이
+    // 없다). 백업 가져오기가 정확히 그 경로라 막을 수도 없다.
+    //
+    // **src/lib/game/integrity.MAX_GOLD_GAIN_PER_SAVE와 같은 값이어야 한다.**
+    function goldGainOk() {
+      return request.resource.data.gold is number
+        && request.resource.data.gold >= 0
+        && request.resource.data.gold <= resource.data.gold + 50000;
+    }
+
     match /teams/{teamId} {
       // 온라인 대전에서 상대 팀 정보를 봐야 하므로 읽기는 열어 둔다.
       allow read: if signedIn();
       allow create: if signedIn() && request.resource.data.ownerUid == request.auth.uid;
-      allow update, delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
+      allow update: if signedIn() && resource.data.ownerUid == request.auth.uid && goldGainOk();
+      allow delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
     }
 
     // ---- 리그 ---------------------------------------------------------

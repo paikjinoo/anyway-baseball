@@ -65,7 +65,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         if (!alive) return;
         setTeams(report.teams);
         setLeagues(leagues);
-        setDataIssues(report.skipped, report.cleaned);
+        setDataIssues(report.skipped, report.cleaned, report.tampered);
       } finally {
         if (alive) setDataReady(true);
       }

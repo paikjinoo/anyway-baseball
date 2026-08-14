@@ -31,6 +31,11 @@ interface AppState {
    * 즉 이 알림은 저절로 딱 한 번만 뜬다. 따로 "봤음" 표식을 둘 필요가 없다.
    */
   dataCleaned: number;
+  /**
+   * 서명이 맞지 않아 골드를 되돌린 팀 이름. dataCleaned와 같은 이유로 한 번만 뜬다 —
+   * 되돌린 문서에는 곧바로 새 서명이 찍히므로 다음 로드에는 비어 있다.
+   */
+  dataTampered: string[];
 
   setUser: (u: AppUser | null) => void;
   /** 감독 닉네임 변경. null이나 빈 문자열이면 계정 이름으로 되돌린다. */
@@ -48,7 +53,7 @@ interface AppState {
   removeLeague: (id: string) => void;
   updateSettings: (patch: Partial<GameSettings>) => void;
   hydrateSettings: () => void;
-  setDataIssues: (issues: SkippedDoc[], cleaned?: number) => void;
+  setDataIssues: (issues: SkippedDoc[], cleaned?: number, tampered?: string[]) => void;
 }
 
 const ACTIVE_KEY = 'ab:activeTeam';
@@ -63,8 +68,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   settings: DEFAULT_SETTINGS,
   dataIssues: [],
   dataCleaned: 0,
+  dataTampered: [],
 
-  setUser: (user) => set({ user, dataReady: false, dataIssues: [], dataCleaned: 0 }),
+  setUser: (user) =>
+    set({ user, dataReady: false, dataIssues: [], dataCleaned: 0, dataTampered: [] }),
 
   setNickname: (raw) => {
     const { user } = get();
@@ -142,7 +149,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { settings };
     }),
 
-  setDataIssues: (dataIssues, dataCleaned = 0) => set({ dataIssues, dataCleaned }),
+  setDataIssues: (dataIssues, dataCleaned = 0, dataTampered = []) =>
+    set({ dataIssues, dataCleaned, dataTampered }),
 
   hydrateSettings: () => {
     const settings = loadSettings();

@@ -11,6 +11,7 @@ import {
   retargetBackup,
   type BackupPayload,
 } from './backup';
+import { checkTeamSeal, sealTeam } from './integrity';
 import { DEFAULT_SETTINGS, TEAM_SCHEMA_VERSION } from './types';
 import type { League, LeagueTeamRef, Team } from './types';
 
@@ -82,6 +83,30 @@ describe('retargetBackup', () => {
 
     expect(next.teams.find((t) => t.name === mine.name)!.ownerUid).toBe('google_b');
     expect(next.leagues[0].ownerUid).toBe('google_b');
+  });
+
+  it('주인이 바뀐 팀은 서명을 떼고 나간다', () => {
+    // 서명은 팀 id와 소유자를 포함해 찍힌다. 그대로 들고 가면 새 계정에서 반드시 어긋나
+    // 계정을 옮긴 것뿐인 정상 백업이 조작으로 잡히고 골드가 0이 된다.
+    const { data, mine } = payload('guest_a');
+    const sealed = { ...data, teams: data.teams.map(sealTeam) };
+    const { payload: next } = retargetBackup(sealed, 'google_b', 'guest_a', collideAll(sealed));
+
+    const moved = next.teams.find((t) => t.name === mine.name)!;
+    expect('seal' in moved).toBe(false);
+    // undefined로 남기면 Firestore가 문서를 통째로 거부한다
+    expect(Object.values(moved).includes(undefined)).toBe(false);
+    expect(checkTeamSeal(moved, { anchoredAt: null })).toBe('EXEMPT');
+  });
+
+  it('같은 계정으로 되돌리면 서명을 그대로 둔다', () => {
+    // id도 주인도 그대로인 멱등 복구다. 여기서까지 서명을 떼면 보호가 한 칸 헐거워진다.
+    const { data, mine } = payload('guest_a');
+    const sealed = { ...data, teams: data.teams.map(sealTeam) };
+    const { payload: next } = retargetBackup(sealed, 'guest_a', 'guest_a', () => false);
+
+    const same = next.teams.find((t) => t.name === mine.name)!;
+    expect(checkTeamSeal(same, { anchoredAt: 1 })).toBe('OK');
   });
 
   it('LeagueTeamRef.ownerUid도 함께 바꾼다', () => {

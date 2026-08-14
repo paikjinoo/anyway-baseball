@@ -136,6 +136,8 @@ export function DataBackup() {
       ];
       if (res.migrated) notes.push(`${res.migrated}개 업그레이드`);
       if (res.skipped.length) notes.push(`팀 ${res.skipped.length}개는 열 수 없어 제외`);
+      // 골드가 말없이 사라지면 파일을 고친 사람보다 안 고친 사람이 더 오래 헤맨다.
+      if (res.tampered.length) notes.push(`${res.tampered.join(', ')}의 골드는 되돌림`);
       setMsg(`가져왔습니다 — ${notes.join(' · ')}.`);
       setPending(null);
     } finally {

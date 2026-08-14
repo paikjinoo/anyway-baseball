@@ -187,11 +187,19 @@ export function retargetBackup(
   // 그대로 둔다 — 소유자를 바꾸면 CPU 팀이 내 팀 목록에 나타난다.
   const mineTeam = (t: Team) => t.ownerUid === sourceUid;
 
-  const teams = payload.teams.map((t) => ({
-    ...t,
-    id: claim(t.id),
-    ownerUid: mineTeam(t) ? targetUid : t.ownerUid,
-  }));
+  const teams = payload.teams.map((t) => {
+    const id = claim(t.id);
+    const ownerUid = mineTeam(t) ? targetUid : t.ownerUid;
+    // **주인이나 id가 바뀌면 서명을 떼어 낸다.** 서명은 그 둘을 포함해 찍히므로
+    // (@see game/integrity.economyFingerprint) 그대로 들고 가면 반드시 어긋나고,
+    // 계정을 옮긴 것뿐인 정상 백업이 조작으로 잡혀 골드가 0이 된다. 새 주인의 문서는
+    // 새로 서명받아야 하고, 그 일은 저장할 때 일어난다.
+    //
+    // undefined를 넣지 않고 키째 뺀다 — Firestore는 undefined 필드가 있는 문서를 거부한다.
+    if (id === t.id && ownerUid === t.ownerUid) return t;
+    const { seal: _drop, ...rest } = t;
+    return { ...rest, id, ownerUid };
+  });
 
   const leagues = payload.leagues.map((l) => retargetLeague(l, targetUid, sourceUid, claim));
 
