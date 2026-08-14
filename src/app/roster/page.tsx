@@ -56,9 +56,11 @@ import {
   swapIntoLineup,
 } from '@/lib/game/roster';
 import {
+  ATHLETIC_KEYS,
   BATTING_KEYS,
   BATTING_KEY_DESC,
   BATTING_KEY_KO,
+  HITTING_KEYS,
   PITCH_ATTR_DESC,
   PITCH_ATTR_KO,
   STAMINA_DESC,
@@ -74,6 +76,7 @@ import {
   trainPitch,
   trainStamina,
 } from '@/lib/game/training';
+import type { TrainableBattingKey } from '@/lib/game/training';
 import type {
   BatterPosition,
   BattingStance,
@@ -142,8 +145,8 @@ export default function RosterPage() {
   }, [team]);
 
   const issues = useMemo(
-    () => (team ? rosterIssues(team, settings.useDH) : []),
-    [team, settings.useDH],
+    () => (team ? rosterIssues(team) : []),
+    [team],
   );
 
   async function commit(next: Team, message?: string) {
@@ -251,7 +254,7 @@ export default function RosterPage() {
           </div>
           <button
             className="btn"
-            onClick={() => void commit(resetAssignments(team, settings.useDH), '자동 편성했습니다.')}
+            onClick={() => void commit(resetAssignments(team), '자동 편성했습니다.')}
           >
             자동 편성 실행
           </button>
@@ -411,7 +414,6 @@ export default function RosterPage() {
                 {tab === 'lineup' && (
                   <LineupTab
                     team={team}
-                    useDH={settings.useDH}
                     onChange={(t, m) => void commit(t, m)}
                     onMessage={setMsg}
                   />
@@ -686,21 +688,24 @@ function StatsTab({ player }: { player: Player }) {
         : undefined;
 
   return (
-    <div className={`player-report-grid ${isP || arsenal.length > 1 ? '' : 'is-single'}`}>
+    <div className={`player-report-grid ${isP ? '' : 'is-single'}`}>
       <section className="panel player-report-panel">
         <div className="player-report-heading">
           <div>
-            <span>BAT TOOL REPORT</span>
-            <h3>타자 능력치</h3>
+            <span>{isP ? 'DEFENSE REPORT' : 'BAT TOOL REPORT'}</span>
+            {/* 투수는 타석에 서지 않으므로 컨택·파워·선구안을 싣지 않는다 (훈련 탭과 같은 기준) */}
+            <h3>{isP ? '수비 능력치' : '타자 능력치'}</h3>
           </div>
           <b className="tabular">CAP {cap}</b>
         </div>
         <p className="player-report-description">
           막대 위 흰 눈금이 성장 상한({cap})입니다.
-          {!isP && ` 체형 «${bodyDef.ko}» — ${bodyDef.desc}.`}
+          {isP
+            ? ' 마운드도 내야 수비 위치라, 투수 앞 땅볼과 베이스 커버에 그대로 쓰입니다.'
+            : ` 체형 «${bodyDef.ko}» — ${bodyDef.desc}.`}
         </p>
         <div className="player-stat-stack">
-          {BATTING_KEYS.map((k) => (
+          {(isP ? ATHLETIC_KEYS : BATTING_KEYS).map((k) => (
             <Bar
               key={k}
               label={BATTING_KEY_KO[k]}
@@ -720,7 +725,7 @@ function StatsTab({ player }: { player: Player }) {
         )}
       </section>
 
-      {(isP || arsenal.length > 1) && (
+      {isP && (
         <section className="panel player-report-panel">
           <div className="player-report-heading">
             <div>
@@ -1034,6 +1039,16 @@ function TrainRow({
   );
 }
 
+/**
+ * 훈련 탭. **선수 종류에 맞는 항목만 보여 준다.**
+ *
+ * 투수는 타석에 서지 않고(지명타자 고정), 타자는 마운드에 오르지 않는다. 그래서 훈련도
+ * 갈린다 — 기준은 실제로 엔진이 그 값을 쓰는지다:
+ *
+ * - 주루·수비(speed/fielding/arm)는 **양쪽 모두** 쓴다. 마운드도 내야 수비 위치다.
+ * - 타석(contact/power/eye)은 타자만 쓴다.
+ * - 구종·스태미나는 투수만 쓴다.
+ */
 function TrainTab({
   player,
   team,
@@ -1053,6 +1068,7 @@ function TrainTab({
   const replaceable = replaceablePitchesOf(player);
   const cap = statCap(player);
   const slotsLeft = pitchSlots(player) - pitchSlotsUsed(player);
+  const isP = player.kind === 'PITCHER';
   /** 설명을 펼친 항목. 같은 항목을 다시 누르면 접힌다. */
   const [openKey, setOpenKey] = useState<string | null>(null);
   const toggle = (k: string) => setOpenKey((cur) => (cur === k ? null : k));
@@ -1076,45 +1092,56 @@ function TrainTab({
         : 'border-white/10 bg-white/[0.03] text-slate-400 hover:border-white/25 hover:text-slate-200'
     } disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-white/10`;
 
+  /** 타격/주루·수비는 같은 행을 키 묶음만 바꿔 그린다 */
+  const battingRows = (keys: TrainableBattingKey[]) => (
+    <div className="space-y-1">
+      {keys.map((k) => (
+        <TrainRow
+          key={k}
+          label={BATTING_KEY_KO[k]}
+          value={player.batting[k]}
+          desc={BATTING_KEY_DESC[k]}
+          cost={statUpgradeCost(player.batting[k], cap)}
+          points={player.trainingPoints}
+          cap={cap}
+          open={openKey === `bat:${k}`}
+          onToggle={() => toggle(`bat:${k}`)}
+          onTrain={() => {
+            const r = trainBatting(player, k, 1);
+            if (r.ok) onChange(r.player, r.message);
+            else onMessage(r.message);
+          }}
+        />
+      ))}
+    </div>
+  );
+
   return (
     <div className="space-y-4">
-      <section className="panel p-5">
-        <h3 className="mb-1 font-bold">타자 훈련</h3>
-        <p className="mb-4 text-xs text-slate-500">
-          능력치가 높을수록 1 올리는 비용이 급격히 커집니다. 상한은 <b>{cap}</b>이며 (
-          {TIER_KO[player.tier]} 상한 {TIER_STAT_CAP[player.tier]} · 잠재력 {player.potential} 중
-          낮은 쪽), 여기서 막히면 티어를 강화해야 더 올라갑니다.
-          <br />
-          훈련 포인트는 레벨업으로만 들어옵니다.
-        </p>
-        <div className="space-y-1">
-          {BATTING_KEYS.map((k) => (
-            <TrainRow
-              key={k}
-              label={BATTING_KEY_KO[k]}
-              value={player.batting[k]}
-              desc={BATTING_KEY_DESC[k]}
-              cost={statUpgradeCost(player.batting[k], cap)}
-              points={player.trainingPoints}
-              cap={cap}
-              open={openKey === `bat:${k}`}
-              onToggle={() => toggle(`bat:${k}`)}
-              onTrain={() => {
-                const r = trainBatting(player, k, 1);
-                if (r.ok) onChange(r.player, r.message);
-                else onMessage(r.message);
-              }}
-            />
-          ))}
-        </div>
-      </section>
+      <p className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3 text-xs leading-relaxed text-slate-400">
+        <b className="text-slate-200">{isP ? '투수' : '타자'}</b>에게 쓰이는 항목만 표시합니다.
+        항목 이름을 누르면 경기에서 무엇이 좋아지는지 나옵니다.
+        <br />
+        능력치가 높을수록 1 올리는 비용이 급격히 커집니다. 상한은{' '}
+        <b className="text-slate-200">{cap}</b>이며 ({TIER_KO[player.tier]} 상한{' '}
+        {TIER_STAT_CAP[player.tier]} · 잠재력 {player.potential} 중 낮은 쪽), 여기서 막히면 티어를
+        강화해야 더 올라갑니다. 훈련 포인트는 레벨업으로만 들어옵니다.
+      </p>
 
-      {player.pitching && (
+      {!isP && (
+        <section className="panel p-5">
+          <h3 className="mb-1 font-bold">타격 훈련</h3>
+          <p className="mb-4 text-xs text-slate-500">타석에서 공을 맞히고 골라내는 능력입니다.</p>
+          {battingRows(HITTING_KEYS)}
+        </section>
+      )}
+
+      {isP && player.pitching && (
         <>
           <section className="panel p-5">
-            <h3 className="mb-1 font-bold">투수 훈련</h3>
+            <h3 className="mb-1 font-bold">투구 훈련</h3>
             <p className="mb-4 text-xs text-slate-500">
-              항목 이름을 누르면 설명이 표시됩니다.
+              스태미나와 보유 구종의 구속·제구·무브먼트를 올립니다.
             </p>
             <div className="space-y-5">
               <TrainRow
@@ -1290,6 +1317,17 @@ function TrainTab({
           </section>
         </>
       )}
+
+      {/* 주루·수비는 포지션을 가리지 않는다. 투수도 마운드에서 타구를 처리하고 1루를 커버한다. */}
+      <section className="panel p-5">
+        <h3 className="mb-1 font-bold">{isP ? '수비 훈련' : '주루 · 수비 훈련'}</h3>
+        <p className="mb-4 text-xs text-slate-500">
+          {isP
+            ? '마운드도 내야 수비 위치입니다. 투수 앞 땅볼 처리, 1루 커버, 주자 견제에 그대로 쓰입니다.'
+            : '타석 밖에서 쓰이는 능력입니다. 주루와 수비 양쪽에 걸칩니다.'}
+        </p>
+        {battingRows(ATHLETIC_KEYS)}
+      </section>
     </div>
   );
 }
@@ -1783,17 +1821,15 @@ function Chip({ label, v }: { label: string; v: number }) {
 /**
  * 타순 · 선발 로테이션.
  *
- * 타순에는 타자만 들어간다 (DH 미사용이면 투수 한 자리가 생기지만 그건 엔진이 채운다).
+ * 타순 9자리는 전부 타자다 — 9번이 지명타자이고, 투수는 타석에 서지 않는다.
  * 선발은 정확히 4명이며, 로테이션 순서대로 경기마다 한 명씩 돌아가며 등판한다.
  */
 function LineupTab({
   team,
-  useDH,
   onChange,
   onMessage,
 }: {
   team: Team;
-  useDH: boolean;
   onChange: (t: Team, msg?: string) => void;
   onMessage: (m: string) => void;
 }) {
@@ -1815,7 +1851,7 @@ function LineupTab({
           <div className="flex-1" />
           <button
             className="btn !px-2 !py-1 !text-[11px]"
-            onClick={() => onChange(resetAssignments(team, useDH), '자동 편성했습니다.')}
+            onClick={() => onChange(resetAssignments(team), '자동 편성했습니다.')}
           >
             자동 편성
           </button>

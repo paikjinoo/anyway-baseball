@@ -8,7 +8,7 @@ import {
   type User,
 } from 'firebase/auth';
 import { getFirebaseAuth, firebaseConfigured } from './client';
-import { loadNickname } from './store';
+import { GUEST_UID_PREFIX, loadNickname } from './store';
 
 export interface AppUser {
   uid: string;
@@ -41,7 +41,7 @@ export function withNickname(
 export function getOrCreateGuest(): AppUser {
   let uid = typeof window !== 'undefined' ? localStorage.getItem(GUEST_KEY) : null;
   if (!uid) {
-    uid = 'guest_' + Math.random().toString(36).slice(2, 12);
+    uid = GUEST_UID_PREFIX + Math.random().toString(36).slice(2, 12);
     if (typeof window !== 'undefined') localStorage.setItem(GUEST_KEY, uid);
   }
   if (typeof window !== 'undefined') localStorage.setItem(GUEST_ACTIVE_KEY, '1');

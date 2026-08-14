@@ -214,7 +214,6 @@ describe('창단 로스터', () => {
     for (let s = 0; s < 30; s++) {
       const t = founded(`ok-${s}`);
       expect(rosterIssues(t)).toEqual([]);
-      expect(rosterIssues(t, false)).toEqual([]);
     }
   });
 

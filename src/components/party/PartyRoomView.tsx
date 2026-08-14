@@ -129,7 +129,7 @@ export function PartyRoomView({
               방장이 정한 규칙이 이 경기에만 적용됩니다. 올스타전은 야수 9명으로 타순을 짜므로
               지명타자는 항상 켜집니다.
             </p>
-            <RuleSettings value={rules} onChange={onRulesChange} hideDH compact />
+            <RuleSettings value={rules} onChange={onRulesChange} compact />
           </>
         ) : (
           <p className="mt-2 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-slate-300">

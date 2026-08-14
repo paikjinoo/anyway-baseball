@@ -81,13 +81,7 @@ function toTeamInGame(team: Team, settings: GameSettings): TeamInGame {
 
   let lineup = team.lineup.filter((id) => !!roster[id]);
   const storedLineupIsValid = lineup.length === 9 && new Set(lineup).size === 9;
-  if (!storedLineupIsValid || !settings.useDH) lineup = autoLineup(team, settings.useDH);
-
-  // DH 미사용 시 자동 타순이 고른 투수가 실제 선발과 다를 수 있으므로 맞춰 준다.
-  if (!settings.useDH && !lineup.includes(pitcherId)) {
-    const pitcherSlot = lineup.findIndex((id) => roster[id]?.kind === 'PITCHER');
-    lineup[pitcherSlot >= 0 ? pitcherSlot : lineup.length - 1] = pitcherId;
-  }
+  if (!storedLineupIsValid) lineup = autoLineup(team);
 
   for (const id of new Set([...lineup, pitcherId])) {
     if (roster[id]) roster[id].season.g = 1;
@@ -109,7 +103,7 @@ function toTeamInGame(team: Team, settings: GameSettings): TeamInGame {
     pitcherPitches: 0,
     usedPitcherIds: [pitcherId],
     usedBatterIds: [],
-    defense: buildDefense(roster, lineup, pitcherId, settings.useDH),
+    defense: buildDefense(roster, lineup, pitcherId),
     runs: 0,
     hits: 0,
     errors: 0,
@@ -124,7 +118,6 @@ export function buildDefense(
   roster: Record<string, Player>,
   lineup: string[],
   pitcherId: string,
-  useDH: boolean,
 ): Partial<Record<Position, string>> {
   const defense: Partial<Record<Position, string>> = { P: pitcherId };
   const need: Position[] = ['C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF'];
@@ -155,9 +148,6 @@ export function buildDefense(
       defense[pos] = id;
       used.add(id);
     }
-  }
-  if (!useDH) {
-    // DH 미사용 시 투수가 타순에 들어간다 (라인업은 호출측에서 구성)
   }
   return defense;
 }
@@ -1004,24 +994,22 @@ export function changePitcher(s: GameState, side: Side, newPitcherId: string): G
   const t = s[side];
   const nextPitcher = t.roster[newPitcherId];
   const used = t.usedPitcherIds ?? [t.pitcherId];
+  // 마운드에 오르는 건 투수뿐이다. `pitching`이 있는지만 보면, 그 필드를 갖고 있던
+  // 시절에 저장된 타자가 여전히 통과한다 (@see generator.makePlayer).
   if (
-    !nextPitcher?.pitching ||
+    nextPitcher?.kind !== 'PITCHER' ||
+    !nextPitcher.pitching ||
     newPitcherId === t.pitcherId ||
     used.includes(newPitcherId) ||
     t.lineup.includes(newPitcherId)
   ) {
     return s;
   }
-  const oldPitcherId = t.pitcherId;
   t.pitcherId = newPitcherId;
   t.pitcherPitches = 0;
   t.usedPitcherIds = [...used, newPitcherId];
   t.defense.P = newPitcherId;
   nextPitcher.season.g = 1;
-  if (!s.settings.useDH) {
-    const battingSlot = t.lineup.indexOf(oldPitcherId);
-    if (battingSlot >= 0) t.lineup[battingSlot] = newPitcherId;
-  }
   return s;
 }
 

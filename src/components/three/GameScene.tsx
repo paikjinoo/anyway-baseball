@@ -49,7 +49,7 @@ import {
 } from '@/lib/store/matchStore';
 import { useAppStore } from '@/lib/store/appStore';
 import { currentBatter, currentPitcher, defenseTeam, offense, onDeckBatter } from '@/lib/game/engine';
-import { effectiveBatSide } from '@/lib/game/batting';
+import { effectiveBatSide, readPitchLocation, type PitchRead } from '@/lib/game/batting';
 import type { GameState, Player, Position, Vec3 } from '@/lib/game/types';
 
 export type CameraMode = 'PITCHER' | 'BATTER' | 'FIELD' | 'DRAMATIC';
@@ -107,7 +107,7 @@ function sceneState(s: Store): GameState | null {
  * 결과 연출 중에는 타임라인을 샘플링해 타구를 쫓아가고 베이스를 커버한다.
  * 판정에 쓰인 FieldPlay를 그대로 재생하므로 화면의 포구 순간과 판정이 일치한다.
  */
-function Fielders({ state }: { state: GameState }) {
+function Fielders({ state, hideCatcher }: { state: GameState; hideCatcher?: boolean }) {
   const def = defenseTeam(state);
   const uni = uniformOf(def);
   const entries = useMemo(() => {
@@ -128,6 +128,8 @@ function Fielders({ state }: { state: GameState }) {
   return (
     <>
       {entries.map(({ pos, player }) => {
+        // 타자 시점에서 존을 가리는 동안에는 포수를 그리지 않는다 (@see plateCrewHidden)
+        if (pos === 'C' && hideCatcher) return null;
         const spot = DEFENSE_SPOTS[pos];
         const motion = t !== null ? sampleFielder(field, pos, t) : null;
         // 정위치에서는 모두 홈플레이트를 바라본다
@@ -356,7 +358,7 @@ function Pitcher() {
 /** 이 높이 아래로 내려오면 비행 잔상을 지운다 (땅에서 튀고 구르는 구간) */
 const TRAIL_MIN_HEIGHT = 1.1;
 
-function Ball() {
+function Ball({ cameraMode }: { cameraMode: CameraMode }) {
   const ref = useRef<THREE.Mesh>(null);
   const ballMat = useMemo(() => createBallMaterial(), []);
   const trailRef = useRef<THREE.Points>(null);
@@ -375,7 +377,8 @@ function Ball() {
     const mesh = ref.current;
     if (!mesh) return;
 
-    const pos = ballPosition(s);
+    // 포수를 지운 화면에서는 미트가 아니라 홈플레이트에서 끊는다
+    const pos = ballPosition(s, plateCrewHidden(s, cameraMode) ? PLATE_Z : MITT_Z);
     if (!pos) {
       mesh.visible = false;
       if (trailRef.current) trailRef.current.visible = false;
@@ -421,8 +424,9 @@ function Ball() {
     // 투구 중에는 공을 무엇보다 앞에 그린다.
     //
     // 타자 시점 카메라와 홈플레이트 사이에 포수가 있고, SD 비율이라 머리가 커서
-    // **존 아래쪽이 통째로 포수 머리에 가린다** (홈플레이트 기준 0.6m 아래로는
-    // 아예 안 보인다). 하필 그 구간이 낮은 코스를 판단하는 자리라, 공이 존을
+    // **존 아래쪽이 통째로 포수 머리에 가린다** (홈플레이트 기준 0.95m 아래로는
+    // 아예 안 보인다 — 시선을 눕힌 뒤로는 존의 4분의 3이 여기 들어간다).
+    // 하필 그 구간이 낮은 코스를 판단하는 자리라, 공이 존을
     // 지나는 마지막 순간에 사라져 버렸다. 어차피 공은 포수보다 앞에 있으므로
     // 깊이 검사를 끄면 그 구간만 되살아나고 다른 장면은 그대로다.
     // (타구 연출에서는 야수 뒤로 지나가는 공도 있으므로 원래대로 되돌린다)
@@ -479,29 +483,37 @@ function Ball() {
 /**
  * 포수가 공을 잡는 깊이 (m). 홈플레이트를 지난 공은 여기서 멈춘다.
  *
- * 이 제동이 없으면 공이 플레이트를 지나 카메라 코앞(약 2.5m)까지 돌진해
- * 화면을 가득 채우며 아래로 빠져나간다. 하필 그 순간이 존을 지나는 높낮이를
- * 눈으로 재는 시점이라, 낮은 코스가 특히 안 보였다.
+ * 이 제동이 없으면 공이 플레이트를 4m 넘게 지나쳐(z ≈ -4.25) 카메라 쪽으로
+ * 돌진하며 화면을 훑고 나간다. 하필 그 순간이 존을 지나는 높낮이를 눈으로
+ * 재는 시점이라, 낮은 코스가 특히 안 보였다.
  */
 const MITT_Z = -1.25;
 
-/** 미트까지만 그리는 투구 궤적 */
-function pitchDisplayPos(traj: NonNullable<Store['trajectory']>, t: number): Vec3 {
+/**
+ * 포수를 지운 화면(@see plateCrewHidden)에서 공이 멈추는 깊이 = 홈플레이트.
+ *
+ * 미트 자리에 그대로 세우면 **받는 사람 없이 공만 허공에 떠 있는다.** 대신 존 평면인
+ * z=0에서 끊으면 그 정지 화면이 "이 공이 존의 어디를 지났는가"를 그대로 보여 준다.
+ */
+const PLATE_Z = 0;
+
+/** 미트(포수를 지웠으면 홈플레이트)까지만 그리는 투구 궤적 */
+function pitchDisplayPos(traj: NonNullable<Store['trajectory']>, t: number, stopZ: number): Vec3 {
   const p = pitchPositionExtended(traj, Math.min(t, 1.24));
-  if (p.z >= MITT_Z) return p;
+  if (p.z >= stopZ) return p;
   const a = pitchPositionAt(traj, 1); // 플레이트 통과 지점 (z = 0)
-  const u = (MITT_Z - a.z) / (p.z - a.z);
-  return { x: a.x + (p.x - a.x) * u, y: a.y + (p.y - a.y) * u, z: MITT_Z };
+  const u = (stopZ - a.z) / (p.z - a.z);
+  return { x: a.x + (p.x - a.x) * u, y: a.y + (p.y - a.y) * u, z: stopZ };
 }
 
 /** 현재 시각의 공 위치. 투구 중이면 투구 궤적, 타구 후면 타구 궤적. */
-function ballPosition(s: Store): Vec3 | null {
+function ballPosition(s: Store, stopZ: number): Vec3 | null {
   const now = performance.now();
   if (s.phase === 'FLIGHT' && s.trajectory) {
     // 릴리스 전(와인드업 중)에는 공이 글러브 안에 있으므로 그리지 않는다
     const t = (now - s.pitchStartAt) / s.displayFlightMs;
     if (t < 0) return null;
-    return pitchDisplayPos(s.trajectory, t);
+    return pitchDisplayPos(s.trajectory, t, stopZ);
   }
   if (s.phase === 'RESULT' && s.lastResult) {
     const r = s.lastResult;
@@ -512,7 +524,7 @@ function ballPosition(s: Store): Vec3 | null {
       const played = sampleBallInPlay(s.timeline, (elapsed / 1000) * s.playRate);
       if (played) return played;
       const t = (now - s.pitchStartAt) / s.displayFlightMs;
-      return s.trajectory && t >= 0 ? pitchDisplayPos(s.trajectory, t) : null;
+      return s.trajectory && t >= 0 ? pitchDisplayPos(s.trajectory, t, stopZ) : null;
     }
     // 주자 연출과 같은 시계를 쓴다
     const t = (elapsed / 1000) * s.playRate;
@@ -539,23 +551,30 @@ function sampleBattedPath(path: Vec3[], hangTime: number, t: number): Vec3 {
 }
 
 // ---------------------------------------------------------------------------
-// 스트라이크존 오버레이 + 조준 커서
+// 스트라이크존 오버레이 + 조준 커서 + 선구 표시
 // ---------------------------------------------------------------------------
+
+/** 선구 표시 색. 존(호박)·조준 커서(하늘)·공(흰색) 어느 것과도 겹치지 않아야 한다. */
+const READ_COLOR = '#f0abfc';
 
 function StrikeZone({ showAim }: { showAim: boolean }) {
   const aimRef = useRef<THREE.Group>(null);
+  const readRef = useRef<THREE.Group>(null);
   const rootRef = useRef<THREE.Group>(null);
+
+  const read = usePitchRead(showAim);
 
   // 존은 그라운드에 놓인 물체가 아니라 판정 기준을 보여 주는 오버레이다.
   // 깊이 검사를 켜 두면 카메라와 홈플레이트 사이에 선 포수 머리에 가려
   // 정작 낮은 코스를 잴 때 기준선이 사라진다. 항상 앞에 그린다.
+  // (선구 표시는 투구마다 새로 붙는 자식이라 그때마다 다시 훑는다)
   useEffect(() => {
     rootRef.current?.traverse((o) => {
       o.renderOrder = 9;
       const m = (o as THREE.Mesh).material as THREE.Material | undefined;
       if (m) m.depthTest = false;
     });
-  }, []);
+  }, [read]);
 
   useFrame(() => {
     const s = useMatchStore.getState();
@@ -568,11 +587,17 @@ function StrikeZone({ showAim }: { showAim: boolean }) {
     // 오른쪽 조준 패널과 같은 정원으로 보이도록 가로 폭을 양축의 기준으로 쓴다.
     aimRef.current.scale.set(worldRadius, worldRadius, 1);
     aimRef.current.visible = showAim && (s.phase === 'FLIGHT' || s.phase === 'SETUP');
+    // 선구 표시는 공이 손을 떠난 뒤에만. 릴리스 전에 띄우면 와인드업 중에 이미
+    // 답이 나와 있는 셈이 되어, 투수가 코스를 감추는 의미가 사라진다.
+    if (readRef.current) {
+      readRef.current.visible = s.phase === 'FLIGHT' && performance.now() >= s.pitchStartAt;
+    }
   });
 
   const h = ZONE_TOP - ZONE_BOTTOM;
   const w = ZONE_HALF_WIDTH * 2;
   const cy = (ZONE_TOP + ZONE_BOTTOM) / 2;
+  const readAt = read ? zoneToWorld(read.x, read.y) : null;
 
   return (
     <group ref={rootRef}>
@@ -613,6 +638,43 @@ function StrikeZone({ showAim }: { showAim: boolean }) {
           <meshBasicMaterial color="#fbbf24" transparent opacity={0.22} />
         </mesh>
       ))}
+      {/* 선구 — 이 타자가 읽은 도착 지점. 조준 커서(하늘색)·존(호박색)과 섞이지
+          않도록 자홍으로 그린다. 조준 커서보다 먼저 그려 커서가 위에 오게 한다. */}
+      {readAt && read && (
+        <group ref={readRef} visible={false}>
+          {/* 예상 높이 눈금. 존 폭을 가로지르므로 존 위/아래 어디로 오는지가
+              한눈에 읽힌다 — 타자 시점에서 가장 판단하기 어려운 것이 높낮이다. */}
+          <mesh position={[0, readAt.y, 0.014]}>
+            <planeGeometry args={[w * 1.7, 0.008]} />
+            <meshBasicMaterial color={READ_COLOR} transparent opacity={0.4} side={THREE.DoubleSide} />
+          </mesh>
+          <group position={[readAt.x, readAt.y, 0.015]}>
+            {/* 오차 원. 실제 공은 대체로 이 안으로 들어온다 (선구안이 높을수록 작다).
+                조준 커서와 같은 이유로 가로 폭을 양축의 기준으로 쓴다. */}
+            <mesh scale={[read.radius * ZONE_HALF_WIDTH, read.radius * ZONE_HALF_WIDTH, 1]}>
+              <ringGeometry args={[0.94, 1, 40]} />
+              <meshBasicMaterial
+                color={READ_COLOR}
+                transparent
+                opacity={0.5}
+                side={THREE.DoubleSide}
+              />
+            </mesh>
+            {/* 중심점. **공 크기로 그리면 안 된다** — 눈 좋은 타자의 오차 원이 공보다
+                작아서 점 안에 파묻혀 사라진다. 크기 정보는 원이 지고, 점은 자리만 찍는다. */}
+            <mesh>
+              <circleGeometry args={[BALL_RADIUS * 0.4, 16]} />
+              <meshBasicMaterial
+                color={READ_COLOR}
+                transparent
+                opacity={0.9}
+                side={THREE.DoubleSide}
+              />
+            </mesh>
+          </group>
+        </group>
+      )}
+
       <group ref={aimRef} visible={showAim}>
         <mesh>
           <circleGeometry args={[1, 32]} />
@@ -624,6 +686,23 @@ function StrikeZone({ showAim }: { showAim: boolean }) {
         </mesh>
       </group>
     </group>
+  );
+}
+
+/**
+ * 지금 타석의 선구 표시. 켜져 있지 않거나 내 타석이 아니면 null.
+ *
+ * 궤적이 바뀔 때만(= 투구마다 한 번) 계산한다. 매 프레임 다시 뽑으면 표시가 떨린다.
+ * @see readPitchLocation
+ */
+function usePitchRead(batting: boolean): PitchRead | null {
+  const enabled = useAppStore((s) => s.settings.showPitchRead);
+  const traj = useMatchStore((s) => s.trajectory);
+  const state = useMatchStore((s) => s.state);
+  return useMemo(
+    () =>
+      batting && enabled && traj && state ? readPitchLocation(currentBatter(state), traj) : null,
+    [batting, enabled, traj, state],
   );
 }
 
@@ -812,16 +891,21 @@ function CameraRig({ mode }: { mode: CameraMode }) {
       camPos = new THREE.Vector3(0, 26, -26);
       look = new THREE.Vector3(0, 0, 34);
     } else if (batting || mode === 'BATTER') {
-      // 타자 시점: 포수 뒤에서 투수를 바라본다.
+      // 타자 시점: 타석 눈높이에서 투수를 **정면으로** 본다.
       //
-      // SD 비율이라 포수 머리가 커서, 낮게 잡으면 홈플레이트와 존을 가린다.
-      // 그래서 높이 잡되, 시선은 마운드가 아니라 **홈플레이트 쪽**으로 내린다.
-      // 예전처럼 멀리(z=14)를 보면 존이 화면 밑바닥(76~90% 지점)에 깔려서
-      // 존 아래로 오는 공이 화면 밖으로 나가 버려 높낮이를 읽을 수 없었다.
-      // 지금 구도에서 존은 화면 52~63%, 홈플레이트 지면이 71%에 잡혀
-      // 존 아래로도 화면이 3분의 1쯤 남는다.
-      camPos = new THREE.Vector3(0, 3.05, -6.6);
-      look = new THREE.Vector3(0, 1.2, 0);
+      // 예전 구도는 (0, 3.05, -6.6)에서 **15.7°나 내려다봤다.** 그렇게 높이 앉힌 유일한
+      // 이유는 카메라와 홈플레이트 사이에 선 포수·주심의 큰 SD 머리를 넘겨다보기
+      // 위해서였는데, 그 대가로 내야를 위에서 굽어보는 그림이 되어 공을 치기 불편했다.
+      // 지금은 **그 둘을 아예 지우므로**(@see plateCrewHidden) 넘겨다볼 것이 없다.
+      // 그래서 눈높이(1.8m)까지 낮추고 플레이트 가까이(5.2m) 붙였다 — 기울기 7.5°.
+      //
+      // 화면에서의 자리는 여전히 이 구도의 합격 기준이다. 존이 51~66%, 홈플레이트
+      // 지면이 77%에 잡힌다. 예전보다 존이 커졌고(화면 높이의 10.8% → 14.7%) 존
+      // 아래로도 화면이 3분의 1쯤 남아, 존을 벗어나는 낮은 공도 화면 안에서 읽힌다.
+      // (예전에 멀리 z=14를 보던 시절에는 존이 76~90%에 깔려 낮은 공이 화면 밖으로
+      //  나가 버렸다 — 시선을 눕힐 때 다시 그 함정에 빠지지 않도록 값을 지킬 것)
+      camPos = new THREE.Vector3(0, 1.8, -5.2);
+      look = new THREE.Vector3(0, 1.12, 0);
     } else {
       // 투수 시점: 마운드 뒤 약간 높은 곳
       camPos = new THREE.Vector3(0, 3.1, MOUND_DISTANCE + 7.2);
@@ -895,6 +979,38 @@ function CameraRig({ mode }: { mode: CameraMode }) {
  * (패널이 떠 있는 SETUP 단계에는 INNING_BREAK·타구 추적 샷이 잡히지 않으므로
  *  여기서는 카메라 모드와 공수만 보면 된다)
  */
+/**
+ * 지금 화면이 타자 시점 샷인가 (CameraRig의 분기 순서를 그대로 따른다).
+ *
+ * 공수 교대·타구 추적·전체 뷰가 먼저 잡히므로, 그 프레임에서는 타자 시점이 아니다.
+ */
+function batterShot(s: Store, mode: CameraMode): boolean {
+  if (s.phase === 'INNING_BREAK') return false;
+  if (s.phase === 'RESULT' && s.lastResult?.contact && s.lastResult.battedBall) return false;
+  if (mode === 'FIELD') return false;
+  return isPlayerBatting(s) || mode === 'BATTER';
+}
+
+/**
+ * 지금 홈플레이트 뒤 인물(포수·주심)을 지울 프레임인가.
+ *
+ * 시선을 눕히고 나니 둘의 큰 SD 머리가 존 자리를 통째로 채웠다 (존 위에 찍은 25점 중
+ * 19점이 몸에 가렸다). 공과 존은 깊이 검사를 꺼서 앞에 그리므로 "안 보이는" 건 아니지만,
+ * 어두운 마스크·미트 위에 겹쳐 놓고 공의 높낮이를 재는 건 여전히 불편하다.
+ * 그래서 **타자 시점에서는 아예 그리지 않는다.** 덕분에 카메라를 가림 걱정 없이
+ * 플레이트 가까이(z=-5.2) 붙일 수 있게 됐고, 존이 그만큼 커졌다.
+ *
+ * 단 **수비가 붙는 연출에서는 반드시 되돌린다.** 도루가 걸리면 포수가 그 자리에서
+ * 2루로 송구하는데, 없는 사람이 던지면 공이 무에서 출발한다. timeline.field는
+ * 타구든 도루든 "수비가 움직이는 플레이"에만 생기므로 그 유무로 가른다.
+ * (타구가 나오면 애초에 카메라가 추적 샷으로 컷 되어 batterShot이 false다)
+ */
+export function plateCrewHidden(s: Store, mode: CameraMode): boolean {
+  if (!batterShot(s, mode)) return false;
+  if (s.phase === 'RESULT') return !s.timeline?.field;
+  return s.phase === 'SETUP' || s.phase === 'FLIGHT';
+}
+
 export function zoneFlippedOnScreen(mode: CameraMode, batting: boolean): boolean {
   if (mode === 'FIELD') return false; // 전체 뷰: 홈 뒤 높은 곳
   if (batting || mode === 'BATTER') return false; // 타자 시점: 포수 뒤
@@ -967,8 +1083,8 @@ export function GameScene({ cameraMode = 'DRAMATIC' }: { cameraMode?: CameraMode
       <directionalLight position={[10, 20, -60]} intensity={0.22} color="#ffe6bd" />
 
       <Stadium />
-      <SceneActors />
-      <Ball />
+      <SceneActors cameraMode={cameraMode} />
+      <Ball cameraMode={cameraMode} />
       <Particles />
       {!inningBreak && <StrikeZone showAim={playerBatting} />}
       {!inningBreak && <PitchPreview />}
@@ -980,22 +1096,25 @@ export function GameScene({ cameraMode = 'DRAMATIC' }: { cameraMode?: CameraMode
 }
 
 /** 선수 렌더링. 결과 연출 중에는 투구 직전 상태를 기준으로 그린다. */
-function SceneActors() {
+function SceneActors({ cameraMode }: { cameraMode: CameraMode }) {
   const phase = useMatchStore((s) => s.phase);
   const state = useMatchStore((s) => s.state);
   const prePitch = useMatchStore((s) => s.prePitchState);
   const relay = useMatchStore((s) => isRelayMode(s.mode));
+  // 타자 시점에서 공을 보는 동안에는 홈플레이트 뒤가 비어 있어야 한다.
+  // (지우는 조건이 phase·타임라인까지 보므로 스토어 전체를 구독한다)
+  const hideCrew = useMatchStore((s) => plateCrewHidden(s, cameraMode));
   const scene = (phase === 'RESULT' ? prePitch : null) ?? state;
   if (!scene) return null;
 
   return (
     <>
-      {!relay && <Fielders state={scene} />}
+      {!relay && <Fielders state={scene} hideCatcher={hideCrew} />}
       {!relay && <Runners />}
       <Batter />
       <Pitcher />
       {/* 릴레이(타격 대결)는 수비가 없는 모드라 심판도 두지 않는다 */}
-      {!relay && <Officials />}
+      {!relay && <Officials hideHome={hideCrew} />}
       {!relay && <OnDeck player={onDeckBatter(scene)} uniform={uniformOf(offense(scene))} />}
     </>
   );

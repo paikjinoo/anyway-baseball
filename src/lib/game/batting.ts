@@ -1,5 +1,5 @@
-import { Rng, clamp, lerp, norm } from './rng';
-import { BAT_DEFS, BODY_BY_ID, PITCH_DEFS, SWING_DEFS } from './constants';
+import { Rng, clamp, lerp, norm, seedFromString } from './rng';
+import { AIM_LIMIT, BAT_DEFS, BODY_BY_ID, PITCH_DEFS, SWING_DEFS } from './constants';
 import type {
   BattedBall,
   Handedness,
@@ -155,6 +155,79 @@ export function platoonRadiusMult(batter: Player, pitcher: Player): number {
   return effectiveBatSide(batter, pitcher) === pitcher.throws
     ? PLATOON_SAME_HAND
     : PLATOON_OPPOSITE_HAND;
+}
+
+// ---------------------------------------------------------------------------
+// 선구 (타자가 읽는 도착 지점)
+// ---------------------------------------------------------------------------
+
+/**
+ * 선구안 1의 읽기 오차 (존 좌표 표준편차). 존 반폭이 1이므로, 이만큼 흔들리면
+ * 존 안팎을 자주 헷갈린다 — 눈이 나쁜 타자에게는 그게 맞다.
+ *
+ * ⚠ **이 두 값은 "능력치를 보여 주는 눈금"이자 "화면을 읽을 수 있게 해 주는 보조선"이라
+ * 양쪽을 같이 봐야 한다.** 생성되는 타자의 선구안 중앙값이 48이므로(p25 40 / p90 65),
+ * 나쁜 쪽 값이 크면 대부분의 타석에서 표시가 쓸모없어지고 기능 자체가 무의미해진다.
+ * 지금 값에서 평균 오차(존 좌표)는 선구안 25 → 0.29, 48 → 0.22, 85 → 0.11이고,
+ * 높낮이만 떼어 보면 각각 5.5cm / 4.2cm / 2.1cm다 (존 높이가 61cm, 공 지름이 7.3cm).
+ *
+ * 중앙값 타자가 공 반 개 안쪽으로 읽는 셈이라 **표시만 보고 쳐도 되는 수준**이고, 그만큼
+ * 선구안 차이는 화면에서 옅어진다(25와 85가 5.5cm와 2.1cm — 둘 다 공 하나 안쪽이다).
+ * 능력치 차이를 더 느끼게 하려면 WORST를 키우고, 화면 읽기를 더 편하게 하려면 줄인다.
+ */
+const READ_SIGMA_WORST = 0.23;
+/** 선구안 99의 읽기 오차. 공 반지름(존 x로 0.17)의 1/4쯤까지 좁혀진다. */
+const READ_SIGMA_BEST = 0.045;
+/**
+ * 구종 난이도가 읽기를 흐리는 정도. 직구(0)는 그대로, 너클볼(2.6)이면 σ가 1.36배다.
+ * judgeSwing의 deceive(무브먼트 × 난이도)와 같은 이야기를 눈으로 보여 주는 값이다.
+ */
+const READ_DIFFICULTY_K = 0.14;
+/**
+ * 화면에 그리는 오차 원의 크기 (σ 배수).
+ * 2차원 정규분포에서 반경 1.6σ 안에 약 72%가 들어온다 — "대체로 이 안"이라고
+ * 말할 수 있는 가장 작은 원이다. 1σ로 그리면 열에 여섯은 원 밖에 떨어져
+ * 표시가 거짓말을 하는 것처럼 보인다.
+ */
+const READ_RADIUS_SIGMA = 1.6;
+
+/** 타자가 날아오는 공을 보고 읽어 낸 도착 지점 (존 좌표) */
+export interface PitchRead {
+  /** 예상 도착점. 실제 도착점에 선구안만큼의 오차가 얹혀 있다. */
+  x: number;
+  y: number;
+  /** 예상 오차 반경 (존 좌표). 실제 공은 대체로 이 원 안으로 들어온다. */
+  radius: number;
+}
+
+/**
+ * 이 타자가 이 공을 어디로 온다고 읽는가.
+ *
+ * **판정에는 전혀 쓰이지 않는다.** 타자 시점 화면과 조준 패널이 "예상 도착점"을
+ * 그리는 데만 쓰는 표시용 값이다(실제 판정은 언제나 traj.zoneX/zoneY로 한다).
+ * CPU 타자가 decideSwing에서 하는 것과 같은 일 — 노이즈 섞인 추정 — 을 사람에게
+ * 눈으로 돌려주는 것이라, 오차를 선구안에 걸어 두는 것도 그쪽과 같다.
+ *
+ * **난수는 궤적에서 만든 시드로 뽑는다.** 매번 새로 뽑으면 표시가 프레임마다
+ * 떨리고, 무엇보다 3D 화면과 조준 패널이 서로 다른 지점을 가리킨다. 궤적을 시드로
+ * 쓰면 두 화면이 같은 값을 얻고, 다시 보기에서도 그때 본 것과 같은 자리에 뜬다.
+ * (게임 RNG를 건드리지 않으므로 이후 투구 결과도 달라지지 않는다)
+ */
+export function readPitchLocation(batter: Player, traj: PitchTrajectory): PitchRead {
+  const eye = norm(effectiveBatting(batter).eye);
+  const sigma =
+    lerp(READ_SIGMA_WORST, READ_SIGMA_BEST, eye) *
+    (1 + PITCH_DEFS[traj.type].difficulty * READ_DIFFICULTY_K);
+  const rng = new Rng(
+    seedFromString(`read|${batter.id}|${traj.type}|${traj.velocity}|${traj.zoneX}|${traj.zoneY}`),
+  );
+  // 조준할 수 있는 범위 밖은 가리켜 봐야 따라갈 수 없다. 그 지점은 어차피
+  // "저 멀리 빠지는 공"이라 존 대비 방향만 알면 충분하다.
+  return {
+    x: clamp(traj.zoneX + rng.normal(0, sigma, 2), -AIM_LIMIT, AIM_LIMIT),
+    y: clamp(traj.zoneY + rng.normal(0, sigma, 2), -AIM_LIMIT, AIM_LIMIT),
+    radius: sigma * READ_RADIUS_SIGMA,
+  };
 }
 
 /**

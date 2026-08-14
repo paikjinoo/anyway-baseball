@@ -1,5 +1,5 @@
 import { Rng, clamp, lerp, norm } from './rng';
-import { PITCH_DEFS } from './constants';
+import { AIM_LIMIT, PITCH_DEFS } from './constants';
 import { arsenalOf, staminaRemaining } from './pitching';
 import { effectiveBatSide, effectiveBatting } from './batting';
 import {
@@ -286,8 +286,8 @@ export function decideSwing(
 
   // ---- 조준/타이밍 ------------------------------------------------------
   const aimNoise = p.aimNoise * (1.3 - contact * 0.6);
-  const aimX = clamp(estX + rng.normal(0, aimNoise), -1.9, 1.9);
-  const aimY = clamp(estY + rng.normal(0, aimNoise), -1.9, 1.9);
+  const aimX = clamp(estX + rng.normal(0, aimNoise), -AIM_LIMIT, AIM_LIMIT);
+  const aimY = clamp(estY + rng.normal(0, aimNoise), -AIM_LIMIT, AIM_LIMIT);
 
   // 느린 변화구는 CPU도 타이밍을 뺏긴다
   const def = PITCH_DEFS[traj.type];

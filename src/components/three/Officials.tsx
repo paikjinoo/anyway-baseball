@@ -61,7 +61,7 @@ const CALL_RISE = 0.45;
 
 const STRIKE_KINDS = new Set(['STRIKE_LOOKING', 'STRIKE_SWINGING', 'STRIKEOUT', 'FOUL']);
 
-export function Officials() {
+export function Officials({ hideHome }: { hideHome?: boolean }) {
   const q = useQuality();
   const phase = useMatchStore((s) => s.phase);
   const revealed = useMatchStore((s) => s.revealed);
@@ -95,16 +95,19 @@ export function Officials() {
 
   return (
     <>
-      {/* 주심: 포수 뒤 안쪽 어깨 너머 */}
-      <PlayerModel
-        player={crew.home}
-        uniform={UMPIRE_UNIFORM}
-        pose={pose}
-        animT={animT}
-        headwear="MASK"
-        position={[0.32, 0, -2.45]}
-        rotationY={0}
-      />
+      {/* 주심: 포수 뒤 안쪽 어깨 너머.
+          타자 시점에서 공을 보는 동안에는 포수와 함께 지운다 (@see plateCrewHidden) */}
+      {!hideHome && (
+        <PlayerModel
+          player={crew.home}
+          uniform={UMPIRE_UNIFORM}
+          pose={pose}
+          animT={animT}
+          headwear="MASK"
+          position={[0.32, 0, -2.45]}
+          rotationY={0}
+        />
+      )}
       {q.officials >= 2 && (
         <>
           <PlayerModel
@@ -137,7 +140,7 @@ export function Officials() {
  */
 export function OnDeck({ player, uniform }: { player: Player; uniform: UniformSpec }) {
   if (qualityFlags().officials < 2) return null;
-  // 3루 쪽 서클. 타자 시점 카메라가 z = -6.6에 있으므로 그보다 앞에 세워야
+  // 3루 쪽 서클. 타자 시점 카메라가 z = -9.2에 있으므로 그보다 앞에 세워야
   // 렌즈에 붙어 화면을 가리지 않는다.
   return (
     <PlayerModel

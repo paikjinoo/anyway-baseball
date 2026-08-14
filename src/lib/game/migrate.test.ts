@@ -163,6 +163,38 @@ describe('normalizeTeam', () => {
     expect(out.players.every((p) => p.career === undefined)).toBe(true);
     expect(out.players.every((p) => p.seasonLog === undefined)).toBe(true);
   });
+
+  it('야수가 들고 있던 투구 능력을 떼어 낸다', () => {
+    // 비상 등판용으로 직구 하나씩 주던 시절에 저장된 팀.
+    const t = team();
+    const legacy: Team = {
+      ...t,
+      players: t.players.map((p) =>
+        p.kind === 'BATTER'
+          ? {
+              ...p,
+              pitching: { stamina: 22, arsenal: { FOURSEAM: { velocity: 30, control: 20, movement: 15 } } },
+              base: { ...p.base, stamina: 22, arsenal: { FOURSEAM: { velocity: 30, control: 20, movement: 15 } } },
+            }
+          : p,
+      ),
+    };
+
+    const out = normalizeTeam(legacy);
+    const batters = out.players.filter((p) => p.kind === 'BATTER');
+    expect(batters.length).toBeGreaterThan(0);
+    expect(batters.every((p) => p.pitching === undefined)).toBe(true);
+    // base에 남겨 두면 능력치초기화권이 그대로 되살린다 (items.resetStats)
+    expect(batters.every((p) => Object.keys(p.base.arsenal).length === 0)).toBe(true);
+    expect(batters.every((p) => p.base.stamina === 0)).toBe(true);
+    // 투수는 손대지 않는다
+    expect(out.players.filter((p) => p.kind === 'PITCHER').every((p) => !!p.pitching)).toBe(true);
+  });
+
+  it('떼어 낼 것이 없으면 players 배열을 새로 만들지 않는다', () => {
+    const t = team();
+    expect(normalizeTeam(t).players).toBe(t.players);
+  });
 });
 
 describe('normalizeSettings', () => {
@@ -182,8 +214,8 @@ describe('normalizeSettings', () => {
   });
 
   it('저장된 값이 기본값을 이긴다', () => {
-    expect(normalizeSettings({ regulationInnings: 7, useDH: false }).regulationInnings).toBe(7);
-    expect(normalizeSettings({ regulationInnings: 7, useDH: false }).useDH).toBe(false);
+    expect(normalizeSettings({ regulationInnings: 7 }).regulationInnings).toBe(7);
+    expect(normalizeSettings({ mercyRule: false }).mercyRule).toBe(false);
   });
 
   it('없던 필드는 기본값으로 채워진다', () => {

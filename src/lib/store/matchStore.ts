@@ -21,7 +21,7 @@ import {
 } from '../game/engine';
 import { decidePitch, decideSteal, decideSwing, shouldChangePitcher, type Difficulty } from '../game/ai';
 import type { MatchRewardContext } from '../game/matchReward';
-import { PITCH_CLOCK_MS, PITCH_CLOCK_NET_GRACE_MS } from '../game/constants';
+import { AIM_LIMIT, PITCH_CLOCK_MS, PITCH_CLOCK_NET_GRACE_MS } from '../game/constants';
 import { arsenalOf } from '../game/pitching';
 import { buildTimeline, type PlayTimeline } from '../game/playback';
 import type { PlayClip } from '../game/record';
@@ -925,7 +925,7 @@ export const useMatchStore = create<MatchStore>((set, get) => ({
     });
   },
 
-  setAim: (x, y) => set({ aim: { x: clamp(x, -1.9, 1.9), y: clamp(y, -1.9, 1.9) } }),
+  setAim: (x, y) => set({ aim: { x: clamp(x, -AIM_LIMIT, AIM_LIMIT), y: clamp(y, -AIM_LIMIT, AIM_LIMIT) } }),
   setSwingType: (t) => set({ swingType: t }),
   setPitchPreview: (cmd) => set({ pitchPreview: cmd }),
 

@@ -17,6 +17,7 @@ import type {
   PitchingForm,
   Player,
   PlayerBase,
+  PlayerKind,
   Position,
   SeasonStat,
   Team,
@@ -315,21 +316,12 @@ export function generatePlayer(rng: Rng, opt: GeneratePlayerOptions): Player {
     season: emptySeason(),
   };
 
+  // 투구 능력은 투수만 갖는다. 야수에게도 비상 등판용 직구를 하나 쥐여 주던 것을 없앴다 —
+  // 실제로 마운드에 오르는 일은 없으면서(bullpenCandidates는 kind로 거른다) 훈련 화면과
+  // 리포트에는 "이 타자의 구종"으로 나타나 혼란만 남겼다.
   if (isPitcher) {
     const pbudget = clamp(rng.normal(PITCHER_BUDGET_MEAN, PITCHER_BUDGET_SD) * strength, 120, 240);
     player.pitching = makeArsenal(rng, pbudget, isStarter, tier);
-  } else {
-    // 야수도 비상시 등판할 수 있도록 아주 낮은 직구 하나만 부여
-    player.pitching = {
-      stamina: 22,
-      arsenal: {
-        FOURSEAM: {
-          velocity: Math.round(clamp(batting.arm * 0.72, 15, 60)),
-          control: Math.round(clamp(batting.arm * 0.45, 10, 45)),
-          movement: 15,
-        },
-      },
-    };
   }
 
   player.base = snapshotBase(player);
@@ -534,7 +526,7 @@ export function autoRotation(team: Team): string[] {
  * 포지션별로 가장 좋은 선수를 1명씩 뽑아 수비 라인업을 만든 뒤
  * 세이버메트릭스식 정렬(출루형 -> 중심타선 -> 하위)로 타순을 정한다.
  */
-export function autoLineup(team: Team, useDH = true): string[] {
+export function autoLineup(team: Team): string[] {
   // 부상자도 후보에 넣는다 — 능력치가 깎일 뿐 못 나가는 게 아니다. 대신 깎인 값으로 줄을
   // 세우므로, 성한 선수가 있으면 자연히 그쪽이 앞선다. 아예 빼면 타자가 빠듯한 로스터에서
   // 9명을 못 채워 경기 편성이 막힌다.
@@ -555,20 +547,13 @@ export function autoLineup(team: Team, useDH = true): string[] {
     }
   }
 
-  // 9번째 타자: DH 사용 시 최고 타자, 아니면 로테이션 선두 투수
-  if (useDH) {
-    const dh = available
-      .filter((p) => !taken.has(p.id))
-      .sort((a, b) => score(b) - score(a))[0];
-    if (dh) {
-      chosen.push(dh);
-      taken.add(dh.id);
-    }
-  } else {
-    const starterId = team.rotation[team.rotationIndex % Math.max(1, team.rotation.length)];
-    const p = team.players.find((x) => x.id === starterId)
-      ?? team.players.find((x) => x.kind === 'PITCHER');
-    if (p) chosen.push(p);
+  // 9번째 타자는 지명타자 — 남은 야수 중 최고 타자다. 투수는 타석에 서지 않는다.
+  const dh = available
+    .filter((p) => !taken.has(p.id))
+    .sort((a, b) => score(b) - score(a))[0];
+  if (dh) {
+    chosen.push(dh);
+    taken.add(dh.id);
   }
 
   // 자리가 빈다면 남은 야수로 채운다
@@ -600,6 +585,21 @@ export function hitterScore(p: Player): number {
   return b.contact * 1.3 + b.power * 1.2 + b.eye * 1.0 + b.speed * 0.6 + b.fielding * 0.5 + b.arm * 0.3;
 }
 
+/**
+ * 투수의 수비가 종합 지표에서 갖는 가중치.
+ *
+ * **비율은 타자와 같고(0.6 : 0.5 : 0.3) 크기만 줄인 것이다.** 투수도 같은 세 값으로 같은
+ * 수비를 하지만(fielding.INFIELD에 'P'가 있다) 타구가 오는 빈도가 훨씬 낮다.
+ *
+ * 배율 0.23은 눈대중이 아니라 **시뮬레이션에서 역산했다.** autoInvest에 수비를 넣었을 때
+ * 구종 쪽이 6.72점어치 깎이고 수비가 speed +28.4 · fielding +17.7 · arm +11.7 올랐는데,
+ * 1080경기에서 실점이 사실상 그대로였다 (안타 −0.23 · 볼넷 +0.08 · 득점 −0.11로 잡음 범위).
+ * 즉 그 수비 상승분의 값어치가 정확히 그 6.72점이라는 뜻이라, 그렇게 되도록 맞췄다.
+ * 결과적으로 능력치가 모두 50인 투수에게 수비는 16점 — 전체의 6% 남짓이고,
+ * 타자의 29%(1.4/4.9)에 비하면 5분의 1 수준이다.
+ */
+const PITCHER_DEFENSE_WEIGHT = { speed: 0.14, fielding: 0.11, arm: 0.07 } as const;
+
 export function pitcherScore(p: Player): number {
   if (!p.pitching) return 0;
   const arr = Object.values(p.pitching.arsenal) as PitchAttr[];
@@ -608,25 +608,58 @@ export function pitcherScore(p: Player): number {
     (acc, a) => acc + a.velocity * 1.1 + a.control * 1.3 + a.movement * 1.1,
     0,
   );
-  return best / arr.length + arr.length * 12 + p.pitching.stamina * 0.4;
+  const w = PITCHER_DEFENSE_WEIGHT;
+  const defense = p.batting.speed * w.speed + p.batting.fielding * w.fielding + p.batting.arm * w.arm;
+  return best / arr.length + arr.length * 12 + p.pitching.stamina * 0.4 + defense;
 }
 
 /**
- * 목록·카드에 쓰는 선수 종합 지표 (0~100).
+ * 원점수를 0~100 눈금으로 옮기는 변환. **두 종류가 같은 눈금을 쓴다.**
  *
- * pitcherScore는 구종 하나당 +12를 얹으므로 슬롯을 꽉 채운 S등급 투수는 100을 넘긴다.
- * teamRating과 같은 방식으로 잘라 낸다 — 화면에 101이 뜨면 그건 지표가 아니라 버그로 읽힌다.
+ * 타자는 나누기만 하면 된다 — hitterScore는 가중치 합이 4.9인 가중평균이라, 4.9로 나누면
+ * 그 값이 곧 «이 선수 능력치가 대충 몇인가»가 된다 (같은 화면의 0~99 막대와 바로 비교된다).
+ *
+ * 투수는 나누기만으로는 그 눈금에 못 얹는다. pitcherScore에는 구종 수 보너스(+12/개, 최소
+ * 3구종이므로 항상 36 이상)처럼 **바닥이 깔려 있어** 폭이 좁기 때문이다. 그래서 바닥을 먼저
+ * 빼고(101) 다시 편다(2.74). 두 상수는 **같은 처지의 타자와 같은 숫자가 나오도록** 두
+ * 대응점에서 역산했다:
+ *
+ *   창단 선수(C등급 1레벨) 중앙값 → 타자 50.2 · 투수 50.1
+ *   상점 S등급 중앙값            → 타자 74.3 · 투수 74.2
+ *
+ * 대응점은 둘인데 분포 전체가 따라 겹친다 — 창단 p05는 42/38, p95는 60/62, 상점 S 최댓값은
+ * 87.02/86.97이다. 눈금이 억지로 맞춰진 게 아니라 두 분포의 모양이 원래 같았다는 뜻이다.
+ *
+ * 최댓값이 87 언저리인 것은 잘려서가 아니라 statCap과 잠재력이 능력치를 거기서 막기
+ * 때문이다. 100은 이론상의 완전한 선수 자리로 비워 둔다.
  */
-export function playerScore(p: Player): number {
-  const raw = p.kind === 'PITCHER' ? pitcherScore(p) / 2.9 : hitterScore(p) / 4.9;
-  return Math.round(clamp(raw, 0, 100));
+const SCORE_SCALE = {
+  BATTER: { floor: 0, divisor: 4.9 },
+  PITCHER: { floor: 101, divisor: 2.74 },
+} as const;
+
+function toScale(raw: number, kind: PlayerKind): number {
+  const s = SCORE_SCALE[kind];
+  return clamp((raw - s.floor) / s.divisor, 0, 100);
 }
 
-/** 팀 전체 전력 지표 (0~100). 매치메이킹/CPU 난이도 표시에 쓴다. */
+/** 목록·카드에 쓰는 선수 종합 지표 (0~100). 타자와 투수를 직접 비교할 수 있다. */
+export function playerScore(p: Player): number {
+  const raw = p.kind === 'PITCHER' ? pitcherScore(p) : hitterScore(p);
+  return Math.round(toScale(raw, p.kind));
+}
+
+/**
+ * 팀 전체 전력 지표 (0~100). 매치메이킹/CPU 난이도 표시에 쓴다.
+ *
+ * 평균을 낸 뒤 눈금으로 옮기는데, 변환이 아핀이라 «각자 옮긴 뒤 평균»과 결과가 같다.
+ */
 export function teamRating(team: Team): number {
   const hitters = team.players.filter((p) => p.kind === 'BATTER');
   const pitchers = team.players.filter((p) => p.kind === 'PITCHER');
   const h = hitters.reduce((a, p) => a + hitterScore(p), 0) / Math.max(1, hitters.length);
   const pi = pitchers.reduce((a, p) => a + pitcherScore(p), 0) / Math.max(1, pitchers.length);
-  return Math.round(clamp((h / 4.9) * 0.55 + (pi / 2.9) * 0.45, 0, 100));
+  return Math.round(
+    clamp(toScale(h, 'BATTER') * 0.55 + toScale(pi, 'PITCHER') * 0.45, 0, 100),
+  );
 }

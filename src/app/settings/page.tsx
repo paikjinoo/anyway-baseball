@@ -113,6 +113,23 @@ export default function SettingsPage() {
             className="h-5 w-5 shrink-0 accent-lime-500"
           />
         </label>
+
+        <label className="mt-3 flex items-center justify-between gap-3">
+          <span>
+            <span className="block text-sm font-semibold">예상 도착점 표시</span>
+            <span className="block text-[11px] leading-relaxed text-slate-500">
+              내 타석에서 공이 손을 떠나면 스트라이크존에 도착 지점을 자홍색으로 찍어
+              줍니다. <b className="text-slate-400">타자의 선구안이 높을수록</b> 실제 지점에
+              가깝고 오차 원이 작아집니다. 판정에는 영향을 주지 않습니다.
+            </span>
+          </span>
+          <input
+            type="checkbox"
+            checked={settings.showPitchRead}
+            onChange={(e) => update({ showPitchRead: e.target.checked })}
+            className="h-5 w-5 shrink-0 accent-lime-500"
+          />
+        </label>
       </section>
 
       <DataBackup />

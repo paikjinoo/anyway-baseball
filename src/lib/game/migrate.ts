@@ -167,12 +167,38 @@ export function migrateTeamDoc(
  * **선수별 선택 필드(career / seasonLog / splits / spentGold)는 채우지 않는다.** 46명 ×
  * 빈 SeasonStat이면 팀 문서가 5~10KB 늘어 localStorage 5MB 한계와 클립 저장에 그대로
  * 압력이 간다. 그 필드들은 이미 읽는 쪽이 `??`로 정규화한다 (season.careerOf 등).
+ *
+ * 야수의 `pitching`은 예외로 여기서 **지운다.** 채우는 게 아니라 덜어 내는 일이라 문서가
+ * 줄고, 남겨 두면 훈련·리포트 화면이 "이 타자의 구종"을 계속 그린다
+ * (@see stripBatterPitching). 스키마 버전은 올리지 않는다 — 선택 필드가 사라지는 것뿐이라
+ * 옛 코드도 그대로 읽는다.
  */
 export function normalizeTeam(team: Team): Team {
   const seasonNo = typeof team.seasonNo === 'number' ? team.seasonNo : 1;
   const inventory = team.inventory ?? {};
-  if (team.seasonNo === seasonNo && team.inventory === inventory) return team;
-  return { ...team, seasonNo, inventory };
+  const players = stripBatterPitching(team.players);
+  if (team.seasonNo === seasonNo && team.inventory === inventory && players === team.players) {
+    return team;
+  }
+  return { ...team, seasonNo, inventory, players };
+}
+
+/**
+ * 야수가 들고 있던 투구 능력을 떼어 낸다. 비상 등판용으로 직구 하나씩 주던 시절의 잔재다.
+ *
+ * 바뀐 선수가 없으면 **입력 배열을 그대로 돌려준다** — 호출부(normalizeTeam)가 참조
+ * 동등성으로 "손댈 것이 없었다"를 판정해 새 객체를 만들지 않는다.
+ */
+function stripBatterPitching(players: Team['players']): Team['players'] {
+  if (!players?.some((p) => p.kind === 'BATTER' && p.pitching)) return players;
+  return players.map((p) => {
+    if (p.kind !== 'BATTER' || !p.pitching) return p;
+    const { pitching: _drop, ...rest } = p;
+    // base에도 같은 값이 스냅숏으로 남아 있다. 능력치초기화권이 그걸 되살리지 않도록 함께 비운다.
+    // undefined를 넣지 않고 키째 뺀다 — Firestore는 undefined 필드가 있는 문서를 거부한다.
+    const { learned: _learned, ...base } = rest.base;
+    return { ...rest, base: { ...base, stamina: 0, arsenal: {} } };
+  });
 }
 
 // ---------------------------------------------------------------------------

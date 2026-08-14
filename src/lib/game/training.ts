@@ -54,9 +54,23 @@ export function learnPitchGold(type: PitchType, pitcher: Player): number {
 }
 
 export type TrainableBattingKey = keyof BattingAttr;
-export const BATTING_KEYS: TrainableBattingKey[] = [
-  'contact', 'power', 'eye', 'speed', 'fielding', 'arm',
-];
+
+/**
+ * 타석에서만 쓰이는 능력치. **타자 전용이다** — 지명타자가 고정 규칙이라 투수는 타석에
+ * 서지 않으므로, 투수의 이 세 값은 굴려만 두고 아무 데도 쓰이지 않는다.
+ * @see ATHLETIC_KEYS — 이름이 batting일 뿐 타석과 무관한 나머지
+ */
+export const HITTING_KEYS: TrainableBattingKey[] = ['contact', 'power', 'eye'];
+
+/**
+ * 주루·수비 능력치. BattingAttr에 같이 들어 있지만 타석과는 상관이 없고,
+ * **투수도 똑같이 쓴다** — 마운드는 내야 수비 위치이며(fielding.INFIELD) 타구 처리·베이스
+ * 커버·주자 견제에 speed/fielding/arm이 그대로 들어간다.
+ */
+export const ATHLETIC_KEYS: TrainableBattingKey[] = ['speed', 'fielding', 'arm'];
+
+/** 둘을 합친 전체 목록. 리포트나 자동 투자처럼 전부 훑는 곳에서 쓴다. */
+export const BATTING_KEYS: TrainableBattingKey[] = [...HITTING_KEYS, ...ATHLETIC_KEYS];
 export const BATTING_KEY_KO: Record<TrainableBattingKey, string> = {
   contact: '컨택',
   power: '파워',
@@ -190,7 +204,9 @@ export function trainPitch(
 /** 스태미나 훈련 */
 export function trainStamina(player: Player, points = 1): TrainResult {
   const p = structuredClone(player);
-  if (!p.pitching) return { ok: false, message: '투수가 아닙니다.', player };
+  if (p.kind !== 'PITCHER' || !p.pitching) {
+    return { ok: false, message: '투수가 아닙니다.', player };
+  }
   const cap = statCap(p);
   let spent = 0;
   let gained = 0;
@@ -301,7 +317,7 @@ export function learnPitch(
   if (!target) return { ok: false, team, message: '선수를 찾을 수 없습니다.' };
 
   const p = structuredClone(target);
-  if (!p.pitching) {
+  if (p.kind !== 'PITCHER' || !p.pitching) {
     return { ok: false, team, message: '투수가 아닙니다.' };
   }
   if (p.pitching.arsenal[type]) {
@@ -359,7 +375,7 @@ export function replacePitch(
   if (!target) return { ok: false, team, message: '선수를 찾을 수 없습니다.' };
 
   const p = structuredClone(target);
-  if (!p.pitching) {
+  if (p.kind !== 'PITCHER' || !p.pitching) {
     return { ok: false, team, message: '투수가 아닙니다.' };
   }
   if (from === to) {
@@ -441,10 +457,13 @@ type InvestSlot =
   | { kind: 'PITCH'; type: PitchType; attr: keyof PitchAttr };
 
 /**
- * 이 선수에게 훈련 포인트를 부을 항목 목록.
+ * 이 선수에게 훈련 포인트를 부을 항목 목록. **훈련 화면에서 그 선수가 실제로 올릴 수 있는
+ * 항목과 같아야 한다** — 여기가 더 좁으면 상점에서 뽑은 선수가 직접 키운 선수보다 약하고,
+ * 더 넓으면 아무도 훈련하지 않는 곳에 예산이 새어 나간다.
  *
- * 투수의 타격 능력치는 넣지 않는다 — 실제로 아무도 거기 훈련하지 않으므로,
- * 자동 투자가 거기 쓰면 "직접 키운 선수와 같은 수준"이 아니라 그냥 손해다.
+ * 투수의 타석 능력치(컨택·파워·선구안)는 넣지 않는다 — 지명타자가 고정 규칙이라 투수는
+ * 타석에 서지 않는다. 반면 주루·수비는 넣는다: 마운드도 내야 수비 위치라 투수 앞 땅볼과
+ * 베이스 커버에 그대로 쓰이고, 훈련 화면도 그래서 «수비 훈련»을 연다.
  *
  * 구종 순회는 arsenal의 키 순서가 아니라 ALL_PITCH_TYPES 순서로 한다.
  * 삽입 순서에 기대는 순간 같은 시드가 다른 결과를 내기 시작한다.
@@ -453,7 +472,8 @@ function investSlotsOf(p: Player): InvestSlot[] {
   if (p.kind === 'BATTER') {
     return BATTING_KEYS.map((key) => ({ kind: 'BATTING', key }) as InvestSlot);
   }
-  const slots: InvestSlot[] = [{ kind: 'STAMINA' }];
+  const slots: InvestSlot[] = ATHLETIC_KEYS.map((key) => ({ kind: 'BATTING', key }) as InvestSlot);
+  slots.push({ kind: 'STAMINA' });
   for (const type of ALL_PITCH_TYPES) {
     if (!p.pitching?.arsenal[type]) continue;
     for (const attr of ['velocity', 'control', 'movement'] as (keyof PitchAttr)[]) {

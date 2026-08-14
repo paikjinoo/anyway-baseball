@@ -12,14 +12,11 @@ import type { MatchRules } from '@/lib/game/types';
 export function RuleSettings({
   value,
   onChange,
-  /** 지명타자 항목을 숨긴다 (올스타전은 항상 DH) */
-  hideDH = false,
   /** 방 만들기처럼 좁은 폭에 넣을 때 여백을 줄인다 */
   compact = false,
 }: {
   value: MatchRules;
   onChange: (patch: Partial<MatchRules>) => void;
-  hideDH?: boolean;
   compact?: boolean;
 }) {
   const gap = compact ? 'mb-4' : 'mb-5';
@@ -87,21 +84,6 @@ export function RuleSettings({
           />
         </div>
       </div>
-
-      {!hideDH && (
-        <label className={`${gap} flex items-center justify-between`}>
-          <span>
-            <span className="block text-sm font-semibold">지명타자 (DH)</span>
-            <span className="text-[11px] text-slate-500">끄면 투수가 타순에 들어갑니다</span>
-          </span>
-          <input
-            type="checkbox"
-            checked={value.useDH}
-            onChange={(e) => onChange({ useDH: e.target.checked })}
-            className="h-5 w-5 shrink-0 accent-lime-500"
-          />
-        </label>
-      )}
 
       <div>
         <label className="field-label">

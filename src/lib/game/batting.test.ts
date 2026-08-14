@@ -7,9 +7,12 @@ import {
   PLATOON_SAME_HAND,
   effectiveBatSide,
   platoonRadiusMult,
+  readPitchLocation,
 } from './batting';
+import { computePitch } from './pitching';
+import { AIM_LIMIT, ALL_PITCH_TYPES } from './constants';
 import { DEFAULT_SETTINGS } from './types';
-import type { Handedness, Player } from './types';
+import type { Handedness, PitchTrajectory, Player } from './types';
 
 function batter(bats: Player['bats']): Player {
   const p = generatePlayer(new Rng(seedFromString(`bat-${bats}`)), { position: 'CF', number: 8 });
@@ -113,4 +116,98 @@ describe('좌우 상성', () => {
     expect(gap).toBeGreaterThan(0.002);
     expect(gap).toBeLessThan(0.035);
   }, 300_000);
+});
+
+// ---------------------------------------------------------------------------
+// 선구 표시 (readPitchLocation)
+// ---------------------------------------------------------------------------
+
+/** 눈만 다른 같은 타자 */
+function eyed(eye: number): Player {
+  const p = generatePlayer(new Rng(seedFromString('read-batter')), { position: 'LF', number: 3 });
+  // 자세 보정이 섞이지 않도록 스탠다드로 고정한다 (선구안만 비교하려는 테스트다)
+  return { ...p, stance: 0, batting: { ...p.batting, eye } };
+}
+
+/** 여러 코스·구종의 궤적. 한 공만 보면 난수 한 번을 재는 셈이라 표본을 넓힌다. */
+function trajectories(n: number): PitchTrajectory[] {
+  const pit = pitcher('R');
+  const rng = new Rng(seedFromString('read-traj'));
+  return Array.from({ length: n }, (_, i) => {
+    const type = ALL_PITCH_TYPES[i % ALL_PITCH_TYPES.length];
+    const cmd = { type, targetX: rng.range(-0.9, 0.9), targetY: rng.range(-0.9, 0.9), quickPitch: false };
+    return computePitch(rng, pit, cmd, 0);
+  });
+}
+
+/**
+ * 예상 지점과 실제 도착점의 거리 평균.
+ *
+ * 조준 한계(AIM_LIMIT) 밖으로 빠진 공은 뺀다 — 표시가 한계선에 붙어 서는 것이
+ * 오차로 잡혀서, 재려는 것(선구안이 만드는 흔들림)이 아니라 제구 산포를 재게 된다.
+ */
+function meanReadError(eye: number, trajs: PitchTrajectory[]): number {
+  const b = eyed(eye);
+  const inRange = trajs.filter(
+    (t) => Math.abs(t.zoneX) < AIM_LIMIT - 0.6 && Math.abs(t.zoneY) < AIM_LIMIT - 0.6,
+  );
+  expect(inRange.length).toBeGreaterThan(trajs.length * 0.5);
+  const sum = inRange.reduce((acc, t) => {
+    const r = readPitchLocation(b, t);
+    return acc + Math.hypot(r.x - t.zoneX, r.y - t.zoneY);
+  }, 0);
+  return sum / inRange.length;
+}
+
+describe('선구 표시', () => {
+  it('같은 공은 몇 번을 읽어도 같은 자리다', () => {
+    // 화면 두 곳(3D 존·조준 패널)이 매 프레임 따로 부르므로, 여기가 흔들리면
+    // 표시가 떨리고 두 화면이 서로 다른 지점을 가리킨다.
+    const b = eyed(50);
+    for (const t of trajectories(9)) {
+      const first = readPitchLocation(b, t);
+      for (let i = 0; i < 5; i++) expect(readPitchLocation(b, t)).toEqual(first);
+    }
+  });
+
+  it('선구안이 높을수록 실제 도착점에 가깝다', () => {
+    const trajs = trajectories(400);
+    const bad = meanReadError(10, trajs);
+    const mid = meanReadError(50, trajs);
+    const good = meanReadError(95, trajs);
+
+    expect(good).toBeLessThan(mid);
+    expect(mid).toBeLessThan(bad);
+    // 존 반폭이 1이다. 실측은 선구안 10 → 0.33 · 50 → 0.21 · 95 → 0.08이고,
+    // 임계값은 그 사이를 넉넉히 비켜 잡았다 (기울기가 절반으로 눌리면 걸린다).
+    expect(good).toBeLessThan(0.13);
+    expect(bad).toBeGreaterThan(0.25);
+  });
+
+  it('오차 원은 선구안과 함께 줄고, 어려운 구종에서 커진다', () => {
+    const [fast] = trajectories(1); // ALL_PITCH_TYPES[0] = 직구
+    const knuckle = computePitch(
+      new Rng(seedFromString('read-knuckle')),
+      pitcher('R'),
+      { type: 'KNUCKLE', targetX: 0, targetY: 0, quickPitch: false },
+      0,
+    );
+    expect(readPitchLocation(eyed(95), fast).radius).toBeLessThan(
+      readPitchLocation(eyed(10), fast).radius,
+    );
+    expect(readPitchLocation(eyed(50), knuckle).radius).toBeGreaterThan(
+      readPitchLocation(eyed(50), fast).radius,
+    );
+  });
+
+  it('조준할 수 없는 곳은 가리키지 않는다', () => {
+    // 한참 빠진 공(존 좌표 4.0)이라도 표시는 조준 한계 안에 머문다.
+    const [t] = trajectories(1);
+    const wild = { ...t, zoneX: 4, zoneY: -4 };
+    for (const eye of [1, 50, 99]) {
+      const r = readPitchLocation(eyed(eye), wild);
+      expect(Math.abs(r.x)).toBeLessThanOrEqual(AIM_LIMIT);
+      expect(Math.abs(r.y)).toBeLessThanOrEqual(AIM_LIMIT);
+    }
+  });
 });

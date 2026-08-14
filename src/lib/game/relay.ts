@@ -376,7 +376,6 @@ export function relayGameState(state: RelayState, localSettings: GameSettings): 
   const settings: GameSettings = {
     ...localSettings,
     pitchSpeedScale: state.rules.pitchSpeedScale,
-    useDH: true,
   };
 
   return {

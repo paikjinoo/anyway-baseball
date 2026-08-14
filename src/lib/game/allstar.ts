@@ -222,7 +222,7 @@ export function buildAllStarTeam(
     if (batters[0][i]) lineup.push(batters[0][i].id);
     if (batters[1][i]) lineup.push(batters[1][i].id);
   }
-  // 픽이 모자란 비정상 상황 대비: 남은 야수 → 투수 순으로 9명을 채운다
+  // 픽이 모자란 비정상 상황 대비: 남은 야수로 9명을 채운다 (투수는 타석에 서지 않는다)
   if (lineup.length < 9) {
     const inLineup = new Set(lineup);
     for (const p of players) {

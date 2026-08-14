@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { generateTeam } from './generator';
+import { effectiveBatSide } from './batting';
 import { Rng } from './rng';
 import {
   DEFAULT_SETTINGS,
@@ -77,8 +78,32 @@ const normalSwing: SwingCommand = {
   timingMs: 0,
 };
 
+/**
+ * 판정 테스트 전용 상태. 참가 선수를 **로스터 순서로 못 박는다.**
+ *
+ * makeState는 suggestRelayPick(= generator.pitcherScore 순)으로 뽑으므로, 종합 지표의
+ * 가중치가 바뀌면 뽑히는 투수가 달라지고 아래 고정 시드 판정이 통째로 어긋난다. 여기서
+ * 재려는 것은 "같은 입력이면 같은 판정"이지 "누가 뽑히는가"가 아니다.
+ */
+function pinnedState(count: number, rounds: number): RelayState {
+  const participants = Array.from({ length: count }, (_, index) => {
+    const uid = `u${index}`;
+    const team = generateTeam(new Rng(100 + index), {
+      ownerUid: uid,
+      id: `team-${index}`,
+      name: `팀${index}`,
+      abbr: `T${index}`,
+    });
+    return relayParticipant(uid, `선수${index}`, team, {
+      pitcherId: team.players.find((p) => p.position === 'P' && p.pitching)!.id,
+      batterId: team.players.find((p) => p.position !== 'P')!.id,
+    });
+  });
+  return createRelayState(participants, { roundCount: rounds, pitchSpeedScale: 0.55 }, 'relay-test');
+}
+
 function seededPitch(seed: number, pitch = centerFastball, swing = normalSwing, balls = 0, strikes = 0) {
-  const relay = makeState(2, 2);
+  const relay = pinnedState(2, 2);
   const game = relayGameState(relay, DEFAULT_SETTINGS);
   game.rngState = seed;
   game.balls = balls;
@@ -165,11 +190,11 @@ describe('릴레이 점수와 순위', () => {
 
 describe('릴레이 판정과 입력 검증', () => {
   it.each([
-    [1, 'SINGLE'],
-    [7, 'GROUND_OUT'],
-    [16, 'FOUL'],
-    [19, 'HOME_RUN'],
-    [36, 'FLY_OUT'],
+    [6, 'SINGLE'],
+    [82, 'GROUND_OUT'],
+    [22, 'FOUL'],
+    [185, 'HOME_RUN'],
+    [84, 'FLY_OUT'],
   ] as const)('고정 시드 %d에서 %s 판정을 재현한다', (seed, expected) => {
     expect(seededPitch(seed).kind).toBe(expected);
   });
@@ -181,15 +206,17 @@ describe('릴레이 판정과 입력 검증', () => {
     expect(seededPitch(1, centerFastball, { ...normalSwing, aimX: 3, aimY: 3, timingMs: 500 }).kind)
       .toBe('STRIKE_SWINGING');
 
-    const state = makeState(2, 2);
-    const batter = currentRelayBatter(state)!;
-    const bodyPitch = {
-      ...centerFastball,
-      targetX: batter.batter.bats === 'L' ? 3.2 : -3.2,
-    };
+    // 몸쪽은 타석 방향으로 정해진다. bats만 보면 스위치 타자('S')에서 반대쪽을 겨눠
+    // 사구가 아니라 볼이 되므로 실제 상대 투수까지 넣어 판정한다.
+    const game = relayGameState(pinnedState(2, 2), DEFAULT_SETTINGS);
+    const defense = game.half === 'TOP' ? game.home : game.away;
+    const offense = game.half === 'TOP' ? game.away : game.home;
+    const batter = offense.roster[offense.lineup[offense.atBatIndex]];
+    const side = effectiveBatSide(batter, defense.roster[defense.pitcherId]);
+    const bodyPitch = { ...centerFastball, targetX: side === 'L' ? 3.2 : -3.2 };
     expect(seededPitch(3, bodyPitch, take).kind).toBe('HIT_BY_PITCH');
 
-    const foul = seededPitch(16, centerFastball, normalSwing, 0, 2);
+    const foul = seededPitch(22, centerFastball, normalSwing, 0, 2);
     expect(foul.kind).toBe('FOUL');
     expect(foul.state.strikes).toBe(2);
     expect(foul.atBatEnded).toBe(false);

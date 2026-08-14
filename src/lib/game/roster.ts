@@ -74,7 +74,7 @@ export function isAvailable(p: Player): boolean {
  * 경기를 시작하기 전에 확인해야 할 문제 목록. 비어 있으면 출전 가능.
  * 화면에는 이 문자열을 그대로 보여 준다.
  */
-export function rosterIssues(team: Team, useDH = true): string[] {
+export function rosterIssues(team: Team): string[] {
   const issues: string[] = [];
 
   const sp = starters(team);
@@ -93,11 +93,9 @@ export function rosterIssues(team: Team, useDH = true): string[] {
     issues.push(`타순은 서로 다른 ${LINEUP_SIZE}명이어야 합니다.`);
   } else {
     const byId = new Map(team.players.map((p) => [p.id, p]));
-    if (useDH) {
-      const pitchers = lineup.map((id) => byId.get(id)).filter((p) => p?.kind === 'PITCHER');
-      if (pitchers.length) {
-        issues.push(`지명타자 경기에서는 투수를 타순에 넣을 수 없습니다: ${pitchers.map((p) => p!.name).join(', ')}`);
-      }
+    const pitchers = lineup.map((id) => byId.get(id)).filter((p) => p?.kind === 'PITCHER');
+    if (pitchers.length) {
+      issues.push(`투수는 타순에 넣을 수 없습니다: ${pitchers.map((p) => p!.name).join(', ')}`);
     }
   }
 
@@ -204,7 +202,7 @@ export function swapIntoLineup(team: Team, slot: number, playerId: string): Rost
 }
 
 /** 타순·로테이션을 자동 편성으로 되돌린다 */
-export function resetAssignments(team: Team, useDH = true): Team {
+export function resetAssignments(team: Team): Team {
   const withRotation = { ...team, rotation: autoRotation(team), rotationIndex: 0 };
-  return { ...withRotation, lineup: autoLineup(withRotation, useDH) };
+  return { ...withRotation, lineup: autoLineup(withRotation) };
 }

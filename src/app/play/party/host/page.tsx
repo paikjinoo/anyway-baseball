@@ -78,8 +78,7 @@ function PartyHostInner() {
   const [started, setStarted] = useState(false);
   const [myPicks, setMyPicks] = useState<PartyPicks>({ batters: [], pitchers: [] });
   const [myReady, setMyReady] = useState(false);
-  // 올스타 라인업은 야수 9명으로 짜므로 지명타자는 항상 켠 채로 둔다
-  const [rules, setRules] = useState<MatchRules>(() => ({ ...pickRules(settings), useDH: true }));
+  const [rules, setRules] = useState<MatchRules>(() => pickRules(settings));
 
   const uid = user?.uid ?? '';
   // 방을 만드는 effect는 한 번만 도는데, 그 안에서 최신 규칙을 읽어야 한다
@@ -388,8 +387,7 @@ function PartyHostInner() {
     disambiguateAbbr(away.team, home.team);
 
     // 사운드·카메라는 각자 자기 설정을 쓰고, 승부 조건만 방 규칙으로 덮는다.
-    // 올스타 라인업은 야수 9명으로 짜므로 지명타자는 항상 쓴다.
-    const gameSettings = { ...settings, ...rules, useDH: true };
+    const gameSettings = { ...settings, ...rules };
     const state = createGame(away.team, home.team, gameSettings, seed);
     const owners: OwnerMap = { ...away.owners, ...home.owners };
     const seatNames = Object.fromEntries(seats.map((s) => [s.uid, s.name]));

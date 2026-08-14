@@ -337,11 +337,22 @@ export interface GameSettings {
   mercyRunDiff: number;
   /** 콜드게임 발동 최소 이닝 */
   mercyFromInning: number;
-  /** 지명타자 사용 여부 */
-  useDH: boolean;
+  /**
+   * 지명타자는 **항상 쓴다.** 선택지였던 `useDH`는 없앴다 — 선수가 타자와 투수로
+   * 나뉘어 있고 훈련도 각자 것만 하는데, 규칙 하나로 투수를 타석에 세우면 아무도
+   * 키운 적 없는 능력치로 타석에 서게 된다. 저장된 설정에 남아 있는 값은 무시된다.
+   */
   /** 투구/타구 연출 속도 배율. 1.0이 기본. 낮을수록 느리다(= 쉬움). */
   pitchSpeedScale: number;
   cameraShake: boolean;
+  /**
+   * 타석에서 공의 예상 도착 지점을 표시할지. 정확도는 타자의 선구안에 비례한다.
+   *
+   * **경기 규칙이 아니라 이 기기의 표시 설정이다** (cameraShake·graphicsQuality와 같다).
+   * 그릴 뿐 판정에는 관여하지 않으므로 — 판정은 언제나 실제 도착점으로 한다 —
+   * 켜고 끄는 것이 승부 조건을 바꾸지 않는다. 그래서 MatchRules에 넣지 않는다.
+   */
+  showPitchRead: boolean;
   /**
    * 그래픽 품질. 외곽선·접지 그림자·파티클·보조 인물의 총량을 정한다.
    *
@@ -365,22 +376,24 @@ export const DEFAULT_SETTINGS: GameSettings = {
   mercyRule: true,
   mercyRunDiff: 10,
   mercyFromInning: 7,
-  useDH: true,
   pitchSpeedScale: 0.55,
   cameraShake: true,
+  showPitchRead: true,
   graphicsQuality: 'HIGH',
 };
 
 /**
  * 한 경기의 규칙. GameSettings 중 **양쪽에 똑같이 적용돼야 하는** 값만 모은 것이다.
  *
- * 사운드나 카메라 흔들림은 각자 자기 브라우저 설정을 쓰지만, 이닝 수·콜드게임·DH·
+ * 사운드나 카메라 흔들림은 각자 자기 브라우저 설정을 쓰지만, 이닝 수·콜드게임·
  * 투구 체감 속도는 승부 조건이라 한쪽만 다르면 경기가 성립하지 않는다.
  * 온라인 방을 만들 때 방장이 정하고, 그 값이 그대로 GameState.settings에 들어간다.
+ *
+ * 지명타자는 여기 없다 — 고를 수 없는 규칙이라 맞출 것도 없다.
  */
 export type MatchRules = Pick<
   GameSettings,
-  'regulationInnings' | 'mercyRule' | 'mercyRunDiff' | 'mercyFromInning' | 'useDH' | 'pitchSpeedScale'
+  'regulationInnings' | 'mercyRule' | 'mercyRunDiff' | 'mercyFromInning' | 'pitchSpeedScale'
 >;
 
 export const RULE_KEYS = [
@@ -388,7 +401,6 @@ export const RULE_KEYS = [
   'mercyRule',
   'mercyRunDiff',
   'mercyFromInning',
-  'useDH',
   'pitchSpeedScale',
 ] as const;
 
@@ -399,7 +411,6 @@ export function pickRules(s: GameSettings | MatchRules): MatchRules {
     mercyRule: s.mercyRule,
     mercyRunDiff: s.mercyRunDiff,
     mercyFromInning: s.mercyFromInning,
-    useDH: s.useDH,
     pitchSpeedScale: s.pitchSpeedScale,
   };
 }
@@ -410,7 +421,6 @@ export function describeRules(r: MatchRules | undefined): string {
   return [
     `${r.regulationInnings}이닝`,
     r.mercyRule ? `콜드 ${r.mercyRunDiff}점(${r.mercyFromInning}회~)` : '콜드 없음',
-    r.useDH ? 'DH' : '투수 타석',
     `구속 ${Math.round(r.pitchSpeedScale * 100)}%`,
   ].join(' · ');
 }

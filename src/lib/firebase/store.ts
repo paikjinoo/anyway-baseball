@@ -75,12 +75,40 @@ function lsWrite(key: string, value: unknown): boolean {
   }
 }
 
-/** 로컬 작업을 막지 않는 최선 노력 원격 동기화. 실패 데이터는 로컬 캐시에 남는다. */
-function syncRemote(task: () => Promise<unknown>) {
+/**
+ * 게스트 uid 접두사. Firebase 인증이 없는 로컬 전용 계정이다.
+ *
+ * auth가 아니라 여기 있는 이유는 import 방향 때문이다 — auth.ts가 이미 store를 가져다 쓰고
+ * 있어서 반대 방향으로 참조하면 순환이 된다.
+ */
+export const GUEST_UID_PREFIX = 'guest_';
+
+/**
+ * 이 uid로는 Firestore에 쓸 수 없다. 보안 규칙이 `request.auth != null`을 요구하는데
+ * 게스트는 Firebase 인증을 거치지 않기 때문이다. 시도하면 매번 권한 오류만 나므로
+ * **아예 보내지 않는다** — 실패 로그를 조용히 만들려는 게 아니라, 진짜 실패만 남기려는 것이다.
+ */
+export function isGuestUid(uid: string): boolean {
+  return uid.startsWith(GUEST_UID_PREFIX);
+}
+
+/**
+ * 로컬 작업을 막지 않는 최선 노력 원격 동기화. 실패 데이터는 로컬 캐시에 남는다.
+ *
+ * **삼켜도 흔적은 남긴다.** 예전에는 빈 catch였는데, 그 침묵이 실제로 오래 대가를 치렀다 —
+ * setDoc은 `undefined` 필드를 만나면 프로미스가 아니라 **동기 예외**로 문서를 통째로
+ * 거부하고(@see firebase/client.getDb), 로컬 저장은 JSON 직렬화 덕에 멀쩡히 성공한다.
+ * 그래서 화면상으로는 아무 문제가 없는 채 원격 쓰기만 전부 사라졌다.
+ */
+function syncRemote(task: () => Promise<unknown>, what = '동기화') {
+  const warn = (e: unknown) => {
+    if (process.env.NODE_ENV !== 'production') console.warn(`[firestore] ${what} 실패`, e);
+  };
   try {
-    void task().catch(() => {});
-  } catch {
-    // SDK 초기화/네트워크 오류가 동기적으로 나도 로컬 저장은 이미 끝났다.
+    void task().catch(warn);
+  } catch (e) {
+    // SDK 초기화/직렬화 오류가 동기적으로 나도 로컬 저장은 이미 끝났다.
+    warn(e);
   }
 }
 
@@ -138,7 +166,9 @@ export async function saveTeam(team: Team): Promise<void> {
   all[team.id] = next;
   lsWrite(LS_TEAMS, all);
   const db = getDb();
-  if (firebaseConfigured && db) syncRemote(() => setDoc(doc(db, 'teams', team.id), next));
+  if (firebaseConfigured && db && !isGuestUid(team.ownerUid)) {
+    syncRemote(() => setDoc(doc(db, 'teams', team.id), next), `팀 저장(${team.id})`);
+  }
 }
 
 export async function loadTeam(teamId: string): Promise<Team | null> {
@@ -197,11 +227,13 @@ export async function listTeams(uid: string): Promise<Team[]> {
  */
 export async function listTeamsReport(uid: string): Promise<TeamLoadReport> {
   const db = getDb();
-  if (firebaseConfigured && db) {
+  // 게스트는 규칙에 막혀 조회 자체가 실패한다. 물어보지 않고 바로 캐시로 간다.
+  if (firebaseConfigured && db && !isGuestUid(uid)) {
     try {
       const q = query(collection(db, 'teams'), where('ownerUid', '==', uid));
       const snap = await getDocs(q);
       const teams = snap.docs.map((d) => d.data() as Team);
+      const remoteIds = new Set(snap.docs.map((d) => d.id));
       const all = lsRead<Record<string, Team>>(LS_TEAMS, {});
       for (const t of teams) {
         if (!all[t.id] || t.updatedAt >= all[t.id].updatedAt) all[t.id] = t;
@@ -212,15 +244,26 @@ export async function listTeamsReport(uid: string): Promise<TeamLoadReport> {
       const purged = purgeUnreadableTeams(all, report);
       lsWrite(LS_TEAMS, all);
       // 원격에도 남겨 두면 다음 로드에 그대로 다시 내려와 정리가 매번 반복된다.
-      for (const id of purged) syncRemote(() => deleteDoc(doc(db, 'teams', id)));
+      for (const id of purged) syncRemote(() => deleteDoc(doc(db, 'teams', id)), `옛 팀 정리(${id})`);
       // **updatedAt은 올리지 않는다.** listTeams의 LWW 병합이 왜곡된다 —
       // 마이그레이션은 형태 변환일 뿐 "새 저장"이 아니다.
-      if (report.migrated > 0) {
-        for (const t of report.teams) syncRemote(() => setDoc(doc(db, 'teams', t.id), t));
+      //
+      // 원격이 **통째로 비었을 때만** 이 기기의 팀을 올린다. saveTeam이 한 번 실패하면 그
+      // 팀은 이 기기에만 남는데, 목록 조회는 캐시로 조용히 폴백하므로 화면에는 아무 증상이
+      // 없다. 그래서 기기를 옮기거나 브라우저 데이터를 지우는 순간에야 팀이 없다는 걸 알게
+      // 된다. 다시 저장할 일이 생길 때까지 기다리지 않고 여기서 메운다.
+      //
+      // 조건을 "원격에 하나도 없음"으로 좁힌 이유는 **부활을 막기 위해서다.** 원격에 팀이
+      // 이미 있는데 이 기기 캐시에 다른 팀이 남아 있다면, 그건 다른 기기에서 지우고 새로
+      // 창단했다는 뜻이다. 그 상태에서 캐시본을 올리면 "한 계정 한 팀"이 깨진다.
+      const repair = remoteIds.size === 0 ? report.teams : [];
+      for (const t of report.migrated > 0 ? report.teams : repair) {
+        syncRemote(() => setDoc(doc(db, 'teams', t.id), t), `팀 업로드(${t.id})`);
       }
       return report;
-    } catch {
+    } catch (e) {
       // 캐시 폴백
+      if (process.env.NODE_ENV !== 'production') console.warn('[firestore] 팀 목록 조회 실패', e);
     }
   }
   // 게스트이거나 원격 조회가 실패한 경로. 로컬만 정리하면 되고, 원격에 사본이 남아 있다면
@@ -280,10 +323,13 @@ function purgeUnreadableTeams(all: Record<string, Team>, report: TeamLoadReport)
 
 export async function deleteTeam(teamId: string): Promise<void> {
   const all = lsRead<Record<string, Team>>(LS_TEAMS, {});
+  const owner = all[teamId]?.ownerUid;
   delete all[teamId];
   lsWrite(LS_TEAMS, all);
   const db = getDb();
-  if (firebaseConfigured && db) syncRemote(() => deleteDoc(doc(db, 'teams', teamId)));
+  if (firebaseConfigured && db && !(owner && isGuestUid(owner))) {
+    syncRemote(() => deleteDoc(doc(db, 'teams', teamId)), `팀 삭제(${teamId})`);
+  }
 }
 
 /** CPU 팀 등 소유자가 없는 팀도 로컬에 보관한다 */
@@ -332,12 +378,14 @@ export async function saveLeague(league: League): Promise<void> {
   all[next.id] = next;
   lsWrite(LS_LEAGUES, all);
   const db = getDb();
-  if (firebaseConfigured && db) syncRemote(() => setDoc(doc(db, 'leagues', next.id), next));
+  if (firebaseConfigured && db && !isGuestUid(next.ownerUid)) {
+    syncRemote(() => setDoc(doc(db, 'leagues', next.id), next), `리그 저장(${next.id})`);
+  }
 }
 
 export async function listLeagues(uid: string): Promise<League[]> {
   const db = getDb();
-  if (firebaseConfigured && db) {
+  if (firebaseConfigured && db && !isGuestUid(uid)) {
     try {
       const q = query(collection(db, 'leagues'), where('ownerUid', '==', uid));
       const snap = await getDocs(q);
@@ -353,15 +401,18 @@ export async function listLeagues(uid: string): Promise<League[]> {
         all[league.id] = hydrated;
         if (!league.cpuTeams?.length && hydrated.cpuTeams?.length) {
           // 원본 브라우저에서 구버전 리그를 한 번 불러오기만 해도 원격 문서를 자동 승격한다.
-          syncRemote(() => setDoc(doc(db, 'leagues', hydrated.id), hydrated));
+          syncRemote(() => setDoc(doc(db, 'leagues', hydrated.id), hydrated), `리그 승격(${hydrated.id})`);
         }
       }
       lsWrite(LS_LEAGUES, all);
+      // 리그에는 팀 같은 복구 업로드를 두지 않는다. 리그는 계정당 여러 개라 "원격이 비었다"가
+      // 곧 유실을 뜻하지 않고, 경기 결과마다 saveLeague가 돌아 스스로 메워진다.
       return Object.values(all)
         .filter((l) => l.ownerUid === uid)
         .map(hydrateLeagueCpuTeams);
-    } catch {
+    } catch (e) {
       // 캐시 폴백
+      if (process.env.NODE_ENV !== 'production') console.warn('[firestore] 리그 목록 조회 실패', e);
     }
   }
   return Object.values(lsRead<Record<string, League>>(LS_LEAGUES, {}))
@@ -391,7 +442,9 @@ export async function deleteLeague(id: string): Promise<void> {
     lsWrite(LS_TEAMS, allTeams);
   }
   const db = getDb();
-  if (firebaseConfigured && db) syncRemote(() => deleteDoc(doc(db, 'leagues', id)));
+  if (firebaseConfigured && db && !(league && isGuestUid(league.ownerUid))) {
+    syncRemote(() => deleteDoc(doc(db, 'leagues', id)), `리그 삭제(${id})`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -542,8 +595,9 @@ export function saveNickname(uid: string, nickname: string | null, remote = true
 
   const db = getDb();
   if (!remote || !firebaseConfigured || !db) return;
-  syncRemote(() =>
-    setDoc(doc(db, 'profiles', uid), { uid, nickname: nickname ?? '', updatedAt: Date.now() }),
+  syncRemote(
+    () => setDoc(doc(db, 'profiles', uid), { uid, nickname: nickname ?? '', updatedAt: Date.now() }),
+    '닉네임 저장',
   );
 }
 

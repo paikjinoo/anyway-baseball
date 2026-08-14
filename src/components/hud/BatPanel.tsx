@@ -1,7 +1,9 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { isRelayMode, useMatchStore } from '@/lib/store/matchStore';
+import { useAppStore } from '@/lib/store/appStore';
+import { readPitchLocation } from '@/lib/game/batting';
 import { SWING_DEFS, swingDisplayRadius } from '@/lib/game/constants';
 import { playClick } from '@/lib/audio/sfx';
 import type { GameState, Player, SwingType } from '@/lib/game/types';
@@ -34,6 +36,15 @@ export function BatPanel({ state, batter }: { state: GameState; batter: Player }
   const zoneRef = useRef<HTMLDivElement>(null);
   // 투수가 공을 놓기 전(와인드업 중)에는 스윙 안내를 띄우지 않는다
   const [released, setReleased] = useState(false);
+
+  // 선구 표시. 3D 화면(StrikeZone)과 같은 함수·같은 시드를 쓰므로 두 화면이
+  // 반드시 같은 지점을 가리킨다.
+  const readEnabled = useAppStore((s) => s.settings.showPitchRead);
+  const trajectory = useMatchStore((s) => s.trajectory);
+  const read = useMemo(
+    () => (readEnabled && trajectory ? readPitchLocation(batter, trajectory) : null),
+    [readEnabled, trajectory, batter],
+  );
 
   useEffect(() => {
     if (phase !== 'FLIGHT') {
@@ -161,6 +172,31 @@ export function BatPanel({ state, batter }: { state: GameState; batter: Player }
               ))}
             </div>
           </div>
+          {/* 선구 — 공이 손을 떠난 뒤에만 뜬다. 3D 화면의 자홍 표시와 같은 지점이다. */}
+          {read && released && phase === 'FLIGHT' && (
+            <>
+              <div
+                className="pointer-events-none absolute inset-x-0 border-t border-fuchsia-300/40"
+                style={{ top: `${((1 - read.y / 1.7) / 2) * 100}%` }}
+              />
+              <div
+                className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 rounded-full border border-fuchsia-300/70"
+                style={{
+                  left: `${((read.x / 1.7 + 1) / 2) * 100}%`,
+                  top: `${((1 - read.y / 1.7) / 2) * 100}%`,
+                  width: `${(read.radius / 1.7) * 100}%`,
+                  aspectRatio: '1',
+                }}
+              />
+              <div
+                className="pointer-events-none absolute h-1 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-fuchsia-300"
+                style={{
+                  left: `${((read.x / 1.7 + 1) / 2) * 100}%`,
+                  top: `${((1 - read.y / 1.7) / 2) * 100}%`,
+                }}
+              />
+            </>
+          )}
           {/* 배트 판정 범위 */}
           <div
             className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-cyan-400 bg-cyan-400/15"
@@ -172,6 +208,13 @@ export function BatPanel({ state, batter }: { state: GameState; batter: Player }
             }}
           />
         </div>
+        {/* 투구 전에도 자리를 지킨다. 공이 날아오는 순간에 줄이 생겨 아래 버튼이
+            밀려 내려가면, 하필 스윙 방식을 고르려던 손이 빗나간다. */}
+        {readEnabled && (
+          <p className="mt-1 text-center text-[10px] text-slate-500">
+            <span className="text-fuchsia-300">●</span> 예상 도착점 · 선구안 {batter.batting.eye}
+          </p>
+        )}
       </div>
 
       {/* 타격 방식 */}

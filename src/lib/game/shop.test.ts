@@ -12,7 +12,7 @@ import {
   statCap,
   upgradeTier,
 } from './progression';
-import { autoInvest } from './training';
+import { ATHLETIC_KEYS, HITTING_KEYS, autoInvest } from './training';
 import { pitchSlotsUsed, pitchSlots } from './progression';
 import { rosterIssues } from './roster';
 import { useItem } from './items';
@@ -360,7 +360,9 @@ describe('자동 투자', () => {
     expect(r.spent).toBeGreaterThan(0);
   });
 
-  it('투수의 타격 능력치에는 포인트를 쓰지 않는다', () => {
+  it('투수의 타석 능력치에는 포인트를 쓰지 않고, 수비에는 쓴다', () => {
+    // 배분 대상은 훈련 화면이 그 선수에게 여는 항목과 같아야 한다. 투수는 타석에 서지
+    // 않으므로(지명타자 고정) 컨택·파워·선구안은 빼고, 마운드 수비는 넣는다.
     const p = {
       ...generatePlayer(new Rng(seedFromString('invest-p')), {
         position: 'P',
@@ -371,7 +373,12 @@ describe('자동 투자', () => {
       potential: 96,
     };
     const r = autoInvest(p, 1146);
-    expect(r.player.batting).toEqual(p.batting);
+    for (const k of HITTING_KEYS) {
+      expect(r.player.batting[k]).toBe(p.batting[k]);
+    }
+    for (const k of ATHLETIC_KEYS) {
+      expect(r.player.batting[k]).toBeGreaterThan(p.batting[k]);
+    }
     expect(r.player.pitching!.stamina).toBeGreaterThan(p.pitching!.stamina);
   });
 });

@@ -58,8 +58,8 @@ export default function CpuGamePage() {
   }, [user]);
 
   const issues = useMemo(
-    () => (team ? rosterIssues(team, settings.useDH) : []),
-    [team, settings.useDH],
+    () => (team ? rosterIssues(team) : []),
+    [team],
   );
 
   /** 저장된 경기를 이어서 할 수 없는 이유. null이면 이어서 할 수 있다. */
@@ -159,7 +159,6 @@ export default function CpuGamePage() {
             {settings.mercyRule
               ? ` · ${settings.mercyFromInning}회 이후 ${settings.mercyRunDiff}점차 콜드게임`
               : ' · 콜드게임 없음'}
-            {settings.useDH ? ' · 지명타자' : ' · 투수 타석'}
           </p>
         </section>
 

@@ -103,8 +103,8 @@ export default function LeaguePage() {
   const orphaned = !!league && !leagueTeam;
   const standings = useMemo(() => (league ? computeStandings(league) : []), [league]);
   const issues = useMemo(
-    () => (team ? rosterIssues(team, settings.useDH) : []),
-    [team, settings.useDH],
+    () => (team ? rosterIssues(team) : []),
+    [team],
   );
   /** 정규 일정이 모두 끝났는가 */
   const regularDone = !!league && isLeagueComplete(league);
