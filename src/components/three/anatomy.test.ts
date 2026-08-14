@@ -26,6 +26,7 @@ import {
   buildPose,
   jointPositions,
   newSnapshot,
+  torsoToModel,
   writeSnapshot,
   type PoseKind,
   type Snapshot,
@@ -414,6 +415,216 @@ describe('좌우·폼 변형', () => {
       const flex = -snap.armL.elbow;
       // 릴리스 순간 던지는 팔은 거의 펴져 있어야 한다 (굴곡 45° 미만)
       if (flex > (45 * Math.PI) / 180) bad.push(`form=${form} 릴리스 팔꿈치 ${deg(flex)}`);
+    }
+    expect(report(bad)).toBe('OK');
+  });
+
+  /**
+   * 던지는 동작은 **가속의 순서**가 맞아야 자연스럽다. 위의 연속성 검사는 "순간이동"만
+   * 잡을 뿐, 팔이 매 키프레임마다 멈췄다 다시 출발하는 건 통과시킨다 (한 스텝 이동이
+   * 작아서 속도 상한에 안 걸린다).
+   *
+   * 실제로 고치기 전 투구 팔은 3.8 → 0.6 → 5.3 → 0.4 → 10.0 m/s 로 릴리스까지 네 번
+   * 멈췄고, 최고 속도가 릴리스가 아니라 팔을 들어 올리는 중간에 있었다. 눈에는 그게
+   * "던진다"가 아니라 "네 토막으로 끊어 옮긴다"로 보였는데 어떤 검사도 걸지 못했다.
+   */
+  it('투구 폼 0~4 모두 팔이 멈칫하지 않고 릴리스에서 가장 빠르다', () => {
+    const bad: string[] = [];
+    const N = 240;
+    const dt = (DURATION_MS.PITCHING_RELEASE ?? DEFAULT_MS) / 1000 / N;
+    for (let form = 0; form < 5; form++) {
+      const p = mkPlayer(0, form as PitchingForm, 'R');
+      const snap = newSnapshot();
+      let prev: THREE.Vector3 | null = null;
+      let peak = 0;
+      let peakU = 0;
+      let slowest = Infinity;
+      let slowestU = 0;
+      for (let i = 0; i <= N; i++) {
+        const u = i / N;
+        writeSnapshot(buildPose('PITCHING_RELEASE', u, p, 1, 0, 'R'), snap);
+        const hand = jointPositions(snap).handL;
+        if (prev) {
+          const v = hand.distanceTo(prev) / dt;
+          if (v > peak) {
+            peak = v;
+            peakU = u;
+          }
+          // 손이 글러브를 떠난 뒤부터 릴리스까지 — 이 구간에 정지가 있으면 안 된다
+          if (u > 0.1 && u <= RELEASE_AT && v < slowest) {
+            slowest = v;
+            slowestU = u;
+          }
+        }
+        prev = hand.clone();
+      }
+      // 1 m/s 아래면 사실상 멈춘 것이다 (정상 구간의 최저는 2 m/s 언저리)
+      if (slowest < 1) {
+        bad.push(`form=${form} t=${slowestU.toFixed(2)}에서 팔이 ${slowest.toFixed(2)}m/s로 멈춤`);
+      }
+      // 최고 속도는 릴리스 직전이어야 한다. 팔로스루가 더 빠르면 공을 놓고 나서
+      // 팔을 휘두르는 꼴이고, 훨씬 앞이면 코킹에서 최고 속도가 나온 것이다.
+      if (peakU < RELEASE_AT - 0.12 || peakU > RELEASE_AT + 0.02) {
+        bad.push(`form=${form} 최고속도가 t=${peakU.toFixed(3)} (릴리스 ${RELEASE_AT})`);
+      }
+    }
+    expect(report(bad)).toBe('OK');
+  });
+
+  /**
+   * 들어올린 앞발은 **한 번 올라갔다 한 번 내려와야** 한다. 예전에는 무릎을 펴는 항이
+   * 허벅지가 아직 최고점일 때 걸려서 발이 34 → 25 → 42cm로 두 번 차올랐다.
+   * 내딛는 게 아니라 두 번 걷어차는 모양이었다.
+   */
+  it('투구 폼 0~4 모두 들린 앞발이 두 번 차오르지 않는다', () => {
+    const bad: string[] = [];
+    for (let form = 0; form < 5; form++) {
+      const p = mkPlayer(0, form as PitchingForm, 'R');
+      const snap = newSnapshot();
+      let prev = -1;
+      let rising = true;
+      for (let i = 0; i <= 240; i++) {
+        const u = i / 240;
+        writeSnapshot(buildPose('PITCHING_RELEASE', u, p, 1, 0, 'R'), snap);
+        const h = jointPositions(snap).soleRY;
+        if (prev >= 0) {
+          // 1mm 미만은 접지 보정의 수치 잡음이라 방향 전환으로 세지 않는다
+          if (!rising && h > prev + 0.001) {
+            bad.push(`form=${form} t=${u.toFixed(2)}에서 앞발이 다시 올라감 (${h.toFixed(3)}m)`);
+            break;
+          }
+          if (rising && h < prev - 0.001) rising = false;
+        }
+        prev = h;
+      }
+    }
+    expect(report(bad)).toBe('OK');
+  });
+
+  /**
+   * 커스터마이징에서 고른 자세는 **스윙에서도 남아 있어야 한다.**
+   *
+   * 예전에는 swingPose가 stance를 crouch 하나에만 쓰고 그 crouch마저 hipDrop
+   * (= ground:true에서 무효)에 걸려 있어서, 여섯 자세의 스윙이 소수점까지 같았다.
+   * 고른 자세가 대기 화면에서만 보이고 정작 칠 때는 사라졌다는 뜻이다.
+   */
+  it('타격 자세 0~5가 스윙에서 서로 구별된다', () => {
+    const KO = ['스탠다드', '오픈', '클로즈드', '크라우칭', '레그킥', '노스텝'];
+    /** 스윙 전체를 훑어 만든 지문: 골반 높이 / 앞발 들림 / 골반 회전각 */
+    const trace = (s: number) =>
+      sweep('BATTING_SWING', mkPlayer(s as BattingStance, 1, 'R')).map(({ snap, jp }) => [
+        jp.hipY,
+        jp.soleRY - jp.soleLY,
+        new THREE.Euler().setFromQuaternion(snap.hip, 'YXZ').y,
+      ]);
+    const base = trace(0);
+    const bad: string[] = [];
+    for (let s = 1; s < 6; s++) {
+      const t = trace(s);
+      let diff = 0;
+      for (let i = 0; i < t.length; i++) {
+        for (let c = 0; c < 3; c++) diff = Math.max(diff, Math.abs(t[i][c] - base[i][c]));
+      }
+      // 0.02는 "눈에 보이는 최소" 기준이다 (2cm 또는 1.1°)
+      if (diff < 0.02) bad.push(`${KO[s]}: 스윙 내내 스탠다드와 최대 ${diff.toFixed(4)}만 다름`);
+    }
+    expect(report(bad)).toBe('OK');
+  });
+
+  it('노스텝은 앞발을 들지 않고, 레그킥은 크게 든다', () => {
+    const lift = (s: number, kind: PoseKind) =>
+      Math.max(...sweep(kind, mkPlayer(s as BattingStance, 1, 'R')).map((x) => x.jp.soleRY - x.jp.soleLY));
+    const bad: string[] = [];
+    // 대기 자세: 레그킥만 다리를 든다
+    if (lift(4, 'BATTING') < 0.2) bad.push(`레그킥 대기 앞발 ${lift(4, 'BATTING').toFixed(3)} (0.2 이상이어야)`);
+    if (lift(5, 'BATTING') > 0.03) bad.push(`노스텝 대기 앞발 ${lift(5, 'BATTING').toFixed(3)} (들면 안 됨)`);
+    // 스윙: 노스텝은 발이 뜨지 않는다 — 이름 그대로 스트라이드가 없다
+    if (lift(5, 'BATTING_SWING') > 0.02) {
+      bad.push(`노스텝 스윙 앞발 ${lift(5, 'BATTING_SWING').toFixed(3)} (스트라이드가 남아 있다)`);
+    }
+    if (lift(4, 'BATTING_SWING') < 0.15) {
+      bad.push(`레그킥 스윙 앞발 ${lift(4, 'BATTING_SWING').toFixed(3)} (킥이 사라졌다)`);
+    }
+    expect(report(bad)).toBe('OK');
+  });
+
+  /**
+   * 크라우칭은 **무릎으로** 낮춰야 한다. hipDrop은 ground:true에서 접지 보정과
+   * 정확히 상쇄되어 아무 효과가 없고(Pose.hipDrop 주석), 한쪽 무릎만 굽히면 그 발이
+   * 접지 기준에서 빠져 골반이 그대로 남는다. 두 함정을 다 피해야 실제로 낮아진다.
+   */
+  it('크라우칭은 골반이 실제로 낮아진다', () => {
+    const hip = (s: number) =>
+      Math.min(...sweep('BATTING', mkPlayer(s as BattingStance, 1, 'R')).map((x) => x.jp.hipY));
+    const drop = hip(0) - hip(3);
+    const bad: string[] = [];
+    if (drop < 0.05) bad.push(`크라우칭이 ${(drop * 100).toFixed(1)}cm만 낮다 (5cm 이상이어야)`);
+    expect(report(bad)).toBe('OK');
+  });
+
+  /**
+   * 투구 폼은 **화면에서 실제로 팔이 놓이는 각도**로 구별돼야 한다.
+   *
+   * 예전에는 슬롯을 몸통 로컬로 줘서 상체 기울기가 그걸 상쇄했다. 설정값은
+   * 오버스로 12.6° / 스리쿼터 35.5°였는데 실측은 31.9° / 35.8°로 붙어 있었고,
+   * 언더핸드(78.2°)는 사이드암 자리였다. 다섯 폼이 사실상 세 개였다.
+   */
+  it('투구 폼 0~3이 팔 각도로 확실히 구별된다', () => {
+    const KO = ['오버스로', '스리쿼터', '사이드암', '언더핸드'];
+    const snap = newSnapshot();
+    const armAngle = (f: number) => {
+      writeSnapshot(
+        buildPose('PITCHING_RELEASE', RELEASE_AT, mkPlayer(0, f as PitchingForm, 'R'), 1, 0, 'R'),
+        snap,
+      );
+      const jp = jointPositions(snap);
+      const hand = torsoToModel(snap, jp.handL.clone());
+      const sh = torsoToModel(snap, jointPositions(snap).shoulderL.clone());
+      const arm = hand.sub(sh);
+      return Math.acos(THREE.MathUtils.clamp(arm.y / arm.length(), -1, 1));
+    };
+    const a = [0, 1, 2, 3].map(armAngle);
+    const bad: string[] = [];
+    for (let i = 1; i < 4; i++) {
+      // 인접한 폼끼리 최소 15°는 벌어져야 눈으로 구별된다
+      const gap = ((a[i] - a[i - 1]) * 180) / Math.PI;
+      if (gap < 15) bad.push(`${KO[i - 1]}(${deg(a[i - 1])}) → ${KO[i]}(${deg(a[i])}) 차이 ${gap.toFixed(1)}°`);
+    }
+    // 사이드암은 수평 언저리, 언더핸드는 수평 아래여야 한다
+    if (a[2] < (65 * Math.PI) / 180) bad.push(`사이드암이 ${deg(a[2])}로 너무 서 있다`);
+    if (a[3] < Math.PI / 2) bad.push(`언더핸드가 ${deg(a[3])}로 수평 위에 있다`);
+    expect(report(bad)).toBe('OK');
+  });
+
+  /**
+   * 셋포지션도 폼마다 달라야 하고, **거기서 딜리버리가 이어져야** 한다.
+   *
+   * 예전에는 `pitchingSetPose`가 form을 아예 받지 않아 다섯 폼이 완전히 같았다.
+   * 폼별로 만든 뒤에는 반대 문제가 생겼다 — 셋에서 낮게 앉아 있던 서브마린이
+   * 딜리버리 첫 프레임에 벌떡 일어서며 손이 24cm 순간이동했다. 전환 블렌드가
+   * 0.06초뿐이라(터지는 동작이라 일부러 짧다) 그 차이가 그대로 튐으로 보인다.
+   */
+  it('셋포지션이 폼별로 다르고 딜리버리로 이어진다', () => {
+    const KO = ['오버스로', '스리쿼터', '사이드암', '언더핸드', '토네이도'];
+    const snap = newSnapshot();
+    const setHip: number[] = [];
+    const bad: string[] = [];
+    for (let f = 0; f < 5; f++) {
+      const p = mkPlayer(0, f as PitchingForm, 'R');
+      writeSnapshot(buildPose('PITCHING_SET', 0, p, 1, 0, 'R'), snap);
+      setHip.push(jointPositions(snap).hipY);
+      const a = torsoToModel(snap, jointPositions(snap).handL.clone());
+      // 딜리버리 첫 프레임과 손이 얼마나 떨어져 있는가
+      writeSnapshot(buildPose('PITCHING_RELEASE', 0, p, 1, 0, 'R'), snap);
+      const b = torsoToModel(snap, jointPositions(snap).handL.clone());
+      const gap = a.distanceTo(b);
+      // 0.06초 블렌드에 5cm면 0.8m/s — 딜리버리 초반 손 속도(2m/s) 안쪽이라 자연스럽다
+      if (gap > 0.05) bad.push(`${KO[f]}: 셋→딜리버리 손이 ${(gap * 100).toFixed(1)}cm 벌어짐`);
+    }
+    // 슬롯이 낮은 폼은 셋에서 이미 앉아 있어야 한다
+    const drop = setHip[0] - setHip[3];
+    if (drop < 0.05) {
+      bad.push(`언더핸드 셋이 오버스로보다 ${(drop * 100).toFixed(1)}cm만 낮다 (5cm 이상이어야)`);
     }
     expect(report(bad)).toBe('OK');
   });

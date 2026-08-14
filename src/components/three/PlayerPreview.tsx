@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
-import { PlayerModel, type Headwear, type PoseKind, type UniformSpec } from './PlayerModel';
+import { PlayerModel, RELEASE_AT, type Headwear, type PoseKind, type UniformSpec } from './PlayerModel';
 import type { GloveType, Player } from '@/lib/game/types';
 
 export type PreviewMode = 'BAT' | 'PITCH' | 'FIELD';
@@ -32,12 +32,37 @@ function batMotion(ms: number): Motion {
   return { pose: 'BATTING_SWING', t: 1 };
 }
 
-/** 셋포지션 -> 와인드업 -> 릴리스 -> 팔로스루 유지 */
+// --- 피칭 미리보기 재생 -------------------------------------------------------
+//
+// 폼을 **고르는** 화면이므로 경기 화면과 같은 속도로 흘려보내면 안 된다.
+// 예전에는 2600ms 루프를 그대로 돌렸는데, 그 중
+//   셋포지션 700ms — pitchingSetPose는 form을 아예 읽지 않아 다섯 폼이 완전히 같다
+//   팔로스루 정지 970ms — 끝점이 폼과 무관해서 팔 각도 차이가 10° 안쪽이다
+// 둘이 64%를 차지하고, 폼별 팔 각도가 15° 넘게 벌어지는 시간은 **170ms(7%)뿐**이었다.
+// 그래서 무엇을 골라도 같아 보였다.
+//
+// 그래서 전체를 1.5배로 늦춰 딜리버리를 끝까지 읽히게 한다.
+//
+// **중간에 멈춰 세우지는 않는다.** 릴리스 자세로 정지시켜 보면 폼은 확실히 보이지만
+// 모션이 한 번 얼었다 풀리는 것처럼 — 프레임이 밀린 것처럼 — 보인다. 대신
+// 셋포지션·코킹·릴리스가 **전부 폼별로 달라졌으므로**(poses.ts의 SET_SINK/cockLow)
+// 이제는 멈추지 않아도 딜리버리 내내 어느 폼인지 드러난다.
+//
+// 끝의 짧은 정지는 남긴다. 그건 동작 중간이 아니라 팔로스루를 마친 자리라
+// "멈췄다"가 아니라 "마무리 자세를 잡고 있다"로 읽힌다.
+const PITCH_SET_MS = 460;
+const PITCH_RATE = 1.5;
+const PITCH_DELIVERY_MS = DELIVERY_MS * PITCH_RATE;
+const PITCH_END_MS = 380;
+const PITCH_LOOP_MS = PITCH_SET_MS + PITCH_DELIVERY_MS + PITCH_END_MS;
+
+/** 셋포지션 -> 와인드업 -> 릴리스 -> 팔로스루 -> 마무리 자세 유지 */
 function pitchMotion(ms: number): Motion {
-  const k = ms % 2600;
-  if (k < 700) return { pose: 'PITCHING_SET', t: (Math.sin((k / 700) * Math.PI * 2) + 1) / 2 };
-  if (k < 700 + DELIVERY_MS) return { pose: 'PITCHING_RELEASE', t: (k - 700) / DELIVERY_MS };
-  return { pose: 'PITCHING_RELEASE', t: 1 };
+  const k = ms % PITCH_LOOP_MS;
+  // PITCHING_SET은 SELF_DRIVEN이라 t를 쓰지 않는다 (모델이 자기 시계로 호흡한다)
+  if (k < PITCH_SET_MS) return { pose: 'PITCHING_SET', t: 0 };
+  const d = k - PITCH_SET_MS;
+  return { pose: 'PITCHING_RELEASE', t: Math.min(1, d / PITCH_DELIVERY_MS) };
 }
 
 /** 포수 미트를 고르면 크라우칭, 그 외에는 수비 준비 자세 */
@@ -64,12 +89,15 @@ function baseYaw(player: Player, mode: PreviewMode): number {
 /**
  * 동작 중 이동하는 만큼 미리 밀어 화면 가운데에 유지한다.
  * 투구 스트라이드는 모델 로컬 +Z로 약 0.8m 나아가므로, 보는 각도만큼 돌려서
- * 그 절반을 반대로 당겨 둔다.
+ * 그만큼 반대로 당겨 둔다.
+ *
+ * 기준은 **릴리스 순간의 위치**다(0.54m). 루프가 거기서 멈춰 서 있으므로
+ * 가장 오래 보이는 자세가 화면 가운데에 오는 게 맞다.
  */
 function baseOffset(player: Player, mode: PreviewMode): [number, number, number] {
   if (mode !== 'PITCH') return [0, 0, 0];
   const y = baseYaw(player, mode);
-  return [-Math.sin(y) * 0.4, 0, -Math.cos(y) * 0.4];
+  return [-Math.sin(y) * 0.5, 0, -Math.cos(y) * 0.5];
 }
 
 /** 미리보기 모드에 맞는 머리 장비 */

@@ -26,14 +26,20 @@ import type { BatSide, PitchCommand, PitchTrajectory, Player, Vec3 } from './typ
  * k=RELEASE_AT일 때 던지는 팔(armL) 손의 월드 좌표를 뽑는 것이다.
  * 아래 값은 그렇게 측정했다 (접지 모델을 실제 신발 밑판으로 바꾸면서 모델이
  * 2cm 올라가 높이가 그만큼 커졌다).
+ *
+ * 2026-08-14 재측정: 팔 슬롯을 월드 기준으로 바꾸면서 폼별 릴리스가 실제로 벌어졌다.
+ * 예전 표는 높이 폭이 1.40~1.16(24cm)뿐이라 오버스로와 스리쿼터가 같은 값이었는데,
+ * 지금은 1.44~0.93(51cm)으로 언더핸드가 존 위쪽 언저리에서 나온다.
  */
 export function releasePoint(pitcher: Player): Vec3 {
   const side = pitcher.throws === 'L' ? -1 : 1;
   // form: 0 오버스로 / 1 스리쿼터 / 2 사이드암 / 3 언더핸드 / 4 토네이도
-  const heights = [1.4, 1.4, 1.33, 1.16, 1.4];
-  const offsets = [0.37, 0.42, 0.48, 0.46, 0.38];
-  // 스트라이드로 마운드보다 앞에서 놓는 거리 (익스텐션)
-  const extension = [0.58, 0.51, 0.4, 0.32, 0.57];
+  const heights = [1.441, 1.367, 1.121, 0.934, 1.438];
+  const offsets = [0.263, 0.445, 0.564, 0.528, 0.288];
+  // 스트라이드로 마운드보다 앞에서 놓는 거리 (익스텐션).
+  // 슬롯이 낮을수록 상체가 앞다리 위로 더 넘어가므로 익스텐션이 **길어진다**
+  // (실제로도 서브마린 투수가 익스텐션이 가장 길다).
+  const extension = [0.556, 0.592, 0.646, 0.68, 0.56];
   const f = clamp(pitcher.form, 0, 4);
   return {
     x: side * offsets[f],

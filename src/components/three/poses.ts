@@ -229,7 +229,22 @@ export interface Anchor {
 export interface Pose {
   /** 루트 이동 (모델 로컬). 스트라이드/슬라이딩 등 */
   root: V3;
-  /** 골반 높이 보정 */
+  /**
+   * 골반 높이 보정.
+   *
+   * **`ground: true`면 이 값은 골반 높이에 아무 영향이 없다.** writeSnapshot이
+   * `rootY += -(HIP_H + hipDrop + min(발바닥))`으로 접지 보정을 걸기 때문에,
+   * 골반의 최종 높이는 `root.y - min(발바닥)`이 되어 hipDrop이 정확히 상쇄된다.
+   * 다리가 FK로 골반에 매달려 있으니 당연한 결과다 — 골반을 내리면 발도 같이
+   * 내려가고, 보정이 그만큼 도로 올린다.
+   *
+   * 그래서 **웅크리는 동작은 반드시 무릎으로 만들어야 한다.** 무릎을 접으면 다리가
+   * 짧아져서 발이 제자리에 남은 채로 골반이 내려온다. 실제로 크라우칭 타격 자세가
+   * 이 함정에 빠져 있었다 — hipDrop을 10cm 내렸는데 골반은 1.2cm만 낮아졌고,
+   * 그 1.2cm조차 뒷무릎을 조금 굽힌 부수효과였다.
+   *
+   * (`ground: false`인 포즈에서는 정상적으로 골반만 내린다. 대신 발이 지면을 뚫는다.)
+   */
   hipDrop: number;
   hipRot: V3;
   /** L = -X 쪽 다리/팔, R = +X 쪽 */
@@ -340,6 +355,65 @@ export function track(t: number, keys: [number, number][]): number {
   return keys[keys.length - 1][1];
 }
 
+/**
+ * track과 같은 키프레임이지만 **키를 지날 때 속도가 끊기지 않는다.**
+ *
+ * track은 구간마다 easeInOut을 따로 걸기 때문에 키마다 속도가 0으로 떨어진다.
+ * 몸통 각도처럼 천천히 변하는 값에서는 그게 "부드러움"으로 보이지만, 던지는 팔처럼
+ * 빠른 궤적에 쓰면 **키마다 멈췄다 다시 출발한다.** 실제로 예전 투구 포즈의 손 속도는
+ * 3.8 → 0.6 → 5.3 → 0.4 → 10.0 m/s 로 릴리스까지 네 번 멈췄다 튀었고, 그게
+ * "던지는 게 아니라 네 토막으로 끊어 옮긴다"는 인상의 정체였다.
+ *
+ * 여기서는 이웃 키의 기울기를 평균해 접선을 만들고(Catmull-Rom), Fritsch-Carlson
+ * 조건으로 접선을 깎아 **구간 밖으로 튀지 않게** 한다. 오버슛을 막는 게 중요한 이유는
+ * 값이 한 번 되올라가면 다리를 내리는 구간에서 무릎이 두 번 차올라가기 때문이다.
+ */
+export function smoothTrack(t: number, keys: [number, number][]): number {
+  const n = keys.length;
+  if (n < 2 || t <= keys[0][0]) return keys[0][1];
+  if (t >= keys[n - 1][0]) return keys[n - 1][1];
+  let i = 1;
+  while (i < n - 1 && t > keys[i][0]) i++;
+  const [t0, v0] = keys[i - 1];
+  const [t1, v1] = keys[i];
+  const h = t1 - t0;
+  if (h <= 0) return v1;
+
+  const slope = (a: number, b: number) =>
+    keys[b][0] === keys[a][0] ? 0 : (keys[b][1] - keys[a][1]) / (keys[b][0] - keys[a][0]);
+  const d = slope(i - 1, i);
+  // 양 끝 키는 이웃이 한쪽뿐이라 그 구간 기울기를 그대로 접선으로 쓴다
+  let m0 = i >= 2 ? (slope(i - 2, i - 1) + d) / 2 : d;
+  let m1 = i + 1 < n ? (d + slope(i, i + 1)) / 2 : d;
+  if (d === 0) {
+    // 값이 같은 두 키 사이 — 접선을 남기면 평평해야 할 구간이 부풀어 오른다
+    m0 = 0;
+    m1 = 0;
+  } else {
+    // 방향이 뒤집힌 접선은 극값 바로 옆에서 값을 되돌린다 (= 무릎이 두 번 차오른다)
+    if (m0 / d < 0) m0 = 0;
+    if (m1 / d < 0) m1 = 0;
+    const a = m0 / d;
+    const b = m1 / d;
+    const s = a * a + b * b;
+    if (s > 9) {
+      const f = 3 / Math.sqrt(s);
+      m0 = f * m0;
+      m1 = f * m1;
+    }
+  }
+
+  const u = (t - t0) / h;
+  const u2 = u * u;
+  const u3 = u2 * u;
+  return (
+    (2 * u3 - 3 * u2 + 1) * v0 +
+    (u3 - 2 * u2 + u) * h * m0 +
+    (-2 * u3 + 3 * u2) * v1 +
+    (u3 - u2) * h * m1
+  );
+}
+
 // ---------------------------------------------------------------------------
 // 포즈 정의
 //
@@ -370,6 +444,53 @@ function mixDir(a: V3, b: V3, t: number): V3 {
 }
 
 /**
+ * 경유점을 이어 손이 지나갈 곡선을 만든다.
+ *
+ * 예전에는 구간마다 `lerp`를 갈아 끼웠는데, 그러면 경유점에서 궤적이 **꺾인다**.
+ * 팔이 부드러운 원을 그리는 게 아니라 각진 다각형을 따라간다는 뜻이다.
+ * centripetal Catmull-Rom은 경유점을 정확히 지나면서 접선이 이어지고, uniform과 달리
+ * 간격이 들쭉날쭉해도 고리(cusp)를 만들지 않는다.
+ *
+ * `u = i/(N-1)`이 정확히 i번째 경유점이므로 **어느 시각에 어느 경유점에 있을지**를
+ * 시간 매핑만으로 지정할 수 있다. 경유점 간 시간 간격을 릴리스 쪽으로 좁히면
+ * 속도가 저절로 채찍처럼 붙는다.
+ */
+function makePath(n: number) {
+  const pts = Array.from({ length: n }, () => new THREE.Vector3());
+  const curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
+  const out = new THREE.Vector3();
+  return {
+    pts,
+    /** i번째 경유점을 지정한다 (프레임마다 갈아 쓴다 — 새로 할당하지 않는다) */
+    set(i: number, x: number, y: number, z: number) {
+      pts[i].set(x, y, z);
+      return this;
+    },
+    setV(i: number, v: THREE.Vector3) {
+      pts[i].copy(v);
+      return this;
+    },
+    at(u: number): THREE.Vector3 {
+      return curve.getPoint(clamp(u, 0, 1), out);
+    },
+  };
+}
+
+/** 던지는 팔: 글러브 → 분리 → 스윙 최저점 → 코킹 → 릴리스 → 가로지르기 → 반대쪽 허리 */
+const _throwPath = makePath(7);
+/** 글러브 팔: 가슴 → 들어올림 → 타깃으로 뻗기 → 당기기 → 옆구리 */
+const _glovePath = makePath(5);
+/** 경유점을 계산할 때 쓰는 임시 벡터 (프레임마다 할당하지 않기 위한 것) */
+const _tmpShoulder = new THREE.Vector3();
+const _tmpRelease = new THREE.Vector3();
+const _tmpAcross = new THREE.Vector3();
+const _tmpFinish = new THREE.Vector3();
+const _tmpCock = new THREE.Vector3();
+const _tmpQ = new THREE.Quaternion();
+const _tmpQ2 = new THREE.Quaternion();
+const _tmpE = new THREE.Euler();
+
+/**
  * 타격 자세. 기준은 우타자.
  *
  * 모델 로컬은 +Z가 가슴 방향이고, GameScene이 우타자를 rotationY=-90도로 세우므로
@@ -387,8 +508,17 @@ function battingPose(player: Player, load: number, clock: number): Pose {
   // 0 스탠다드 1 오픈 2 클로즈드 3 크라우칭 4 레그킥 5 노스텝
   // 오픈은 몸을 투수 쪽으로 열고(+), 클로즈드는 더 감는다(-)
   const open = stance === 1 ? 0.24 : stance === 2 ? -0.2 : 0;
-  const crouch = stance === 3 ? 0.2 : 0;
+  const crouch = stance === 3 ? 1 : 0;
   const legKick = stance === 4 ? load : 0;
+  /**
+   * 웅크림은 **양 무릎으로만** 만든다 (`Pose.hipDrop` 주석 참고 — 접지 보정이
+   * hipDrop을 상쇄하므로 골반을 직접 내리는 건 아무 일도 하지 않는다).
+   *
+   * 그리고 반드시 **두 무릎을 같이** 굽혀야 한다. 예전엔 뒷무릎에만 걸려 있었는데,
+   * 한쪽만 굽히면 그 발이 올라가면서 접지 기준(둘 중 낮은 발)에서 빠져 버려
+   * 골반이 거의 그대로 남는다. 실제로 1.2cm밖에 안 내려갔다.
+   */
+  const crouchKnee = crouch * 0.62;
 
   // 타이밍을 재는 배트 흔들기. 딜리버리가 진행될수록 잦아들고 몸이 굳는다.
   const calm = 1 - easeIn(clamp(load, 0, 1));
@@ -399,17 +529,29 @@ function battingPose(player: Player, load: number, clock: number): Pose {
   const hipY = -0.18 + open - sway * 0.05;
   const torsoY = -0.24 - load * 0.1 + sway * 0.06;
 
-  p.hipDrop = -0.1 - crouch * 0.5 - sway * 0.012;
+  p.hipDrop = -0.1 - sway * 0.012;
   p.hipRot = [0, hipY, 0];
-  p.torso = [0.14 + crouch * 0.4, torsoY, -0.04];
+  p.torso = [0.14 + crouch * 0.16, torsoY, -0.04];
   // 감긴 몸통 위에서 고개만 투수 쪽으로 돌린다
   p.head = [0.05, GAZE_AT_PITCHER - (hipY + torsoY), 0];
 
-  // 앞발(+X)은 투수 쪽, 뒷발(-X)에 체중
-  p.legL = { hip: [-0.1, -0.12, -0.3], knee: 0.48 + crouch * 0.5, ankle: 0 };
-  p.legR = { hip: [0.12 - legKick * 1.5, 0.1, 0.3], knee: 0.34 + legKick * 1.3, ankle: 0 };
-  // 다리를 들면 체중이 뒤(-X, 포수 쪽)로 실린다
-  if (legKick > 0.02) p.root = [-0.02 * legKick, 0, 0];
+  // 앞발(+X)은 투수 쪽, 뒷발(-X)에 체중.
+  // 무릎을 접으면 정강이가 뒤로 돌아 발이 몸 아래로 당겨진다. 고관절을 그만큼 더
+  // 굽혀 줘야 웅크려도 스탠스 폭이 유지된다 (안 그러면 발이 모여 좁아진다).
+  p.legL = {
+    hip: [-0.1 - crouchKnee * 0.3, -0.12, -0.3],
+    knee: 0.48 + crouchKnee,
+    ankle: 0,
+  };
+  p.legR = {
+    hip: [0.12 - legKick * 1.5 - crouchKnee * 0.3, 0.1, 0.3],
+    knee: 0.34 + legKick * 1.3 + crouchKnee,
+    ankle: 0,
+  };
+  // 다리를 들면 체중이 뒤(-X, 포수 쪽)로 실린다.
+  // 웅크리면 무릎이 접히며 발이 몸 뒤(-Z)로 빠지므로, 그만큼 몸을 앞으로 보내
+  // **발자리를 스탠스 그대로 유지한다** (실제로도 쪼그리면 상체가 발 위로 나온다).
+  p.root = [-0.02 * legKick, 0, crouch * 0.1];
 
   // 배트: 뒤쪽(-X) 어깨 위에 세우고 살짝 눕힌다.
   //
@@ -418,7 +560,7 @@ function battingPose(player: Player, load: number, clock: number): Pose {
   // 위손은 어깨에서 0.17밖에 안 떨어져 가만히 선 자세가 이미 144° 굴곡이었다.
   const wrap = lerp(0, 0.16, load);
   p.bat = {
-    pos: [-0.18, 0.22 - crouch * 0.05, 0.26],
+    pos: [-0.18, 0.22 - crouch * 0.02, 0.26],
     rot: [-0.22 - wrap + wag * 0.09, -0.5 - wag * 0.07, 0.62 + wrap * 0.7 + wag * 0.12],
   };
   p.topHand = 'L';
@@ -437,23 +579,17 @@ function swingPose(player: Player, t: number): Pose {
   const p = basePose();
   const k = clamp(t, 0, 1);
   const stance = player.stance;
-  const crouch = stance === 3 ? 0.18 : 0;
-
-  // 골반 -> 몸통 순서로 열린다
-  const hipY = track(k, [
-    [0, -0.3],
-    [0.16, -0.42],
-    [0.45, 0.5],
-    [0.7, 1.05],
-    [1, 1.2],
-  ]);
-  const torsoY = track(k, [
-    [0, -0.36],
-    [0.2, -0.5],
-    [0.45, 0.3],
-    [0.72, 0.95],
-    [1, 1.15],
-  ]);
+  // 스탠스는 **스윙까지 이어져야 한다.** 예전에는 여기서 stance를 crouch 하나에만
+  // 쓰고 그 crouch마저 hipDrop(= ground:true에서 무효)에 걸려 있어서, 여섯 자세의
+  // 임팩트 포즈가 소수점까지 완전히 같았다. 커스터마이징에서 고른 자세가 정작
+  // 스윙에서는 사라졌다는 뜻이다.
+  const crouch = stance === 3 ? 1 : 0;
+  const crouchKnee = crouch * 0.62;
+  const open = stance === 1 ? 0.24 : stance === 2 ? -0.2 : 0;
+  /** 노스텝은 이름 그대로 **발을 내딛지 않는다.** 회전만으로 친다. */
+  const noStep = stance === 5;
+  /** 레그킥은 들어 올린 다리에서 시작해 내려디디며 그 체중을 싣는다. */
+  const legKick = stance === 4;
 
   // 스트라이드: 앞발이 들렸다 내려디디며 몸이 살짝 앞으로
   const stride = track(k, [
@@ -462,8 +598,30 @@ function swingPose(player: Player, t: number): Pose {
     [0.4, 1],
     [1, 1],
   ]);
+  // 오픈/클로즈드는 착지하면서 절반쯤 정렬되지만 완전히 사라지지는 않는다.
+  // 남은 차이가 곧 "클로즈드가 더 감고 돈다"는 회전량 차이가 된다.
+  const openW = open * lerp(1, 0.45, stride);
 
-  p.hipDrop = -0.12 - crouch * 0.4 - Math.sin(k * Math.PI) * 0.05;
+  // 골반 -> 몸통 순서로 열린다
+  const hipY =
+    track(k, [
+      [0, -0.3],
+      [0.16, -0.42],
+      [0.45, 0.5],
+      [0.7, 1.05],
+      [1, 1.2],
+    ]) + openW;
+  const torsoY =
+    track(k, [
+      [0, -0.36],
+      [0.2, -0.5],
+      [0.45, 0.3],
+      [0.72, 0.95],
+      [1, 1.15],
+    ]) +
+    openW * 0.85;
+
+  p.hipDrop = -0.12 - Math.sin(k * Math.PI) * 0.05;
   p.hipRot = [0, hipY, 0];
   // 어깨선이 임팩트에서 살짝 뒤로 눕는다 (뒤쪽 어깨가 내려가는 축 기울기)
   const shoulderTilt = track(k, [
@@ -472,7 +630,7 @@ function swingPose(player: Player, t: number): Pose {
     [0.75, 0.06],
     [1, -0.02],
   ]);
-  p.torso = [0.16 - k * 0.05, torsoY, -(shoulderTilt + k * 0.1)];
+  p.torso = [0.16 - k * 0.05 + crouch * 0.14, torsoY, -(shoulderTilt + k * 0.1)];
   // 시선: 투수를 보다가 임팩트에서 타격 지점에 고정되고, 그 뒤 몸통을 따라 돈다.
   // 몸통이 얼마나 돌았든 시선의 절대 방향을 먼저 정하고 목 각도를 역산한다.
   const gaze = track(k, [
@@ -482,18 +640,38 @@ function swingPose(player: Player, t: number): Pose {
     [1, 0],
   ]);
   p.head = [0.08, clamp(gaze - (hipY + torsoY), -1.6, 1.6), 0];
-  p.root = [lerp(-0.04, 0.03, stride), 0, 0];
+  // 몸이 앞으로 나가는 양도 자세를 따른다 — 노스텝은 제자리, 레그킥은 크게 싣는다
+  p.root = [
+    lerp(legKick ? -0.06 : noStep ? -0.012 : -0.04, noStep ? 0.008 : 0.03, stride),
+    0,
+    crouch * 0.1,
+  ];
 
-  // 앞발(+X): 들었다가 내려디디며 벽을 만든다
+  // 앞발(+X): 들었다가 내려디디며 벽을 만든다.
+  //
+  // 시작 자세가 스탠스마다 다르다 — 레그킥은 무릎을 든 채로 시작해 내려디디고,
+  // 노스텝은 처음부터 디딘 자리에 있어 **거의 움직이지 않는다.** 예전에는 이 값들이
+  // 상수라 노스텝 타자도 다른 자세와 똑같이 20.3cm를 내디뎠다(= 이름과 정반대).
+  const frontHip = legKick ? -1.32 : noStep ? -0.02 : 0.2;
+  const frontKnee = legKick ? 1.58 : noStep ? 0.3 : 0.5;
+  // 웅크린 타자는 스윙 내내 낮은 자세를 유지한다.
+  //
+  // **접지한 발이 골반 높이를 정한다** (writeSnapshot이 둘 중 낮은 발을 지면에 맞춘다).
+  // 임팩트에서 땅에 붙어 있는 쪽은 내디딘 **앞발**이므로, 앞무릎을 접어야 실제로
+  // 낮아진다. 뒷무릎까지 같은 양을 접으면 뒷발만 허공으로 15cm 떠오르고 골반은
+  // 그대로다 — 대기 자세에서 한쪽 무릎만 굽혀 1.2cm밖에 안 내려갔던 것과 같은 함정이다.
+  // 접지하는 발이 스트라이드 전후로 바뀌므로(초반 뒷발 → 임팩트 앞발) 굽힘도 같이 넘긴다.
+  const braceF = crouchKnee * lerp(0.12, 0.8, stride);
+  const braceB = crouchKnee * lerp(0.85, 0.3, stride);
   p.legR = {
-    hip: [lerp(0.2, -0.16, stride), 0.12, lerp(0.24, 0.36, stride)],
-    knee: lerp(0.5, 0.2, stride),
+    hip: [lerp(frontHip, noStep ? -0.04 : -0.16, stride), 0.12, lerp(0.24, noStep ? 0.28 : 0.36, stride)],
+    knee: lerp(frontKnee, noStep ? 0.28 : 0.2, stride) + braceF,
     ankle: 0,
   };
   // 뒷발(-X)은 임팩트 이후 뒤꿈치가 들리며 회전한다
   p.legL = {
     hip: [lerp(-0.12, 0.16, k), lerp(-0.15, 0.5, k), -0.3],
-    knee: lerp(0.44, 0.72, k),
+    knee: lerp(0.44, 0.72, k) + braceB,
     ankle: lerp(0, -0.7, easeIn(k)),
   };
 
@@ -647,23 +825,59 @@ function buntPose(player: Player, t: number): Pose {
   return p;
 }
 
-/** 셋포지션. 글러브를 가슴 앞에 모으고 사인을 본다. */
-function pitchingSetPose(clock: number): Pose {
+/**
+ * 셋포지션. 글러브를 가슴 앞에 모으고 사인을 본다.
+ *
+ * **폼마다 다르다.** 실제로도 슬롯이 낮은 투수는 셋에서 이미 낮게 앉아 글러브를
+ * 허리 앞에 두고(거기서 몸을 더 기울여 던진다), 오버스로는 꼿꼿이 서서 가슴 높이에
+ * 모은다. 예전에는 이 함수가 `clock`만 받아 **다섯 폼이 완전히 같았고**, 커스터마이징
+ * 미리보기에서 셋 구간(루프의 27%) 내내 무엇을 골라도 같은 그림이었다.
+ *
+ * 웅크림은 **양 무릎으로** 만든다 — `hipDrop`은 ground:true에서 접지 보정과 상쇄되어
+ * 아무 효과가 없고, 한쪽 무릎만 굽히면 그 발이 접지 기준에서 빠진다
+ * (`Pose.hipDrop` 주석 참고).
+ */
+function pitchingSetPose(player: Player, clock: number): Pose {
   const p = basePose();
+  const form = clamp(player.form, 0, 4);
+  const sink = SET_SINK[form];
+  const coil = SET_COIL[form];
+
   const breath = Math.sin(clock * 1.7) * 0.5 + 0.5;
   // 사인을 확인하는 짧은 고개 움직임
   const peek = Math.sin(clock * 0.62);
-  p.hipDrop = -0.05 - breath * 0.015;
-  p.hipRot = [0, 0.12, 0];
-  p.torso = [0.08 + breath * 0.03, 0.16, 0];
-  p.head = [0.04 - breath * 0.03, -0.14 + peek * 0.12, 0];
-  p.legL = { hip: [0.05, -0.08, -0.12], knee: 0.24, ankle: 0 };
-  p.legR = { hip: [-0.05, 0.1, 0.14], knee: 0.2, ankle: 0 };
 
-  // 글러브를 가슴 앞에 두고 양손을 그 안에 모은다
-  p.glove = { pos: [0.02, 0.14 + breath * 0.025, 0.22], rot: [0.2, -0.2, 0] };
+  const hipY = 0.12 + coil * 0.5;
+  const torsoY = 0.16 + coil * 0.4;
+  p.hipDrop = -0.05 - breath * 0.015;
+  p.hipRot = [0, hipY, 0];
+  // 낮게 앉을수록 상체가 앞으로 나오고 던지는 팔 쪽으로 살짝 기운다
+  p.torso = [0.08 + breath * 0.03 + sink * 0.34, torsoY, -sink * 0.1];
+  // 몸을 숙이든 감든 시선은 포수에 남는다 (절대 방향을 정하고 목을 역산)
+  p.head = [
+    0.04 - breath * 0.03 - sink * 0.34,
+    clamp(-0.14 + peek * 0.12 - (hipY + torsoY - 0.28), -0.85, 0.85),
+    0,
+  ];
+  // 무릎을 접어 낮아지고, 그만큼 발을 조금 넓게 벌린다
+  p.legL = {
+    hip: [0.05 - sink * 0.3, -0.08, -0.12 - sink * 0.1],
+    knee: 0.24 + sink * 1.0,
+    ankle: 0,
+  };
+  p.legR = {
+    hip: [-0.05 - sink * 0.3, 0.1, 0.14 + sink * 0.1],
+    knee: 0.2 + sink * 1.0,
+    ankle: 0,
+  };
+
+  // 글러브를 몸 앞에 두고 양손을 그 안에 모은다.
+  // 오버스로는 가슴, 서브마린은 허리 앞이다.
+  const gy = 0.14 - sink * 0.14 + breath * 0.025;
+  const gz = 0.22 + sink * 0.05;
+  p.glove = { pos: [0.02, gy, gz], rot: [0.2 + sink * 0.35, -0.2, 0] };
   p.gloveHand = 'R';
-  p.armL = { target: [-0.03, 0.1 + breath * 0.025, 0.2], pole: [-0.7, -0.6, -0.3] };
+  p.armL = { target: [-0.03, gy - 0.04, gz - 0.02], pole: [-0.7, -0.6, -0.3] };
   p.ground = true;
   return p;
 }
@@ -674,46 +888,96 @@ function pitchingSetPose(clock: number): Pose {
  */
 export const RELEASE_AT = 0.56;
 
+/**
+ * 폼별 "셋에서 이미 앉아 있는 정도" (0=꼿꼿이 섬, 1=깊게 앉음).
+ *
+ * 셋포즈와 딜리버리의 **시작 손 위치가 이 값을 함께 봐야** 한다. 안 그러면
+ * 셋에서 허리 앞에 모아 둔 손이 딜리버리 첫 프레임에 가슴으로 순간이동한다
+ * (서브마린에서 24cm였다).
+ */
+const SET_SINK = [0, 0.1, 0.42, 0.8, 0.16];
+/** 토네이도만 앞어깨를 닫고 선다 (곧바로 등을 크게 보이므로) */
+const SET_COIL = [0, 0, 0, 0, 0.3];
+
+/**
+ * 릴리스 순간의 골반·몸통 각도. 아래 트랙의 `rel` 키와 **반드시 같은 값이어야 한다** —
+ * 팔 슬롯을 이 자세에서 역산하기 때문이다.
+ */
+const REL_HIP_Y = -0.42;
+const REL_TORSO_Y = -0.5;
+const REL_TORSO_X = 0.34;
+
 function pitchingPose(player: Player, t: number): Pose {
   const p = basePose();
   const k = clamp(t, 0, 1);
   const form = clamp(player.form, 0, 4);
 
-  // 팔 슬롯: 0=수직(오버스로) ~ 2.4=아래(언더핸드)
-  const slot = [0.22, 0.62, 1.35, 2.1, 0.3][form];
+  /**
+   * 팔 슬롯 — 릴리스에서 팔이 **월드 수직에서 벗어나는 각도**다.
+   * 0=머리 위(오버스로), π/2=수평(사이드암), 그 이상=수평 아래(언더핸드).
+   *
+   * 예전에는 이 값을 몸통 **로컬** 방향으로 그대로 썼는데, 그러면 상체 기울기가
+   * 슬롯을 먹어 버린다. tiltAmt가 슬롯에 비례해 커지고, 기울면 던지는 어깨가 올라가
+   * 팔이 다시 서기 때문이다. 두 효과가 상쇄해서 **화면에서 실제로 측정한 팔 각도가
+   * 오버스로 31.9° / 스리쿼터 35.8°로 붙어 버렸고**(설정값은 23° 차이였다),
+   * 언더핸드는 78.2°로 사이드암 자리에 있었다. 다섯 폼이 사실상 세 개였던 셈이다.
+   *
+   * 지금은 시선(p.head)과 같은 방식이다 — 월드에서 원하는 각도를 먼저 정하고
+   * 몸통 회전을 역산해 로컬 목표로 되돌린다. 기울기를 어떻게 바꾸든 슬롯은 유지된다.
+   */
+  const slot = [0.22, 0.72, 1.42, 1.86, 0.28][form];
   // 토네이도는 와인드업에서 등을 크게 보인다
   const turnAway = form === 4 ? 1.25 : 0.55;
 
   const rel = RELEASE_AT;
 
+  /**
+   * 딜리버리는 **그 폼의 셋포지션에서 출발한다.**
+   *
+   * 셋 -> 릴리스 전환 블렌드는 0.06초뿐이다(터지는 동작이라 일부러 짧다). 그래서
+   * 시작 자세가 셋과 어긋나면 그 차이를 60ms 만에 메우느라 튄다 — 낮게 앉아 있던
+   * 서브마린이 첫 프레임에 벌떡 일어서며 손이 16cm 순간이동했다.
+   * 셋의 자세 편차를 여기에 얹고 레그킥이 시작되는 0.22까지 자연스럽게 푼다.
+   */
+  const sink = SET_SINK[form];
+  const coil = SET_COIL[form];
+  const fromSet = smoothTrack(k, [
+    [0, 1],
+    [0.22, 0],
+    [1, 0],
+  ]);
+
   // ---- 몸통/골반 -------------------------------------------------------
-  const hipY = track(k, [
+  // 여기부터 아래까지 전부 smoothTrack이다. track(구간마다 easeInOut)을 쓰면 키를
+  // 지날 때마다 각속도가 0으로 떨어져서, 몸이 "돌다 멈추다"를 반복하는 스톱모션이 된다.
+  // 골반이 먼저 열리고 몸통이 따라 도는 분리(separation)는 키 시각으로 유지된다.
+  const hipY = smoothTrack(k, [
     [0, 0.1],
     [0.24, turnAway * 0.55],
     [rel - 0.16, 0.06],
-    [rel, -0.42],
+    [rel, REL_HIP_Y],
     [1, -0.72],
   ]);
-  const torsoY = track(k, [
+  const torsoY = smoothTrack(k, [
     [0, 0.16],
     [0.26, turnAway],
     [rel - 0.1, 0.42],
-    [rel, -0.5],
+    [rel, REL_TORSO_Y],
     [0.8, -0.9],
     [1, -0.8],
   ]);
-  const torsoX = track(k, [
+  const torsoX = smoothTrack(k, [
     [0, 0.08],
     [0.26, -0.06],
     [rel - 0.08, 0.1],
-    [rel, 0.34],
+    [rel, REL_TORSO_X],
     [0.85, 0.66],
     [1, 0.58],
   ]);
   // 던지는 팔(-X) 반대쪽으로 몸을 기울여야 팔이 위로 선다.
   // Z 회전이 음수면 상체가 글러브 쪽(+X)으로 넘어간다. 슬롯이 낮을수록 크게 기운다.
   const tiltAmt = -(0.12 + slot * 0.34);
-  const torsoZ = track(k, [
+  const torsoZ = smoothTrack(k, [
     [0, 0],
     [0.3, -0.08],
     [rel, tiltAmt],
@@ -721,23 +985,40 @@ function pitchingPose(player: Player, t: number): Pose {
     [1, tiltAmt * 0.4],
   ]);
 
-  p.hipRot = [0, hipY, 0];
-  p.torso = [torsoX, torsoY, torsoZ];
-  // 시선은 계속 포수를 향한다 (몸이 돌아도 머리만 남는다)
-  p.head = [0.02, clamp(-torsoY * 0.85, -0.8, 0.8), -torsoZ * 0.6];
+  p.hipRot = [0, hipY + coil * 0.5 * fromSet, 0];
+  p.torso = [
+    torsoX + sink * 0.34 * fromSet,
+    torsoY + coil * 0.4 * fromSet,
+    torsoZ - sink * 0.1 * fromSet,
+  ];
+  // 시선은 계속 포수를 향한다 — 몸이 돌아도 머리만 남는다.
+  //
+  // 머리는 몸통 **아래** 골반에도 매달려 있으므로 되돌릴 각도는 둘의 합이다. 예전엔
+  // 몸통만 상쇄해서 릴리스 순간 골반이 돌린 0.42rad이 그대로 남았고, 결과적으로
+  // **공을 놓는 순간 포수가 아니라 1루 쪽을 보고 있었다**(28도). 타격 포즈들이
+  // GAZE_AT_PITCHER로 하는 것과 같은 방식으로 절대 시선을 먼저 정하고 목을 역산한다.
+  // 토네이도(form 4)처럼 등을 크게 보이는 폼은 한계각에 걸려 자연히 고개도 같이 돈다.
+  p.head = [
+    0.02 - sink * 0.34 * fromSet,
+    clamp(-(hipY + torsoY + coil * 0.9 * fromSet) * 0.92, -0.85, 0.85),
+    -torsoZ * 0.6,
+  ];
 
   // ---- 하체 -------------------------------------------------------------
-  // 앞다리(+X 쪽)를 높이 들었다가 홈 쪽으로 내디딘다
-  const lift = track(k, [
+  // 앞다리(+X 쪽)를 높이 들었다가 홈 쪽으로 내디딘다.
+  //
+  // lift는 **한 번 올라갔다 한 번 내려와야** 한다. 예전엔 중간에 0.75로 잡아 두는
+  // 키가 있었고, 거기에 무릎을 펴는 항이 겹쳐서 들린 발이 0.34 → 0.25 → 0.42로
+  // **두 번 차올랐다.** 그게 다리가 덜덜거리는 것처럼 보이던 원인이다.
+  const lift = smoothTrack(k, [
     [0, 0],
-    [0.26, 1],
-    [0.42, 0.75],
+    [0.3, 1],
     [rel, 0],
     [1, 0],
   ]);
-  const strideOut = track(k, [
+  const strideOut = smoothTrack(k, [
     [0, 0],
-    [0.3, 0.1],
+    [0.3, 0.08],
     [rel - 0.04, 1],
     [1, 1],
   ]);
@@ -746,12 +1027,21 @@ function pitchingPose(player: Player, t: number): Pose {
     // 타자 레그킥 -1.38, 포수 -1.4, 점프 -0.6). 여기만 +1.45라서 허벅지가 골반 뒤로
     // 눕고 정강이가 위로 서는, 무릎을 드는 게 아니라 다리를 뒤로 접어 올리는 자세였다.
     // 스트라이드 항(-strideOut)은 원래부터 맞았으므로 리프트 항만 뒤집는다.
-    hip: [lerp(-0.1, -1.35, lift) - strideOut * 0.55, lerp(0.1, 0.35, lift), 0.16],
-    knee: lerp(0.2, 1.75, lift) * (1 - strideOut * 0.72) + 0.12,
+    hip: [
+      lerp(-0.1, -1.35, lift) - strideOut * 0.55 - sink * 0.3 * fromSet,
+      lerp(0.1, 0.35, lift),
+      0.16 + sink * 0.1 * fromSet,
+    ],
+    // 무릎은 **다리를 든 동안만** 접혀 있다. 펴는 일을 strideOut에 맡기면 허벅지가
+    // 아직 최고점일 때 정강이가 펴져서 발끝이 위로 솟는다 — 내딛는 게 아니라 걷어차는
+    // 모양이 된다. lift로 접었다 풀고, 스트라이드는 마지막 마무리만 거든다.
+    // sink 항은 뒷무릎에도 같이 걸려 있다 — **양쪽을 같이 굽혀야** 골반이 실제로
+    // 낮아진다 (한쪽만 굽히면 그 발이 접지 기준에서 빠진다).
+    knee: lerp(0.18, 1.7, lift) * (1 - strideOut * 0.35) + 0.12 + sink * fromSet,
     ankle: lerp(0, 0.2, strideOut),
   };
   // 축발(-X)은 밀어내며 뻗었다가 팔로스루에서 뒤로 떠오른다
-  const drive = track(k, [
+  const drive = smoothTrack(k, [
     [0, 0],
     [0.3, 0.15],
     [rel, 0.85],
@@ -759,13 +1049,13 @@ function pitchingPose(player: Player, t: number): Pose {
     [1, 1],
   ]);
   p.legL = {
-    hip: [lerp(0.06, -0.72, drive), -0.12, -0.14 - drive * 0.18],
-    knee: lerp(0.28, 1.15, drive),
+    hip: [lerp(0.06, -0.72, drive) - sink * 0.3 * fromSet, -0.12, -0.14 - drive * 0.18 - sink * 0.1 * fromSet],
+    knee: lerp(0.28, 1.15, drive) + sink * fromSet,
     ankle: lerp(0, -0.5, drive),
   };
 
   // 골반 높이: 레그킥에서 살짝 올라갔다가 스트라이드에서 크게 내려앉는다
-  p.hipDrop = track(k, [
+  p.hipDrop = smoothTrack(k, [
     [0, -0.04],
     [0.26, 0.03],
     [rel, -0.24],
@@ -773,7 +1063,7 @@ function pitchingPose(player: Player, t: number): Pose {
     [1, -0.12],
   ]);
   // 몸 전체가 홈(+Z) 쪽으로 이동
-  p.root = [0, 0, track(k, [
+  p.root = [0, 0, smoothTrack(k, [
     [0, 0],
     [0.28, -0.06],
     [rel, 0.62],
@@ -781,67 +1071,99 @@ function pitchingPose(player: Player, t: number): Pose {
   ])];
 
   // ---- 팔 ---------------------------------------------------------------
-  const shoulderL = new THREE.Vector3(-SHOULDER_X, SHOULDER_Y, 0);
+  //
+  // 던지는 팔은 **하나의 곡선을 하나의 시간축으로** 지난다.
+  //
+  // 예전에는 구간마다 lerp를 갈아 끼우고 조각마다 easeIn/easeOut을 따로 걸었다.
+  // 그 결과 이음매에서 속도가 매번 0으로 떨어져 손이 3.8 → 0.6 → 5.3 → 0.4 → 10.0 m/s로
+  // **릴리스까지 네 번 멈췄다 튀었고**, 최고 속도가 릴리스가 아니라 팔을 들어 올리는
+  // 중간(11.3 m/s)에 있었다. 던지는 게 아니라 네 토막으로 끊어 옮기는 동작이었다.
+  //
+  // 지금은 경유점을 곡선으로 잇고 k → 곡선 파라미터만 매핑한다. 경유점 사이 시간을
+  // 릴리스로 갈수록 좁혀 두면 속도가 저절로 붙어, 코킹까지 느리게 감다가 릴리스에서
+  // 최고가 되고 팔로스루가 받아 감속하는 순서가 나온다.
+  const shoulderL = _tmpShoulder.set(-SHOULDER_X, SHOULDER_Y, 0);
+  /** 슬롯이 낮을수록 코킹도 낮아진다 (0=오버스로, 1=서브마린) */
+  const cockLow = clamp((slot - 0.7) / 1.2, 0, 1);
+  /**
+   * 낮은 슬롯은 코킹→릴리스 호가 길다(팔을 뒤로 길게 뺐다가 낮게 훑고 나온다).
+   * 시간을 오버스로와 똑같이 주면 그 구간만 24 m/s로 튄다 — 60fps에서 한 프레임에
+   * 팔 길이만큼 간다는 뜻이다. 그만큼 일찍 감기 시작해 속도를 맞춘다.
+   */
+  const early = cockLow * 0.035;
 
-  // 던지는 팔: 글러브 안 -> 아래로 분리 -> 뒤로 코킹 -> 릴리스 -> 몸 앞 가로지르기
-  const cock = new THREE.Vector3(-0.34, 0.34, -0.44); // 어깨 뒤 높은 곳
   // 릴리스 지점은 어깨에서 슬롯 방향으로 팔을 거의 다 편 곳.
   // 앞(+Z) 성분을 크게 주면 팔이 앞으로 눕기만 하고 "위에서 내리꽂는" 느낌이 사라진다.
-  const release = new THREE.Vector3(-Math.sin(slot), Math.cos(slot), 0.22)
+  //
+  // 방향은 **월드(모델 로컬) 기준**으로 세운 뒤, 릴리스 순간의 골반·몸통 회전을
+  // 벗겨서 몸통 로컬로 되돌린다. 이렇게 해야 상체를 아무리 기울여도 팔이 놓이는
+  // 각도가 슬롯 그대로 남는다 (역산 방향: 월드 = 골반 · 몸통 · 로컬).
+  // **이 식을 건드리면 pitching.ts의 releasePoint 표를 다시 재야 한다.**
+  const relRot = _tmpQ
+    .setFromEuler(_tmpE.set(0, REL_HIP_Y, 0, 'XYZ'))
+    .multiply(_tmpQ2.setFromEuler(_tmpE.set(REL_TORSO_X, REL_TORSO_Y, tiltAmt, 'YXZ')))
+    .invert();
+  const release = _tmpRelease
+    .set(-Math.sin(slot), Math.cos(slot), 0.26)
     .normalize()
+    .applyQuaternion(relRot)
     .multiplyScalar(ARM_REACH * 0.97)
     .add(shoulderL);
 
-  let armLTarget: THREE.Vector3;
-  if (k < 0.2) {
-    // 글러브 안에 모여 있다
-    armLTarget = new THREE.Vector3(-0.04, 0.12, 0.2).lerp(
-      new THREE.Vector3(-0.2, -0.14, 0.02),
-      span(k, 0.1, 0.2),
-    );
-  } else if (k < 0.36) {
-    // 아래로 크게 내려 뒤로 뺀다
-    armLTarget = new THREE.Vector3(-0.2, -0.14, 0.02).lerp(
-      new THREE.Vector3(-0.42, -0.16, -0.34),
-      easeInOut(span(k, 0.2, 0.36)),
-    );
-  } else if (k < rel - 0.12) {
-    armLTarget = new THREE.Vector3(-0.42, -0.16, -0.34).lerp(
-      cock,
-      easeOut(span(k, 0.36, rel - 0.12)),
-    );
-  } else if (k < rel) {
-    // 코킹에서 릴리스까지가 0.65m나 되므로 구간이 좁으면 이 한 조각만 다른 구간의
-    // 몇 배로 빨라진다(팔꿈치 27m/s). 폭을 넓혀 팔로스루와 속도가 이어지게 한다.
-    armLTarget = cock.clone().lerp(release, whip(span(k, rel - 0.12, rel)));
-  } else {
-    // 팔로스루: 반대쪽 허리까지 채찍처럼 내려온다.
-    // 목표를 어깨에서 팔 길이 안쪽으로 잡아야 IK가 포화되지 않는다.
-    //
-    // 릴리스에서 곧장 반대쪽 허리로 직선 보간하면 그 선분이 **자기 어깨에서 13cm
-    // 이내를 지나간다** — 팔이 몸 밖으로 호를 그리는 게 아니라 어깨 관절을 뚫고
-    // 들어갔다 나온다. 그래서 그 구간에서 팔꿈치가 150° 넘게 접히고 위치가 튀었다.
-    // 몸 앞·아래의 경유점을 하나 넣어 바깥으로 돌려 내린다.
-    const across = new THREE.Vector3(-0.16, -0.5, 0.85)
-      .normalize()
-      .multiplyScalar(ARM_REACH * 0.92)
-      .add(shoulderL);
+  // 시작점은 **그 폼의 셋포지션 손 위치**다. 서브마린은 허리 앞에서 출발한다.
+  _throwPath
+    .set(0, -0.04, 0.12 - sink * 0.14, 0.2 + sink * 0.05) // 글러브 안에 모은 손
+    .set(1, -0.22, -0.11, 0.05) // 분리 — 손이 갈라져 아래로
+    // 스윙 최저점. 낮은 슬롯은 코킹이 이 근처까지 내려오므로, 최저점을 몸 아래로
+    // 당겨 둘을 떼어 놓는다. 붙여 두면 그 구간에서 손이 0.8m/s로 기어간다.
+    .set(2, -0.44, -0.18 - cockLow * 0.06, -0.3 + cockLow * 0.16) // 팔 스윙 최저점 (엉덩이 뒤)
+    // 코킹도 슬롯을 따라간다. 낮은 슬롯이 오버스로처럼 어깨 위로 팔을 올렸다가
+    // 아래로 던지면, 그 한 구간에서만 손이 20 m/s를 넘고(다른 폼의 두 배다) 무엇보다
+    // 그렇게 던지는 투수가 없다 — 낮은 슬롯은 처음부터 낮은 원을 그린다.
+    // 코킹 — 오버스로는 어깨 위, 서브마린은 옆으로 뻗어 뒤로. 릴리스와 마찬가지로
+    // **어깨에서 방향+거리로** 잡는다. 절대 좌표로 두면 슬롯을 낮출 때 팔 길이를
+    // 넘어서 IK가 포화되고, 궤적이 한 점에서 되꺾여 손이 거기서 멈춘다.
+    // (cockLow=0이면 예전 값 (-0.34, 0.34, -0.44)과 정확히 같다)
+    .setV(
+      3,
+      _tmpCock
+        .set(-0.19 - cockLow * 0.43, 0.296 - cockLow * 0.58, -0.931 + cockLow * 0.2)
+        .normalize()
+        .multiplyScalar(ARM_REACH * 0.86)
+        .add(shoulderL),
+    )
+    .setV(4, release)
+    // 팔로스루는 반대쪽 허리까지 채찍처럼 내려온다. 릴리스에서 곧장 허리로 이으면
+    // 그 선이 **자기 어깨에서 13cm 이내를 지나가** 팔이 어깨 관절을 뚫는다.
+    // 몸 앞·아래의 경유점으로 바깥으로 돌려 내린다.
+    .setV(5, _tmpAcross.set(-0.16, -0.5, 0.85).normalize().multiplyScalar(ARM_REACH * 0.92).add(shoulderL))
     // 끝점은 반대쪽 허리 **앞**이다. Z가 작으면 손이 배 옆구리에 파묻힌다.
-    const finish = new THREE.Vector3(0.78, -0.6, 0.7)
-      .normalize()
-      .multiplyScalar(ARM_REACH * 0.9)
-      .add(shoulderL);
-    const mid = rel + 0.2;
-    armLTarget =
-      k < mid
-        ? release.clone().lerp(across, easeOut(span(k, rel, mid)))
-        : across.clone().lerp(finish, easeInOut(span(k, mid, 0.92)));
-  }
+    .setV(6, _tmpFinish.set(0.78, -0.6, 0.7).normalize().multiplyScalar(ARM_REACH * 0.9).add(shoulderL));
+
+  // 경유점 i는 u = i/6에 있다. 코킹(3)까지는 넉넉히 주고 릴리스(4)까지를 가장 짧게
+  // 잡아 그 구간에서만 속도가 치솟게 한다 (코킹→릴리스가 80ms, 실제 투수의
+  // 가속 구간과 같은 정도다).
+  //
+  // 마지막 두 키가 둘 다 u=1인 건 오타가 아니다 — 값이 같은 구간에서는 접선이 0이
+  // 되므로, 팔이 끝점에 **감속하며 안착한다.** 이게 없으면 손이 1.6 m/s로 움직이던
+  // 채로 k=1에서 딱 멈춰서 마지막에 한 번 튄다.
+  const armLTarget = _throwPath.at(
+    smoothTrack(k, [
+      [0, 0],
+      [0.18, 1 / 6],
+      [0.35 - early * 0.7, 2 / 6],
+      [0.48 - early, 3 / 6],
+      [rel, 4 / 6],
+      [0.75, 5 / 6],
+      [0.92, 1],
+      [1, 1],
+    ]),
+  );
   p.armL = {
     target: [armLTarget.x, armLTarget.y, armLTarget.z],
     // 릴리스 전후로 팔꿈치가 서는 평면이 바뀐다. 예전엔 이걸 삼항 연산자로 **한
     // 프레임에** 뒤집어서 팔꿈치가 25cm씩 순간이동했다. 방향끼리 섞어 넘어간다.
-    pole: mixDir(POLE_SLOT_DOWN, POLE_SLOT_UP, track(k, [
+    pole: mixDir(POLE_SLOT_DOWN, POLE_SLOT_UP, smoothTrack(k, [
       [0, 0],
       [rel - 0.18, 0],
       [rel - 0.02, 1],
@@ -850,17 +1172,25 @@ function pitchingPose(player: Player, t: number): Pose {
     ])),
   };
 
-  // 글러브 팔: 타깃을 향해 뻗었다가 릴리스에서 가슴으로 당긴다
-  const gloveOut = new THREE.Vector3(0.16, 0.26, 0.46);
-  const gloveTuck = new THREE.Vector3(0.3, 0.02, 0.06);
-  let gl: THREE.Vector3;
-  if (k < 0.22) {
-    gl = new THREE.Vector3(0.02, 0.14, 0.22).lerp(gloveOut, easeOut(span(k, 0.12, 0.22)));
-  } else if (k < rel) {
-    gl = gloveOut.clone();
-  } else {
-    gl = gloveOut.clone().lerp(gloveTuck, easeOut(span(k, rel, rel + 0.22)));
-  }
+  // 글러브 팔도 같은 방식이다. 예전엔 k=0.22부터 릴리스까지 **한 자리에 굳어 있었다**
+  // (전체의 3분의 1인 0.3초). 실제로는 타깃을 향해 뻗었다가 릴리스에 맞춰 가슴으로
+  // 세게 당기는 이 팔이 회전을 만든다 — 여기가 멈춰 있으면 상체가 혼자 도는 것처럼 보인다.
+  const gl = _glovePath
+    .set(0, 0.02, 0.14 - sink * 0.14, 0.22 + sink * 0.05) // 셋에서 모아 둔 자리
+    .set(1, 0.22, 0.29, 0.35) // 레그킥에서 함께 들어 올린다
+    .set(2, 0.17, 0.23, 0.5) // 스트라이드 — 타깃 쪽으로 뻗는다
+    .set(3, 0.27, 0.07, 0.2) // 릴리스에 맞춰 당기기 시작
+    .set(4, 0.3, -0.02, 0.04) // 옆구리에 붙는다
+    .at(
+      smoothTrack(k, [
+        [0, 0],
+        [0.26, 0.25],
+        [0.48, 0.5],
+        [rel + 0.06, 0.75],
+        [0.86, 1],
+        [1, 1],
+      ]),
+    );
   p.glove = {
     pos: [gl.x, gl.y, gl.z],
     rot: [0.1, -0.5 + k * 0.5, 0],
@@ -1532,7 +1862,9 @@ export function buildPose(
     case 'BATTING_BUNT':
       return lefty ? mirrorPose(buntPose(player, t)) : buntPose(player, t);
     case 'PITCHING_SET':
-      return player.throws === 'L' ? mirrorPose(pitchingSetPose(clock)) : pitchingSetPose(clock);
+      return player.throws === 'L'
+        ? mirrorPose(pitchingSetPose(player, clock))
+        : pitchingSetPose(player, clock);
     case 'PITCHING_RELEASE':
       return player.throws === 'L'
         ? mirrorPose(pitchingPose(player, t))

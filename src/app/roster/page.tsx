@@ -1480,7 +1480,8 @@ function GearTab({
   onChange: (p: Player) => void;
 }) {
   const g = player.gear;
-  const [mode, setMode] = useState<PreviewMode>(player.kind === 'PITCHER' ? 'PITCH' : 'BAT');
+  const isP = player.kind === 'PITCHER';
+  const [mode, setMode] = useState<PreviewMode>(isP ? 'PITCH' : 'BAT');
   const [hover, setHover] = useState<HoverPatch | null>(null);
 
   // 색상은 즉시 미리보기에 반영하고 저장만 미룬다
@@ -1540,7 +1541,15 @@ function GearTab({
     body: hover?.body ?? player.body,
     gear: { ...g, batColor: colors.bat, gloveColor: colors.glove, ...hover?.gear },
   };
-  const shownMode = hover?.mode ?? mode;
+  // 지명타자를 늘 쓰므로 투수는 타석에 서지 않고 타자는 마운드에 오르지 않는다.
+  // (batting.ts는 stance·배트 보정만, pitching.ts는 form만 읽는다.) 그래서 상대 역할의
+  // 항목 — 타자의 피칭 자세, 투수의 타격 자세와 배트 — 은 아예 감춘다. 남는 게 없어진
+  // 미리보기 모드도 같이 뺀다. 투수는 타격, 타자는 피칭이 빈 탭이 된다.
+  const deadMode: PreviewMode = isP ? 'BAT' : 'PITCH';
+  const modes = PREVIEW_MODES.filter((m) => m.id !== deadMode);
+  // GearTab은 선수를 갈아타도 다시 마운트되지 않는다 — 투수를 보다 타자로 넘어오면
+  // mode에 'PITCH'가 그대로 남아 탭이 하나도 켜지지 않는다. 목록 밖 모드는 되돌린다.
+  const shownMode = hover?.mode ?? (mode === deadMode ? modes[0].id : mode);
 
   const uniform = {
     primary: team.primaryColor,
@@ -1603,90 +1612,98 @@ function GearTab({
           </section>
         )}
 
-        <section className="panel p-5">
-          <h3 className="mb-3 font-bold">타격 자세</h3>
-          <div className="grid grid-cols-3 gap-2">
-            {STANCE_NAMES.map((n, i) => (
-              <button
-                key={n}
-                title={STANCE_DESCS[i]}
-                onMouseEnter={() => setHover({ stance: i as BattingStance, mode: 'BAT' })}
-                onMouseLeave={clear}
-                onClick={() => {
-                  setMode('BAT');
-                  commit({ stance: i as BattingStance });
-                }}
-                className={`${pick(player.stance === i)} px-2 py-2 text-center text-xs font-semibold`}
-              >
-                {n}
-              </button>
-            ))}
-          </div>
-          <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
-            {STANCE_DESCS[shown.stance]} · 자세에 따라 컨택·파워·선구안이 소폭 달라집니다. (레그킥:
-            파워↑ 컨택↓ / 크라우칭: 컨택·선구안↑ 파워↓)
-          </p>
-        </section>
+        {!isP && (
+          <section className="panel p-5">
+            <h3 className="mb-3 font-bold">타격 자세</h3>
+            <div className="grid grid-cols-3 gap-2">
+              {STANCE_NAMES.map((n, i) => (
+                <button
+                  key={n}
+                  title={STANCE_DESCS[i]}
+                  onMouseEnter={() => setHover({ stance: i as BattingStance, mode: 'BAT' })}
+                  onMouseLeave={clear}
+                  onClick={() => {
+                    setMode('BAT');
+                    commit({ stance: i as BattingStance });
+                  }}
+                  className={`${pick(player.stance === i)} px-2 py-2 text-center text-xs font-semibold`}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+              {STANCE_DESCS[shown.stance]} · 자세에 따라 컨택·파워·선구안이 소폭 달라집니다. (레그킥:
+              파워↑ 컨택↓ / 크라우칭: 컨택·선구안↑ 파워↓)
+            </p>
+          </section>
+        )}
 
-        <section className="panel p-5">
-          <h3 className="mb-3 font-bold">피칭 자세</h3>
-          <div className="grid grid-cols-3 gap-2">
-            {FORM_NAMES.map((n, i) => (
-              <button
-                key={n}
-                title={FORM_DESCS[i]}
-                onMouseEnter={() => setHover({ form: i as PitchingForm, mode: 'PITCH' })}
-                onMouseLeave={clear}
-                onClick={() => {
-                  setMode('PITCH');
-                  commit({ form: i as PitchingForm });
-                }}
-                className={`${pick(player.form === i)} px-2 py-2 text-center text-xs font-semibold`}
-              >
-                {n}
-              </button>
-            ))}
-          </div>
-          <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
-            {FORM_DESCS[shown.form]} · 릴리스 포인트가 달라져 타자가 보는 궤적이 바뀝니다.
-          </p>
-        </section>
+        {isP && (
+          <section className="panel p-5">
+            <h3 className="mb-3 font-bold">피칭 자세</h3>
+            <div className="grid grid-cols-3 gap-2">
+              {FORM_NAMES.map((n, i) => (
+                <button
+                  key={n}
+                  title={FORM_DESCS[i]}
+                  onMouseEnter={() => setHover({ form: i as PitchingForm, mode: 'PITCH' })}
+                  onMouseLeave={clear}
+                  onClick={() => {
+                    setMode('PITCH');
+                    commit({ form: i as PitchingForm });
+                  }}
+                  className={`${pick(player.form === i)} px-2 py-2 text-center text-xs font-semibold`}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+              {FORM_DESCS[shown.form]} · 릴리스 포인트가 달라져 타자가 보는 궤적이 바뀝니다.
+            </p>
+          </section>
+        )}
 
-        <section className="panel p-5">
-          <h3 className="mb-3 font-bold">배트</h3>
-          <div className="space-y-2">
-            {BAT_DEFS.map((b) => (
-              <button
-                key={b.id}
-                onMouseEnter={() => setHover({ gear: { bat: b.id }, mode: 'BAT' })}
-                onMouseLeave={clear}
-                onClick={() => {
-                  setMode('BAT');
-                  commit({}, { bat: b.id });
-                }}
-                className={`${pick(g.bat === b.id)} flex w-full items-center justify-between px-3 py-2 text-sm`}
-              >
-                <span className="font-semibold">{b.ko}</span>
-                <span className="text-xs text-slate-400">
-                  컨택 {b.contactMod >= 0 ? '+' : ''}
-                  {b.contactMod} · 파워 {b.powerMod >= 0 ? '+' : ''}
-                  {b.powerMod}
-                </span>
-              </button>
-            ))}
-          </div>
-          <div className="mt-3">
-            <label className="field-label">배트 색상</label>
-            <input
-              type="color"
-              value={colors.bat}
-              onChange={(e) => setColor('bat', e.target.value)}
-              className="h-10 w-full cursor-pointer rounded-lg border border-white/10 bg-transparent"
-            />
-          </div>
-        </section>
+        {!isP && (
+          <section className="panel p-5">
+            <h3 className="mb-3 font-bold">배트</h3>
+            <div className="space-y-2">
+              {BAT_DEFS.map((b) => (
+                <button
+                  key={b.id}
+                  onMouseEnter={() => setHover({ gear: { bat: b.id }, mode: 'BAT' })}
+                  onMouseLeave={clear}
+                  onClick={() => {
+                    setMode('BAT');
+                    commit({}, { bat: b.id });
+                  }}
+                  className={`${pick(g.bat === b.id)} flex w-full items-center justify-between px-3 py-2 text-sm`}
+                >
+                  <span className="font-semibold">{b.ko}</span>
+                  <span className="text-xs text-slate-400">
+                    컨택 {b.contactMod >= 0 ? '+' : ''}
+                    {b.contactMod} · 파워 {b.powerMod >= 0 ? '+' : ''}
+                    {b.powerMod}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div className="mt-3">
+              <label className="field-label">배트 색상</label>
+              <input
+                type="color"
+                value={colors.bat}
+                onChange={(e) => setColor('bat', e.target.value)}
+                className="h-10 w-full cursor-pointer rounded-lg border border-white/10 bg-transparent"
+              />
+            </div>
+          </section>
+        )}
 
-        <section className="panel p-5">
+        {/* 반 칸짜리 패널이 타자는 셋(자세·배트·글러브), 투수는 둘(자세·글러브)이다.
+            홀수인 타자 쪽에서 글러브가 마지막 줄에 혼자 남아 오른쪽이 비므로 한 줄을 채운다. */}
+        <section className={`panel p-5 ${isP ? '' : 'sm:col-span-2'}`}>
           <h3 className="mb-3 font-bold">글러브</h3>
           <div className="space-y-2">
             {GLOVE_DEFS.map((b) => (
@@ -1741,7 +1758,7 @@ function GearTab({
           <div className="mb-3 flex items-center justify-between gap-2">
             <h3 className="font-bold">미리보기</h3>
             <div className="flex gap-0.5 rounded-lg bg-white/5 p-0.5">
-              {PREVIEW_MODES.map((m) => (
+              {modes.map((m) => (
                 <button
                   key={m.id}
                   onClick={() => setMode(m.id)}
@@ -1763,17 +1780,22 @@ function GearTab({
             {shown.kind === 'BATTER' && (
               <PreviewRow label="체형" value={BODY_BY_ID[shown.body ?? 'NORMAL'].ko} />
             )}
-            <PreviewRow label="타격 자세" value={STANCE_NAMES[shown.stance]} />
-            <PreviewRow label="피칭 자세" value={FORM_NAMES[shown.form]} />
-            <PreviewRow label="배트" value={bat.ko} swatch={shown.gear.batColor} />
+            {!isP && <PreviewRow label="타격 자세" value={STANCE_NAMES[shown.stance]} />}
+            {isP && <PreviewRow label="피칭 자세" value={FORM_NAMES[shown.form]} />}
+            {!isP && <PreviewRow label="배트" value={bat.ko} swatch={shown.gear.batColor} />}
             <PreviewRow label="글러브" value={glove.ko} swatch={shown.gear.gloveColor} />
             <PreviewRow label="액세서리" value={accessory.ko} />
           </dl>
 
-          <div className="mt-3 grid grid-cols-4 gap-1.5 text-center">
-            <Chip label="컨택" v={bat.contactMod} />
-            <Chip label="파워" v={bat.powerMod + bodyMod(shown).power} />
-            <Chip label="스피드" v={bodyMod(shown).speed} />
+          {/* 투수에게 남는 보정은 글러브의 수비뿐이다 — 컨택·파워·스피드는 배트와 체형에서만 온다 */}
+          <div className={`mt-3 grid gap-1.5 text-center ${isP ? 'grid-cols-1' : 'grid-cols-4'}`}>
+            {!isP && (
+              <>
+                <Chip label="컨택" v={bat.contactMod} />
+                <Chip label="파워" v={bat.powerMod + bodyMod(shown).power} />
+                <Chip label="스피드" v={bodyMod(shown).speed} />
+              </>
+            )}
             <Chip label="수비" v={glove.fieldMod} />
           </div>
 
